@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
@@ -35,12 +35,19 @@ export default function App() {
   const updateMarquee = useSceneStore((s) => s.updateMarquee);
   const endMarquee = useSceneStore((s) => s.endMarquee);
   const marquee = useSceneStore((s) => s.ui.marquee);
+  const undo = useSceneStore((s) => s.undo);
+  const redo = useSceneStore((s) => s.redo);
+  const toSceneFileV1 = useSceneStore((s) => s.toSceneFileV1);
+  const importSceneFileV1 = useSceneStore((s) => s.importSceneFileV1);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const marqueeFactorRef = useRef<number>(1);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -49,9 +56,23 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
-  // Gestion du nudge clavier + Delete + Rotation + Duplication + Escape + Ctrl+A
+  // Gestion du nudge clavier + Delete + Rotation + Duplication + Escape + Ctrl+A + Undo/Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+Z → Undo
+      if (e.key === 'z' && e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+
+      // Ctrl+Y or Ctrl+Shift+Z → Redo
+      if ((e.key === 'y' && e.ctrlKey) || (e.key === 'z' && e.ctrlKey && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+
       // Escape → Clear selection
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -121,7 +142,58 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo]);
+
+  // Export JSON
+  const handleExport = () => {
+    const data = toSceneFileV1();
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    // Generate filename with timestamp
+    const now = new Date();
+    const timestamp = now
+      .toISOString()
+      .replace(/T/, '-')
+      .replace(/:/g, '')
+      .slice(0, 17); // YYYYMMDD-HHMMSS
+    const filename = `scene-v1-${timestamp}.json`;
+
+    // Create temp anchor and trigger download
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+
+    // Cleanup
+    URL.revokeObjectURL(url);
+  };
+
+  // Import JSON
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImportChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      importSceneFileV1(data);
+      setImportError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Format invalide ou erreur de parsing JSON';
+      setImportError(message);
+    }
+
+    // Reset input so the same file can be imported again
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
@@ -250,6 +322,21 @@ export default function App() {
                     Set 90°
                   </Button>
                 </div>
+                <div className="flex gap-2">
+                  <Button onClick={handleExport} size="sm" variant="outline" aria-label="export-json">
+                    Exporter JSON
+                  </Button>
+                  <Button onClick={handleImportClick} size="sm" variant="outline" aria-label="import-json">
+                    Importer JSON
+                  </Button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/json"
+                    onChange={handleImportChange}
+                    className="hidden"
+                  />
+                </div>
                 <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
                   <input
                     type="checkbox"
@@ -315,6 +402,18 @@ export default function App() {
                     <div className="text-yellow-300">... et {orientation.warnings.length - 3} de plus</div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {importError && (
+              <div
+                className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
+                role="status"
+                aria-live="polite"
+                data-testid="warn-banner"
+              >
+                <div className="font-bold">WARN — Import invalide</div>
+                <div className="mt-1 text-xs">{importError}</div>
               </div>
             )}
           </div>
