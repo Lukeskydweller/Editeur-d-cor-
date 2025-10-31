@@ -45,6 +45,7 @@ type SceneActions = {
   cancelDrag: () => void;
   addRectAtCenter: (w: Milli, h: Milli) => void;
   deleteSelected: () => void;
+  setPieceMaterial: (pieceId: ID, materialId: ID) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -341,5 +342,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       // Désélectionner
       draft.ui.selectedId = undefined;
+    })),
+
+  setPieceMaterial: (pieceId, materialId) =>
+    set(produce((draft: SceneState) => {
+      const p = draft.scene.pieces[pieceId];
+      if (p && draft.scene.materials[materialId]) {
+        p.materialId = materialId;
+      }
     })),
 }));

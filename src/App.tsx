@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
 import { validateNoOverlap, validateInsideScene } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
+import { Sidebar } from '@/components/Sidebar';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -113,23 +114,27 @@ export default function App() {
     (insideScene.ok ? 0 : insideScene.outside.length);
 
   return (
-    <main className="min-h-dvh flex items-center justify-center p-6" tabIndex={0}>
-      <Card className="w-full max-w-5xl">
-        <CardContent className="p-6 space-y-4">
-          <header className="flex items-baseline justify-between">
-            <h1 className="text-2xl font-bold">Éditeur — Mini smoke</h1>
-            <div className="text-sm text-muted-foreground">
-              {Object.keys(scene.pieces).length} pièce(s) • {scene.size.w}×{scene.size.h} mm
-            </div>
-          </header>
+    <main className="min-h-dvh p-6" tabIndex={0}>
+      <div className="mx-auto max-w-7xl grid grid-cols-1 md:grid-cols-[18rem_1fr] gap-6 items-start">
+        <Sidebar />
 
-          {/* Toolbar */}
-          <div className="flex gap-2">
-            <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
-            <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
-              Supprimer
-            </Button>
-          </div>
+        <section>
+          <Card className="w-full">
+            <CardContent className="p-6 space-y-4">
+              <header className="flex items-baseline justify-between">
+                <h1 className="text-2xl font-bold">Éditeur — Mini smoke</h1>
+                <div className="text-sm text-muted-foreground">
+                  {Object.keys(scene.pieces).length} pièce(s) • {scene.size.w}×{scene.size.h} mm
+                </div>
+              </header>
+
+              {/* Toolbar */}
+              <div className="flex gap-2">
+                <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
+                <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
+                  Supprimer
+                </Button>
+              </div>
 
           {/* Barre de statut des règles */}
           <div
@@ -255,9 +260,11 @@ export default function App() {
                 strokeWidth="1"
               />
             </svg>
-          </div>
-        </CardContent>
-      </Card>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+      </div>
     </main>
   );
 }
