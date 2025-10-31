@@ -644,10 +644,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           const off = offsets[sid] ?? { dx: 0, dy: 0 };
           const sp = draft.scene.pieces[sid];
           if (!sp) continue;
-          testScene.pieces[sid] = { ...sp, position: { x: finalX + off.dx, y: finalY + off.dy } };
+          // Convert AABB position to piece.position for validation
+          const aabbPos = { x: finalX + off.dx, y: finalY + off.dy };
+          const piecePos = aabbToPiecePosition(aabbPos.x, aabbPos.y, sp);
+          testScene.pieces[sid] = { ...sp, position: piecePos };
         }
       } else {
-        testScene.pieces[dragging.id] = { ...piece, position: { x: finalX, y: finalY } };
+        // Convert AABB position to piece.position for validation
+        const piecePos = aabbToPiecePosition(finalX, finalY, piece);
+        testScene.pieces[dragging.id] = { ...piece, position: piecePos };
       }
 
       const validation = validateNoOverlap(testScene);
