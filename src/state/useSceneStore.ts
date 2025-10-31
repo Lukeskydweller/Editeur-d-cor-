@@ -14,6 +14,7 @@ import {
   type DraftMeta,
 } from '@/lib/drafts';
 import { applyHandle, type ResizeHandle } from '@/lib/ui/resize';
+import { pieceBBox } from '@/lib/geom';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -53,7 +54,7 @@ function groupBBox(scene: SceneDraft, ids: ID[]) {
   const rects = ids
     .map((id) => scene.pieces[id])
     .filter(Boolean)
-    .map((p) => ({ x: p.position.x, y: p.position.y, w: p.size.w, h: p.size.h }));
+    .map((p) => pieceBBox(p)); // Use rotation-aware AABB
   if (rects.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
   const minX = Math.min(...rects.map((r) => r.x));
   const minY = Math.min(...rects.map((r) => r.y));
@@ -428,9 +429,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       const intersected = Object.values(draft.scene.pieces)
         .filter((p) => {
-          const pRight = p.position.x + p.size.w;
-          const pBottom = p.position.y + p.size.h;
-          return !(pRight < minX || p.position.x > maxX || pBottom < minY || p.position.y > minY);
+          const bbox = pieceBBox(p); // Use rotation-aware AABB
+          const pRight = bbox.x + bbox.w;
+          const pBottom = bbox.y + bbox.h;
+          return !(pRight < minX || bbox.x > maxX || pBottom < minY || bbox.y > minY);
         })
         .map((p) => p.id);
 
@@ -560,11 +562,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             const off = offsets[sid] ?? { dx: 0, dy: 0 };
             const sp = draft.scene.pieces[sid];
             if (!sp) return null;
+            const bbox = pieceBBox(sp); // Use rotation-aware AABB
             return {
               x: candidateX + off.dx,
               y: candidateY + off.dy,
-              w: sp.size.w,
-              h: sp.size.h,
+              w: bbox.w,
+              h: bbox.h,
             };
           })
           .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
@@ -598,8 +601,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         }
       } else {
         // Drag simple : clamp + snap entre pièces
-        const clamped = clampToScene(candidateX, candidateY, piece.size.w, piece.size.h, draft.scene.size.w, draft.scene.size.h);
-        const candidateRect = { x: clamped.x, y: clamped.y, w: piece.size.w, h: piece.size.h };
+        const bbox = pieceBBox(piece); // Use rotation-aware AABB
+        const clamped = clampToScene(candidateX, candidateY, bbox.w, bbox.h, draft.scene.size.w, draft.scene.size.h);
+        const candidateRect = { x: clamped.x, y: clamped.y, w: bbox.w, h: bbox.h };
         const snapResult = snapToPieces(draft.scene, candidateRect, 5, dragging.id);
         draft.ui.guides = snapResult.guides;
         finalX = snapResult.x;
@@ -863,11 +867,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         if (!originalPiece) return;
 
         const newId = genId('piece');
+        const bbox = pieceBBox(originalPiece); // Use rotation-aware AABB
         const clamped = clampToScene(
           originalPiece.position.x + offsetX,
           originalPiece.position.y + offsetY,
-          originalPiece.size.w,
-          originalPiece.size.h,
+          bbox.w,
+          bbox.h,
           draft.scene.size.w,
           draft.scene.size.h,
         );

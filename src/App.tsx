@@ -7,6 +7,7 @@ import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
 import { ResizeHandlesOverlay } from '@/components/ResizeHandlesOverlay';
 import type { ResizeHandle } from '@/lib/ui/resize';
+import { pieceBBox } from '@/lib/geom';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -574,7 +575,7 @@ export default function App() {
                 const piece = scene.pieces[dragging.id];
                 if (!piece || piece.kind !== 'rect') return null;
 
-                const { w, h } = piece.size;
+                const bbox = pieceBBox(piece); // Use rotation-aware AABB
                 const { x, y, valid } = dragging.candidate;
 
                 return (
@@ -587,8 +588,8 @@ export default function App() {
                     <rect
                       x="0"
                       y="0"
-                      width={w}
-                      height={h}
+                      width={bbox.w}
+                      height={bbox.h}
                       rx="6"
                       ry="6"
                       fill={valid ? '#60a5fa' : '#ef4444'}

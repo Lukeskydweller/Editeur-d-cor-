@@ -1,12 +1,31 @@
 import type { BBox, Piece, Milli } from '@/types/scene';
 
 /**
- * Calcule la bounding box (AABB) d'une pièce.
- * V1: rotation ignorée, on prend la bbox axis-aligned.
+ * Calcule la bounding box (AABB) d'une pièce, rotation-aware.
+ * - Si rotation est 0° ou 180°: AABB = {x, y, w, h} inchangée
+ * - Si rotation est 90° ou 270°: échanger w/h autour du centre visuel
  */
 export function pieceBBox(piece: Piece): BBox {
   const { x, y } = piece.position;
   const { w, h } = piece.size;
+
+  // Normalize rotation to 0-359
+  const r = ((piece.rotationDeg ?? 0) % 360 + 360) % 360;
+
+  // If rotated 90° or 270°, swap width/height around center
+  if (r === 90 || r === 270) {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+
+    return {
+      x: cx - h / 2,
+      y: cy - w / 2,
+      w: h,
+      h: w,
+    };
+  }
+
+  // For 0° or 180°, AABB is unchanged
   return { x, y, w, h };
 }
 

@@ -1,17 +1,12 @@
 import type { SceneDraft, ID } from '@/types/scene';
+import { pieceAABB, edgesOfRect } from '@/lib/geom/aabb';
 
 export type SnapGuide = { kind: 'v'; x: number } | { kind: 'h'; y: number };
 
 export type RectMM = { x: number; y: number; w: number; h: number };
 
 export function rectEdges(r: RectMM) {
-  const left = r.x;
-  const right = r.x + r.w;
-  const top = r.y;
-  const bottom = r.y + r.h;
-  const cx = (left + right) / 2;
-  const cy = (top + bottom) / 2;
-  return { left, right, top, bottom, cx, cy };
+  return edgesOfRect(r);
 }
 
 /**
@@ -30,10 +25,10 @@ export function snapToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // Explore all other pieces
+  // Explore all other pieces (using rotation-aware AABB)
   for (const p of Object.values(scene.pieces)) {
     if (p.id === excludeId) continue;
-    const r = { x: p.position.x, y: p.position.y, w: p.size.w, h: p.size.h };
+    const r = pieceAABB(p); // Use rotated AABB instead of raw position/size
     const e = rectEdges(r);
 
     // vertical alignments (x axis): left, centerX, right (+ cross-alignments)
@@ -108,10 +103,10 @@ export function snapGroupToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // Explore all other pieces
+  // Explore all other pieces (using rotation-aware AABB)
   for (const p of Object.values(scene.pieces)) {
     if (excludeIds.includes(p.id)) continue;
-    const r = { x: p.position.x, y: p.position.y, w: p.size.w, h: p.size.h };
+    const r = pieceAABB(p); // Use rotated AABB instead of raw position/size
     const e = rectEdges(r);
 
     // vertical alignments (x axis): left, centerX, right (+ cross-alignments)
