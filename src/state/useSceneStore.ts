@@ -470,14 +470,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         finalDy = snappedY - bbox.y;
       }
 
-      // For each piece, compute new AABB position, then convert to piece.position
-      // This ensures rotation-aware nudge
+      // For each piece, compute new AABB position with final clamp, then convert to piece.position
+      // This ensures rotation-aware nudge and prevents escaping scene after snaps
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
       for (const id of selectedIds) {
         const p = draft.scene.pieces[id];
         if (!p) continue;
         const pBBox = pieceBBox(p);
-        const newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy };
+        let newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy, w: pBBox.w, h: pBBox.h };
+        // Clamp final pour garantir que la pièce reste dans la scène
+        newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
         const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
         testScene.pieces[id] = { ...p, position: newPiecePos };
       }
@@ -492,7 +494,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             const p = draft.scene.pieces[id];
             if (!p) continue;
             const pBBox = pieceBBox(p);
-            const newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy };
+            let newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy, w: pBBox.w, h: pBBox.h };
+            // Clamp final pour garantir que la pièce reste dans la scène
+            newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
             const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
             p.position.x = newPiecePos.x;
             p.position.y = newPiecePos.y;
@@ -623,6 +627,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         finalX = snapTo10mm(finalX);
         finalY = snapTo10mm(finalY);
       }
+
+      // Clamp final après tous les snaps (garantit qu'on ne dépasse jamais la scène)
+      const bbox = pieceBBox(piece);
+      const finalAABB = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+      const finalClamped = clampAABBToScene(finalAABB, draft.scene.size.w, draft.scene.size.h);
+      finalX = finalClamped.x;
+      finalY = finalClamped.y;
 
       // Simuler et valider
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
