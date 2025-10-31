@@ -19,6 +19,11 @@ type SceneState = {
   ui: {
     selectedId?: ID;
     flashInvalidAt?: number;
+    dragging?: {
+      id: ID;
+      start: { x: number; y: number };
+      candidate?: { x: number; y: number; valid: boolean };
+    };
   };
 };
 
@@ -34,6 +39,10 @@ type SceneActions = {
   initSceneWithDefaults: (w: Milli, h: Milli) => void;
   selectPiece: (id: ID | undefined) => void;
   nudgeSelected: (dx: Milli, dy: Milli) => void;
+  beginDrag: (id: ID) => void;
+  updateDrag: (dx: number, dy: number) => void;
+  endDrag: () => void;
+  cancelDrag: () => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -50,6 +59,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   ui: {
     selectedId: undefined,
     flashInvalidAt: undefined,
+    dragging: undefined,
   },
 
   // Actions
@@ -183,5 +193,79 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         piece.position.x = clamped.x;
         piece.position.y = clamped.y;
       }
+    })),
+
+  beginDrag: (id) =>
+    set(produce((draft: SceneState) => {
+      const piece = draft.scene.pieces[id];
+      if (!piece) return;
+
+      draft.ui.selectedId = id;
+      draft.ui.dragging = {
+        id,
+        start: { x: piece.position.x, y: piece.position.y },
+        candidate: undefined,
+      };
+    })),
+
+  updateDrag: (dx, dy) =>
+    set(produce((draft: SceneState) => {
+      const dragging = draft.ui.dragging;
+      if (!dragging) return;
+
+      const piece = draft.scene.pieces[dragging.id];
+      if (!piece) return;
+
+      // Calculer position candidate
+      const candidateX = dragging.start.x + dx;
+      const candidateY = dragging.start.y + dy;
+
+      // Clamper dans la scène
+      const clamped = clampToScene(
+        candidateX,
+        candidateY,
+        piece.size.w,
+        piece.size.h,
+        draft.scene.size.w,
+        draft.scene.size.h,
+      );
+
+      // Simuler le déplacement et vérifier overlap
+      const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
+      testScene.pieces[dragging.id] = { ...piece, position: { x: clamped.x, y: clamped.y } };
+
+      const validation = validateNoOverlap(testScene);
+
+      dragging.candidate = {
+        x: clamped.x,
+        y: clamped.y,
+        valid: validation.ok,
+      };
+    })),
+
+  endDrag: () =>
+    set(produce((draft: SceneState) => {
+      const dragging = draft.ui.dragging;
+      if (!dragging || !dragging.candidate) {
+        draft.ui.dragging = undefined;
+        return;
+      }
+
+      // Commit si valide
+      if (dragging.candidate.valid) {
+        const piece = draft.scene.pieces[dragging.id];
+        if (piece) {
+          piece.position.x = dragging.candidate.x;
+          piece.position.y = dragging.candidate.y;
+        }
+      }
+      // Sinon revert implicite (ne pas modifier la position)
+
+      draft.ui.dragging = undefined;
+    })),
+
+  cancelDrag: () =>
+    set(produce((draft: SceneState) => {
+      draft.ui.dragging = undefined;
     })),
 }));
