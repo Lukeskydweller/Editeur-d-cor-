@@ -87,19 +87,19 @@ test('set 0° and 90° buttons work', () => {
 
   render(<App />);
 
-  const set0Button = screen.getByRole('button', { name: /Set 0°/i });
-  const set90Button = screen.getByRole('button', { name: /Set 90°/i });
+  const set0Button = screen.getByRole('button', { name: /Rotation 0°/i });
+  const set90Button = screen.getByRole('button', { name: /Rotation 90°/i });
 
   // Manipuler la rotation
   rotateSelected(90);
   rotateSelected(90);
   expect(useSceneStore.getState().scene.pieces[pieceId].rotationDeg).toBe(180);
 
-  // Set 90° → 90
+  // Rotation 90° → 90
   fireEvent.click(set90Button);
   expect(useSceneStore.getState().scene.pieces[pieceId].rotationDeg).toBe(90);
 
-  // Set 0° → 0
+  // Rotation 0° → 0
   fireEvent.click(set0Button);
   expect(useSceneStore.getState().scene.pieces[pieceId].rotationDeg).toBe(0);
 });
@@ -166,8 +166,8 @@ test('WARN reactivity: rotation triggers orientation warnings', () => {
   // Pas de WARN initialement (rotation = 0, orientation = 0)
   expect(screen.queryByTestId('warn-banner')).not.toBeInTheDocument();
 
-  // Set 90° → WARN doit apparaître
-  const set90Button = screen.getByRole('button', { name: /Set 90°/i });
+  // Rotation 90° → WARN doit apparaître
+  const set90Button = screen.getByRole('button', { name: /Rotation 90°/i });
   fireEvent.click(set90Button);
 
   rerender(<App />);
@@ -175,8 +175,8 @@ test('WARN reactivity: rotation triggers orientation warnings', () => {
   // WARN présent
   expect(screen.getByTestId('warn-banner')).toBeInTheDocument();
 
-  // Set 0° → WARN doit disparaître
-  const set0Button = screen.getByRole('button', { name: /Set 0°/i });
+  // Rotation 0° → WARN doit disparaître
+  const set0Button = screen.getByRole('button', { name: /Rotation 0°/i });
   fireEvent.click(set0Button);
 
   rerender(<App />);
@@ -193,11 +193,79 @@ test('rotation buttons are disabled when nothing selected', () => {
 
   const plus90Button = screen.getByRole('button', { name: /Rotate \+90°/i });
   const minus90Button = screen.getByRole('button', { name: /Rotate −90°/i });
-  const set0Button = screen.getByRole('button', { name: /Set 0°/i });
-  const set90Button = screen.getByRole('button', { name: /Set 90°/i });
+  const set0Button = screen.getByRole('button', { name: /Rotation 0°/i });
+  const set90Button = screen.getByRole('button', { name: /Rotation 90°/i });
 
   expect(plus90Button).toBeDisabled();
   expect(minus90Button).toBeDisabled();
   expect(set0Button).toBeDisabled();
   expect(set90Button).toBeDisabled();
+});
+
+test('rotation clears transient UI (dragging, resizing, guides, marquee)', () => {
+  const {
+    initSceneWithDefaults,
+    selectPiece,
+    rotateSelected,
+    beginDrag,
+    updateDrag,
+    startResize,
+    updateResize,
+  } = useSceneStore.getState();
+  initSceneWithDefaults(600, 600);
+
+  const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+  selectPiece(pieceId);
+
+  // Start a drag to create transient UI state
+  beginDrag(pieceId);
+  updateDrag(20, 20);
+
+  // Verify dragging state exists
+  expect(useSceneStore.getState().ui.dragging).toBeDefined();
+
+  // Rotate piece
+  rotateSelected(90);
+
+  // Transient UI should be cleared
+  expect(useSceneStore.getState().ui.dragging).toBeUndefined();
+  expect(useSceneStore.getState().ui.resizing).toBeUndefined();
+  expect(useSceneStore.getState().ui.guides).toBeUndefined();
+  expect(useSceneStore.getState().ui.marquee).toBeUndefined();
+
+  // Selection should be preserved
+  expect(useSceneStore.getState().ui.selectedId).toBe(pieceId);
+});
+
+test('setSelectedRotation clears transient UI', () => {
+  const { initSceneWithDefaults, selectPiece, setSelectedRotation, startResize, updateResize } =
+    useSceneStore.getState();
+  initSceneWithDefaults(600, 600);
+
+  const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+  const piece = useSceneStore.getState().scene.pieces[pieceId];
+  selectPiece(pieceId);
+
+  // Start a resize to create transient UI state
+  startResize(pieceId, 'e');
+  updateResize({
+    x: piece.position.x + piece.size.w + 10,
+    y: piece.position.y + piece.size.h / 2,
+  });
+
+  // Verify resizing state exists
+  expect(useSceneStore.getState().ui.resizing).toBeDefined();
+
+  // Set rotation directly
+  setSelectedRotation(90);
+
+  // Transient UI should be cleared
+  expect(useSceneStore.getState().ui.dragging).toBeUndefined();
+  expect(useSceneStore.getState().ui.resizing).toBeUndefined();
+  expect(useSceneStore.getState().ui.guides).toBeUndefined();
+  expect(useSceneStore.getState().ui.marquee).toBeUndefined();
+
+  // Selection should be preserved
+  expect(useSceneStore.getState().ui.selectedId).toBe(pieceId);
+  expect(useSceneStore.getState().scene.pieces[pieceId].rotationDeg).toBe(90);
 });
