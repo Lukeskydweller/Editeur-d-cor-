@@ -1,7 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { useSceneStore } from '@/state/useSceneStore';
 import { validateNoOverlap, validateInsideScene } from '@/lib/sceneRules';
+import { pxToMmFactor } from '@/lib/ui/coords';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -10,6 +11,16 @@ export default function App() {
   const selectPiece = useSceneStore((s) => s.selectPiece);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
   const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
+
+  const dragging = useSceneStore((s) => s.ui.dragging);
+  const beginDrag = useSceneStore((s) => s.beginDrag);
+  const updateDrag = useSceneStore((s) => s.updateDrag);
+  const endDrag = useSceneStore((s) => s.endDrag);
+  const cancelDrag = useSceneStore((s) => s.cancelDrag);
+
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  const dragFactorRef = useRef<number>(1);
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -39,6 +50,48 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [nudgeSelected]);
+
+  // Gestion du drag souris
+  const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
+    e.stopPropagation();
+
+    // Calculer le facteur px→mm à partir du SVG
+    const rect = svgRef.current?.getBoundingClientRect();
+    const factor = pxToMmFactor(rect?.width ?? 0, scene.size.w);
+    dragFactorRef.current = factor;
+
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    beginDrag(pieceId);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!dragging || !dragStartRef.current) return;
+
+    const dxPx = e.clientX - dragStartRef.current.x;
+    const dyPx = e.clientY - dragStartRef.current.y;
+
+    // Convertir pixels → mm
+    const dxMm = dxPx * dragFactorRef.current;
+    const dyMm = dyPx * dragFactorRef.current;
+
+    updateDrag(dxMm, dyMm);
+  };
+
+  const handlePointerUp = () => {
+    if (!dragging) return;
+
+    endDrag();
+    dragStartRef.current = null;
+    dragFactorRef.current = 1;
+  };
+
+  const handlePointerLeave = () => {
+    if (!dragging) return;
+
+    cancelDrag();
+    dragStartRef.current = null;
+    dragFactorRef.current = 1;
+  };
 
   // Validation des règles
   const noOverlap = validateNoOverlap(scene);
@@ -91,9 +144,15 @@ export default function App() {
           </div>
 
           {/* Canvas SVG */}
-          <div className="w-full overflow-auto rounded-xl border border-white/10 bg-black/20">
+          <div
+            className="w-full overflow-auto rounded-xl border border-white/10 bg-black/20"
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerLeave}
+          >
             <svg
               width="100%"
+              ref={svgRef}
               viewBox={`0 0 ${scene.size.w} ${scene.size.h}`}
               className="block"
               role="img"
@@ -126,13 +185,45 @@ export default function App() {
                       fill="#60a5fa" /* bleu */
                       stroke={isFlashingInvalid ? '#ef4444' : isSelected ? '#22d3ee' : '#1e3a8a'}
                       strokeWidth={isFlashingInvalid ? '4' : isSelected ? '3' : '2'}
-                      onClick={() => selectPiece(p.id)}
+                      onPointerDown={(e) => handlePointerDown(e, p.id)}
                       style={{ cursor: 'pointer' }}
                       className={isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''}
                     />
                   </g>
                 );
               })}
+              {/* Ghost piece pendant drag */}
+              {dragging && dragging.candidate && (() => {
+                const piece = scene.pieces[dragging.id];
+                if (!piece || piece.kind !== 'rect') return null;
+
+                const { w, h } = piece.size;
+                const { x, y, valid } = dragging.candidate;
+
+                return (
+                  <g
+                    key="ghost"
+                    transform={`translate(${x} ${y}) rotate(0)`}
+                    data-testid="ghost-piece"
+                    data-valid={valid ? 'true' : 'false'}
+                  >
+                    <rect
+                      x="0"
+                      y="0"
+                      width={w}
+                      height={h}
+                      rx="6"
+                      ry="6"
+                      fill={valid ? '#60a5fa' : '#ef4444'}
+                      fillOpacity="0.5"
+                      stroke={valid ? '#22d3ee' : '#ef4444'}
+                      strokeWidth="3"
+                      strokeDasharray="4 4"
+                      pointerEvents="none"
+                    />
+                  </g>
+                );
+              })()}
               {/* bordure scène */}
               <rect
                 x="0.5"
