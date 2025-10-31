@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
 import { validateNoOverlap } from '@/lib/sceneRules';
+import { snapToPieces, type SnapGuide } from '@/lib/ui/snap';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -43,6 +44,7 @@ type SceneState = {
       candidate?: { x: number; y: number; valid: boolean };
     };
     snap10mm?: boolean;
+    guides?: SnapGuide[];
   };
 };
 
@@ -69,6 +71,7 @@ type SceneActions = {
   setMaterialOriented: (materialId: ID, oriented: boolean) => void;
   rotateSelected: (deltaDeg: 90 | -90) => void;
   setSelectedRotation: (deg: 0 | 90) => void;
+  duplicateSelected: () => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -87,6 +90,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     flashInvalidAt: undefined,
     dragging: undefined,
     snap10mm: true,
+    guides: undefined,
   },
 
   // Actions
@@ -265,15 +269,30 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.scene.size.h,
       );
 
+      // Snap entre pièces (après clamp, avant snap grid)
+      const candidateRect = { x: clamped.x, y: clamped.y, w: piece.size.w, h: piece.size.h };
+      const snapResult = snapToPieces(draft.scene, candidateRect, 5, dragging.id);
+
+      // Stocker les guides
+      draft.ui.guides = snapResult.guides;
+
+      // Appliquer snap 10mm optionnel
+      let finalX = snapResult.x;
+      let finalY = snapResult.y;
+      if (draft.ui.snap10mm) {
+        finalX = snapTo10mm(snapResult.x);
+        finalY = snapTo10mm(snapResult.y);
+      }
+
       // Simuler le déplacement et vérifier overlap
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-      testScene.pieces[dragging.id] = { ...piece, position: { x: clamped.x, y: clamped.y } };
+      testScene.pieces[dragging.id] = { ...piece, position: { x: finalX, y: finalY } };
 
       const validation = validateNoOverlap(testScene);
 
       dragging.candidate = {
-        x: clamped.x,
-        y: clamped.y,
+        x: finalX,
+        y: finalY,
         valid: validation.ok,
       };
     })),
@@ -283,34 +302,28 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const dragging = draft.ui.dragging;
       if (!dragging || !dragging.candidate) {
         draft.ui.dragging = undefined;
+        draft.ui.guides = undefined;
         return;
       }
 
-      // Commit si valide
+      // Commit si valide (position déjà snappée dans updateDrag)
       if (dragging.candidate.valid) {
         const piece = draft.scene.pieces[dragging.id];
         if (piece) {
-          let finalX = dragging.candidate.x;
-          let finalY = dragging.candidate.y;
-
-          // Appliquer snap si activé
-          if (draft.ui.snap10mm) {
-            finalX = snapTo10mm(dragging.candidate.x);
-            finalY = snapTo10mm(dragging.candidate.y);
-          }
-
-          piece.position.x = finalX;
-          piece.position.y = finalY;
+          piece.position.x = dragging.candidate.x;
+          piece.position.y = dragging.candidate.y;
         }
       }
       // Sinon revert implicite (ne pas modifier la position)
 
       draft.ui.dragging = undefined;
+      draft.ui.guides = undefined;
     })),
 
   cancelDrag: () =>
     set(produce((draft: SceneState) => {
       draft.ui.dragging = undefined;
+      draft.ui.guides = undefined;
     })),
 
   addRectAtCenter: (w, h) =>
@@ -434,5 +447,46 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!piece) return;
 
       piece.rotationDeg = normDeg(deg);
+    })),
+
+  duplicateSelected: () =>
+    set(produce((draft: SceneState) => {
+      const selectedId = draft.ui.selectedId;
+      if (!selectedId) return;
+
+      const originalPiece = draft.scene.pieces[selectedId];
+      if (!originalPiece) return;
+
+      // Créer une copie avec un nouvel ID
+      const newId = genId('piece');
+      const offsetX = 20;
+      const offsetY = 20;
+
+      // Calculer position candidate
+      let newX = originalPiece.position.x + offsetX;
+      let newY = originalPiece.position.y + offsetY;
+
+      // Clamper dans la scène
+      const clamped = clampToScene(
+        newX,
+        newY,
+        originalPiece.size.w,
+        originalPiece.size.h,
+        draft.scene.size.w,
+        draft.scene.size.h,
+      );
+
+      const newPiece: Piece = {
+        ...originalPiece,
+        id: newId,
+        position: { x: clamped.x, y: clamped.y },
+      };
+
+      // Ajouter au layer
+      draft.scene.pieces[newId] = newPiece;
+      draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
+
+      // Sélectionner la nouvelle pièce
+      draft.ui.selectedId = newId;
     })),
 }));

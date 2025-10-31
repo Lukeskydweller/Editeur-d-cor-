@@ -25,6 +25,8 @@ export default function App() {
   const setSnap10mm = useSceneStore((s) => s.setSnap10mm);
   const rotateSelected = useSceneStore((s) => s.rotateSelected);
   const setSelectedRotation = useSceneStore((s) => s.setSelectedRotation);
+  const duplicateSelected = useSceneStore((s) => s.duplicateSelected);
+  const guides = useSceneStore((s) => s.ui.guides);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -37,9 +39,16 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
-  // Gestion du nudge clavier + Delete + Rotation
+  // Gestion du nudge clavier + Delete + Rotation + Duplication
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+D → Duplicate
+      if (e.key === 'd' && e.ctrlKey) {
+        e.preventDefault();
+        duplicateSelected();
+        return;
+      }
+
       // Delete key
       if (e.key === 'Delete') {
         e.preventDefault();
@@ -88,7 +97,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected]);
 
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
@@ -161,6 +170,9 @@ export default function App() {
               <div className="flex items-center gap-4 flex-wrap">
                 <div className="flex gap-2">
                   <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
+                  <Button onClick={duplicateSelected} disabled={!selectedId}>
+                    Dupliquer
+                  </Button>
                   <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
                     Supprimer
                   </Button>
@@ -338,6 +350,42 @@ export default function App() {
                   </g>
                 );
               })()}
+              {/* Snap guides */}
+              {guides && guides.length > 0 && (
+                <g data-testid="snap-guides">
+                  {guides.map((guide, i) => {
+                    if (guide.kind === 'v') {
+                      return (
+                        <line
+                          key={`v-${i}`}
+                          x1={guide.x}
+                          y1={0}
+                          x2={guide.x}
+                          y2={scene.size.h}
+                          stroke="#22d3ee"
+                          strokeWidth="1"
+                          strokeDasharray="4 4"
+                          pointerEvents="none"
+                        />
+                      );
+                    } else {
+                      return (
+                        <line
+                          key={`h-${i}`}
+                          x1={0}
+                          y1={guide.y}
+                          x2={scene.size.w}
+                          y2={guide.y}
+                          stroke="#22d3ee"
+                          strokeWidth="1"
+                          strokeDasharray="4 4"
+                          pointerEvents="none"
+                        />
+                      );
+                    }
+                  })}
+                </g>
+              )}
               {/* bordure scène */}
               <rect
                 x="0.5"
