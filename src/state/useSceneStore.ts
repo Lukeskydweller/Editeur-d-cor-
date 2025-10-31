@@ -15,6 +15,7 @@ import {
 } from '@/lib/drafts';
 import { applyHandle, type ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
+import { clampAABBToScene } from '@/lib/geom/aabb';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -449,23 +450,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       const snap = takeSnapshot(draft);
 
-      // Nudge de groupe : calculer bbox du groupe
+      // Nudge de groupe : calculer bbox du groupe (AABB rotation-aware)
       const bbox = groupBBox(draft.scene, selectedIds);
 
-      // Clamper dans la scène
-      const clamped = clampToScene(
-        bbox.x + dx,
-        bbox.y + dy,
-        bbox.w,
-        bbox.h,
-        draft.scene.size.w,
-        draft.scene.size.h,
-      );
+      // Clamp group AABB to scene
+      const candidateAABB = { x: bbox.x + dx, y: bbox.y + dy, w: bbox.w, h: bbox.h };
+      const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
 
       const actualDx = clamped.x - bbox.x;
       const actualDy = clamped.y - bbox.y;
 
-      // Appliquer snap grille si activé
+      // Appliquer snap grille si activé (sur AABB)
       let finalDx = actualDx;
       let finalDy = actualDy;
       if (draft.ui.snap10mm) {
@@ -475,12 +470,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         finalDy = snappedY - bbox.y;
       }
 
-      // Simuler le déplacement du groupe
+      // For each piece, compute new AABB position, then convert to piece.position
+      // This ensures rotation-aware nudge
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
       for (const id of selectedIds) {
         const p = draft.scene.pieces[id];
         if (!p) continue;
-        testScene.pieces[id] = { ...p, position: { x: p.position.x + finalDx, y: p.position.y + finalDy } };
+        const pBBox = pieceBBox(p);
+        const newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy };
+        const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
+        testScene.pieces[id] = { ...p, position: newPiecePos };
       }
 
       const validation = validateNoOverlap(testScene);
@@ -492,8 +491,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           for (const id of selectedIds) {
             const p = draft.scene.pieces[id];
             if (!p) continue;
-            p.position.x += finalDx;
-            p.position.y += finalDy;
+            const pBBox = pieceBBox(p);
+            const newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy };
+            const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
+            p.position.x = newPiecePos.x;
+            p.position.y = newPiecePos.y;
           }
           pushHistory(draft, snap);
           autosave(takeSnapshot(draft));
@@ -585,31 +587,32 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           const gW = gMaxX - gMinX;
           const gH = gMaxY - gMinY;
 
-          const clamped = clampToScene(gMinX, gMinY, gW, gH, draft.scene.size.w, draft.scene.size.h);
+          // Clamp group AABB to scene
+          const groupAABB = { x: gMinX, y: gMinY, w: gW, h: gH };
+          const clamped = clampAABBToScene(groupAABB, draft.scene.size.w, draft.scene.size.h);
           const clampDx = clamped.x - gMinX;
           const clampDy = clamped.y - gMinY;
           const clampedX = candidateX + clampDx;
           const clampedY = candidateY + clampDy;
 
           // Snap groupe à pièces
-          const candidateGroupRect = { x: clamped.x, y: clamped.y, w: gW, h: gH };
-          const snapResult = snapGroupToPieces(draft.scene, candidateGroupRect, 5, selectedIds);
+          const snapResult = snapGroupToPieces(draft.scene, clamped, 5, selectedIds);
           draft.ui.guides = snapResult.guides;
 
           // Appliquer le delta de snap uniformément
-          const snapDx = snapResult.x - candidateGroupRect.x;
-          const snapDy = snapResult.y - candidateGroupRect.y;
+          const snapDx = snapResult.x - clamped.x;
+          const snapDy = snapResult.y - clamped.y;
           finalX = clampedX + snapDx;
           finalY = clampedY + snapDy;
         } else {
           draft.ui.guides = undefined;
         }
       } else {
-        // Drag simple : clamp + snap entre pièces
+        // Drag simple : clamp AABB + snap entre pièces
         const bbox = pieceBBox(piece); // Use rotation-aware AABB
-        const clamped = clampToScene(candidateX, candidateY, bbox.w, bbox.h, draft.scene.size.w, draft.scene.size.h);
-        const candidateRect = { x: clamped.x, y: clamped.y, w: bbox.w, h: bbox.h };
-        const snapResult = snapToPieces(draft.scene, candidateRect, 5, dragging.id);
+        const candidateAABB = { x: candidateX, y: candidateY, w: bbox.w, h: bbox.h };
+        const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
+        const snapResult = snapToPieces(draft.scene, clamped, 5, dragging.id);
         draft.ui.guides = snapResult.guides;
         finalX = snapResult.x;
         finalY = snapResult.y;

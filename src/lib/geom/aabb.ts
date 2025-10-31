@@ -72,3 +72,29 @@ export function edgesOfRect(r: AABB): Edges {
 
   return { left, right, top, bottom, cx, cy };
 }
+
+/**
+ * Clamp an AABB to stay within scene bounds
+ * Ensures all 4 edges are symmetric (left, top, right, bottom)
+ *
+ * @param aabb - The AABB to clamp
+ * @param sceneW - Scene width in mm
+ * @param sceneH - Scene height in mm
+ * @returns Clamped AABB (dimensions unchanged, only position adjusted)
+ */
+export function clampAABBToScene(
+  aabb: AABB,
+  sceneW: number,
+  sceneH: number
+): AABB {
+  // Clamp to ensure AABB stays within [0, sceneW] x [0, sceneH]
+  const x = Math.min(Math.max(aabb.x, 0), Math.max(0, sceneW - aabb.w));
+  const y = Math.min(Math.max(aabb.y, 0), Math.max(0, sceneH - aabb.h));
+
+  return {
+    x,
+    y,
+    w: aabb.w,
+    h: aabb.h,
+  };
+}
