@@ -9,6 +9,7 @@ export default function App() {
   const selectedId = useSceneStore((s) => s.ui.selectedId);
   const selectPiece = useSceneStore((s) => s.selectPiece);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
+  const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -106,8 +107,15 @@ export default function App() {
                 const { x, y } = p.position;
                 const { w, h } = p.size;
                 const isSelected = p.id === selectedId;
+                const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
+
                 return (
-                  <g key={p.id} transform={`translate(${x} ${y}) rotate(${p.rotationDeg})`}>
+                  <g
+                    key={p.id}
+                    transform={`translate(${x} ${y}) rotate(${p.rotationDeg})`}
+                    data-testid={isSelected ? 'piece-selected' : undefined}
+                    data-invalid={isFlashingInvalid ? 'true' : undefined}
+                  >
                     <rect
                       x="0"
                       y="0"
@@ -116,10 +124,11 @@ export default function App() {
                       rx="6"
                       ry="6"
                       fill="#60a5fa" /* bleu */
-                      stroke={isSelected ? '#22d3ee' : '#1e3a8a'}
-                      strokeWidth={isSelected ? '3' : '2'}
+                      stroke={isFlashingInvalid ? '#ef4444' : isSelected ? '#22d3ee' : '#1e3a8a'}
+                      strokeWidth={isFlashingInvalid ? '4' : isSelected ? '3' : '2'}
                       onClick={() => selectPiece(p.id)}
                       style={{ cursor: 'pointer' }}
+                      className={isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''}
                     />
                   </g>
                 );

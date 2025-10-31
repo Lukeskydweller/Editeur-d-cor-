@@ -1,15 +1,24 @@
 import { create } from 'zustand';
 import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
+import { validateNoOverlap } from '@/lib/sceneRules';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// helper interne : clamp pour garder la bbox rect dans la scène (rotation ignorée V1)
+function clampToScene(x: number, y: number, w: number, h: number, sceneW: number, sceneH: number) {
+  const nx = Math.min(Math.max(0, x), Math.max(0, sceneW - w));
+  const ny = Math.min(Math.max(0, y), Math.max(0, sceneH - h));
+  return { x: nx, y: ny };
 }
 
 type SceneState = {
   scene: SceneDraft;
   ui: {
     selectedId?: ID;
+    flashInvalidAt?: number;
   };
 };
 
@@ -40,6 +49,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   },
   ui: {
     selectedId: undefined,
+    flashInvalidAt: undefined,
   },
 
   // Actions
@@ -143,9 +153,35 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!selectedId) return;
 
       const piece = draft.scene.pieces[selectedId];
-      if (piece) {
-        piece.position.x += dx;
-        piece.position.y += dy;
+      if (!piece) return;
+
+      // Calculer position candidate
+      const candidateX = piece.position.x + dx;
+      const candidateY = piece.position.y + dy;
+
+      // Clamper dans la scène
+      const clamped = clampToScene(
+        candidateX,
+        candidateY,
+        piece.size.w,
+        piece.size.h,
+        draft.scene.size.w,
+        draft.scene.size.h,
+      );
+
+      // Simuler le déplacement et vérifier overlap
+      const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
+      testScene.pieces[selectedId] = { ...piece, position: { x: clamped.x, y: clamped.y } };
+
+      const validation = validateNoOverlap(testScene);
+
+      if (!validation.ok) {
+        // Conflit détecté → flasher l'invalide
+        draft.ui.flashInvalidAt = Date.now();
+      } else {
+        // OK → appliquer le déplacement
+        piece.position.x = clamped.x;
+        piece.position.y = clamped.y;
       }
     })),
 }));
