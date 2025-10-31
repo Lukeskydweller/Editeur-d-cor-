@@ -53,6 +53,7 @@ type SceneActions = {
   deleteSelected: () => void;
   setPieceMaterial: (pieceId: ID, materialId: ID) => void;
   setSnap10mm: (on: boolean) => void;
+  setMaterialOriented: (materialId: ID, oriented: boolean) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -380,5 +381,20 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   setSnap10mm: (on) =>
     set(produce((draft: SceneState) => {
       draft.ui.snap10mm = on;
+    })),
+
+  setMaterialOriented: (materialId, oriented) =>
+    set(produce((draft: SceneState) => {
+      const m = draft.scene.materials[materialId];
+      if (m) {
+        m.oriented = oriented;
+        if (!oriented) {
+          // Retirer orientationDeg si on désactive oriented
+          delete m.orientationDeg;
+        } else if (m.orientationDeg === undefined) {
+          // Initialiser à 0 par défaut
+          m.orientationDeg = 0;
+        }
+      }
     })),
 }));

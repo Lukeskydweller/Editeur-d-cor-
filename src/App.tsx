@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
-import { validateNoOverlap, validateInsideScene } from '@/lib/sceneRules';
+import { validateNoOverlap, validateInsideScene, validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
 
@@ -110,10 +110,12 @@ export default function App() {
   // Validation des règles
   const noOverlap = validateNoOverlap(scene);
   const insideScene = validateInsideScene(scene);
+  const orientation = validateMaterialOrientation(scene);
   const hasProblems = !noOverlap.ok || !insideScene.ok;
   const problemCount =
     (noOverlap.ok ? 0 : noOverlap.conflicts.length) +
     (insideScene.ok ? 0 : insideScene.outside.length);
+  const hasWarnings = !orientation.ok;
 
   return (
     <main className="min-h-dvh p-6" tabIndex={0}>
@@ -151,33 +153,59 @@ export default function App() {
               </div>
 
           {/* Barre de statut des règles */}
-          <div
-            className={`rounded-lg px-4 py-3 text-sm font-medium ${
-              hasProblems
-                ? 'bg-red-500/20 text-red-200 border border-red-500/40'
-                : 'bg-green-500/20 text-green-200 border border-green-500/40'
-            }`}
-            role="status"
-            aria-live="polite"
-          >
-            {hasProblems ? (
-              <>
+          <div className="space-y-2">
+            <div
+              className={`rounded-lg px-4 py-3 text-sm font-medium ${
+                hasProblems
+                  ? 'bg-red-500/20 text-red-200 border border-red-500/40'
+                  : 'bg-green-500/20 text-green-200 border border-green-500/40'
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {hasProblems ? (
+                <>
+                  <div className="font-bold">
+                    BLOCK — {problemCount} problème{problemCount > 1 ? 's' : ''} détecté{problemCount > 1 ? 's' : ''}
+                  </div>
+                  {!noOverlap.ok && (
+                    <div className="mt-1">
+                      Chevauchements : {noOverlap.conflicts.map(([a, b]) => `(${a}, ${b})`).join(', ')}
+                    </div>
+                  )}
+                  {!insideScene.ok && (
+                    <div className="mt-1">
+                      Hors-scène : {insideScene.outside.join(', ')}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div>OK — aucune anomalie détectée</div>
+              )}
+            </div>
+
+            {hasWarnings && (
+              <div
+                className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
+                role="status"
+                aria-live="polite"
+                data-testid="warn-banner"
+              >
                 <div className="font-bold">
-                  BLOCK — {problemCount} problème{problemCount > 1 ? 's' : ''} détecté{problemCount > 1 ? 's' : ''}
+                  WARN — {orientation.warnings.length} matériau{orientation.warnings.length > 1 ? 'x' : ''} non aligné
+                  {orientation.warnings.length > 1 ? 's' : ''}
                 </div>
-                {!noOverlap.ok && (
-                  <div className="mt-1">
-                    Chevauchements : {noOverlap.conflicts.map(([a, b]) => `(${a}, ${b})`).join(', ')}
-                  </div>
-                )}
-                {!insideScene.ok && (
-                  <div className="mt-1">
-                    Hors-scène : {insideScene.outside.join(', ')}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div>OK — aucune anomalie détectée</div>
+                <div className="mt-1 text-xs space-y-1">
+                  {orientation.warnings.slice(0, 3).map((w) => (
+                    <div key={w.pieceId}>
+                      {w.pieceId} → {w.materialId} (attendu {w.expectedDeg}°, réel {w.actualDeg}°)
+                    </div>
+                  ))}
+                  {orientation.warnings.length > 3 && (
+                    <div className="text-yellow-300">... et {orientation.warnings.length - 3} de plus</div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 

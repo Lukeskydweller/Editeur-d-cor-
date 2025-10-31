@@ -53,3 +53,32 @@ export function validateInsideScene(scene: SceneDraft): {
     outside,
   };
 }
+
+/**
+ * Valide que les pièces utilisant un matériau orienté sont alignées avec l'orientation du matériau.
+ * Retourne des warnings (non bloquants) pour les pièces mal alignées.
+ */
+export function validateMaterialOrientation(scene: SceneDraft): {
+  ok: boolean;
+  warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }>;
+} {
+  const warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }> = [];
+
+  for (const p of Object.values(scene.pieces)) {
+    const m = scene.materials[p.materialId];
+    if (!m) continue;
+    if (m.oriented) {
+      // congruence à 180° : 0 ≡ 180, 90 ≡ 270
+      const expected = (m.orientationDeg ?? 0) % 180;
+      const actual = (p.rotationDeg ?? 0) % 180;
+      if (expected !== actual) {
+        warnings.push({ pieceId: p.id, materialId: m.id, expectedDeg: expected, actualDeg: actual });
+      }
+    }
+  }
+
+  return {
+    ok: warnings.length === 0,
+    warnings,
+  };
+}
