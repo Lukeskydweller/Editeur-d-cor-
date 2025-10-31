@@ -30,6 +30,37 @@ export function pieceBBox(piece: Piece): BBox {
 }
 
 /**
+ * Convert AABB position back to piece.position
+ * Inverse operation of pieceBBox for position only
+ *
+ * Given an AABB position (aabbX, aabbY) and a piece with its current size/rotation,
+ * compute the piece.position that would result in that AABB position.
+ */
+export function aabbToPiecePosition(
+  aabbX: number,
+  aabbY: number,
+  piece: Piece
+): { x: number; y: number } {
+  const { w, h } = piece.size;
+  const r = ((piece.rotationDeg ?? 0) % 360 + 360) % 360;
+
+  // If rotated 90° or 270°, need to reverse the swap
+  if (r === 90 || r === 270) {
+    // AABB center = (aabbX + h/2, aabbY + w/2)  [note: h and w swapped]
+    // piece.position = AABB center - (w/2, h/2)
+    const cx = aabbX + h / 2;
+    const cy = aabbY + w / 2;
+    return {
+      x: cx - w / 2,
+      y: cy - h / 2,
+    };
+  }
+
+  // For 0° or 180°, AABB position = piece.position
+  return { x: aabbX, y: aabbY };
+}
+
+/**
  * Teste si deux rectangles AABB se chevauchent.
  * Retourne true s'il y a intersection (bords touchants = overlap).
  */

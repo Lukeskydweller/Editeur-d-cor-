@@ -14,7 +14,7 @@ import {
   type DraftMeta,
 } from '@/lib/drafts';
 import { applyHandle, type ResizeHandle } from '@/lib/ui/resize';
-import { pieceBBox } from '@/lib/geom';
+import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -517,20 +517,25 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       const finalSelectedIds = draft.ui.selectedIds ?? [id];
 
-      // Stocker les offsets pour le groupe
+      // CRITICAL: Store AABB position (not piece.position) for rotation-aware drag
+      // For rotated pieces, AABB position differs from piece.position
+      const primaryBBox = pieceBBox(piece);
+
+      // Stocker les offsets pour le groupe (AABB-based for rotation awareness)
       const groupOffsets: Record<ID, { dx: number; dy: number }> = {};
       for (const sid of finalSelectedIds) {
         const sp = draft.scene.pieces[sid];
         if (!sp) continue;
+        const spBBox = pieceBBox(sp);
         groupOffsets[sid] = {
-          dx: sp.position.x - piece.position.x,
-          dy: sp.position.y - piece.position.y,
+          dx: spBBox.x - primaryBBox.x,
+          dy: spBBox.y - primaryBBox.y,
         };
       }
 
       draft.ui.dragging = {
         id,
-        start: { x: piece.position.x, y: piece.position.y },
+        start: { x: primaryBBox.x, y: primaryBBox.y }, // AABB position, not piece.position
         candidate: undefined,
         groupOffsets,
       };
@@ -660,14 +665,22 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             const off = offsets[sid] ?? { dx: 0, dy: 0 };
             const sp = draft.scene.pieces[sid];
             if (!sp) continue;
-            sp.position.x = dragging.candidate.x + off.dx;
-            sp.position.y = dragging.candidate.y + off.dy;
+            // Convert AABB position to piece.position (rotation-aware)
+            const aabbPos = {
+              x: dragging.candidate.x + off.dx,
+              y: dragging.candidate.y + off.dy,
+            };
+            const piecePos = aabbToPiecePosition(aabbPos.x, aabbPos.y, sp);
+            sp.position.x = piecePos.x;
+            sp.position.y = piecePos.y;
           }
         } else {
           const piece = draft.scene.pieces[dragging.id];
           if (piece) {
-            piece.position.x = dragging.candidate.x;
-            piece.position.y = dragging.candidate.y;
+            // Convert AABB position to piece.position (rotation-aware)
+            const piecePos = aabbToPiecePosition(dragging.candidate.x, dragging.candidate.y, piece);
+            piece.position.x = piecePos.x;
+            piece.position.y = piecePos.y;
           }
         }
         pushHistory(draft, snap);
