@@ -10,6 +10,7 @@ export default function App() {
   const scene = useSceneStore((s) => s.scene);
   const initSceneWithDefaults = useSceneStore((s) => s.initSceneWithDefaults);
   const selectedId = useSceneStore((s) => s.ui.selectedId);
+  const selectedIds = useSceneStore((s) => s.ui.selectedIds);
   const selectPiece = useSceneStore((s) => s.selectPiece);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
   const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
@@ -27,10 +28,19 @@ export default function App() {
   const setSelectedRotation = useSceneStore((s) => s.setSelectedRotation);
   const duplicateSelected = useSceneStore((s) => s.duplicateSelected);
   const guides = useSceneStore((s) => s.ui.guides);
+  const toggleSelect = useSceneStore((s) => s.toggleSelect);
+  const clearSelection = useSceneStore((s) => s.clearSelection);
+  const selectAll = useSceneStore((s) => s.selectAll);
+  const startMarquee = useSceneStore((s) => s.startMarquee);
+  const updateMarquee = useSceneStore((s) => s.updateMarquee);
+  const endMarquee = useSceneStore((s) => s.endMarquee);
+  const marquee = useSceneStore((s) => s.ui.marquee);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const marqueeFactorRef = useRef<number>(1);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -39,9 +49,23 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
-  // Gestion du nudge clavier + Delete + Rotation + Duplication
+  // Gestion du nudge clavier + Delete + Rotation + Duplication + Escape + Ctrl+A
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape → Clear selection
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        clearSelection();
+        return;
+      }
+
+      // Ctrl+A → Select all
+      if (e.key === 'a' && e.ctrlKey) {
+        e.preventDefault();
+        selectAll();
+        return;
+      }
+
       // Ctrl+D → Duplicate
       if (e.key === 'd' && e.ctrlKey) {
         e.preventDefault();
@@ -97,11 +121,17 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll]);
 
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
     e.stopPropagation();
+
+    // Shift-click → toggle selection
+    if (e.shiftKey) {
+      toggleSelect(pieceId);
+      return;
+    }
 
     // Calculer le facteur px→mm à partir du SVG
     const rect = svgRef.current?.getBoundingClientRect();
@@ -112,33 +142,62 @@ export default function App() {
     beginDrag(pieceId);
   };
 
+  // Gestion marquee (fond SVG)
+  const handleBackgroundPointerDown = (e: React.PointerEvent) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const factor = pxToMmFactor(rect.width, scene.size.w);
+    marqueeFactorRef.current = factor;
+
+    const svgX = (e.clientX - rect.left) * factor;
+    const svgY = (e.clientY - rect.top) * factor;
+
+    marqueeStartRef.current = { x: e.clientX, y: e.clientY };
+    startMarquee(svgX, svgY);
+  };
+
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (!dragging || !dragStartRef.current) return;
+    if (dragging && dragStartRef.current) {
+      const dxPx = e.clientX - dragStartRef.current.x;
+      const dyPx = e.clientY - dragStartRef.current.y;
 
-    const dxPx = e.clientX - dragStartRef.current.x;
-    const dyPx = e.clientY - dragStartRef.current.y;
+      const dxMm = dxPx * dragFactorRef.current;
+      const dyMm = dyPx * dragFactorRef.current;
 
-    // Convertir pixels → mm
-    const dxMm = dxPx * dragFactorRef.current;
-    const dyMm = dyPx * dragFactorRef.current;
+      updateDrag(dxMm, dyMm);
+    } else if (marquee && marqueeStartRef.current) {
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (!rect) return;
 
-    updateDrag(dxMm, dyMm);
+      const svgX = (e.clientX - rect.left) * marqueeFactorRef.current;
+      const svgY = (e.clientY - rect.top) * marqueeFactorRef.current;
+      updateMarquee(svgX, svgY);
+    }
   };
 
   const handlePointerUp = () => {
-    if (!dragging) return;
-
-    endDrag();
-    dragStartRef.current = null;
-    dragFactorRef.current = 1;
+    if (dragging) {
+      endDrag();
+      dragStartRef.current = null;
+      dragFactorRef.current = 1;
+    } else if (marquee) {
+      endMarquee();
+      marqueeStartRef.current = null;
+      marqueeFactorRef.current = 1;
+    }
   };
 
   const handlePointerLeave = () => {
-    if (!dragging) return;
-
-    cancelDrag();
-    dragStartRef.current = null;
-    dragFactorRef.current = 1;
+    if (dragging) {
+      cancelDrag();
+      dragStartRef.current = null;
+      dragFactorRef.current = 1;
+    } else if (marquee) {
+      endMarquee();
+      marqueeStartRef.current = null;
+      marqueeFactorRef.current = 1;
+    }
   };
 
   // Validation des règles
@@ -274,6 +333,7 @@ export default function App() {
               className="block"
               role="img"
               aria-label="editor-canvas"
+              onPointerDown={handleBackgroundPointerDown}
             >
               {/* Grille 10mm */}
               <defs>
@@ -291,7 +351,8 @@ export default function App() {
                 if (p.kind !== 'rect') return null;
                 const { x, y } = p.position;
                 const { w, h } = p.size;
-                const isSelected = p.id === selectedId;
+                const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : []);
+                const isSelected = actualSelectedIds.includes(p.id);
                 const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
 
                 return (
@@ -386,6 +447,29 @@ export default function App() {
                   })}
                 </g>
               )}
+              {/* Marquee */}
+              {marquee && (() => {
+                const { x0, y0, x1, y1 } = marquee;
+                const minX = Math.min(x0, x1);
+                const minY = Math.min(y0, y1);
+                const width = Math.abs(x1 - x0);
+                const height = Math.abs(y1 - y0);
+                return (
+                  <rect
+                    key="marquee"
+                    x={minX}
+                    y={minY}
+                    width={width}
+                    height={height}
+                    fill="rgba(34,211,238,0.1)"
+                    stroke="#22d3ee"
+                    strokeWidth="1"
+                    strokeDasharray="4 4"
+                    pointerEvents="none"
+                    data-testid="marquee"
+                  />
+                );
+              })()}
               {/* bordure scène */}
               <rect
                 x="0.5"

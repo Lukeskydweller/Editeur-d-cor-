@@ -33,16 +33,38 @@ function sub90(d: Deg): Deg {
   return normDeg((d + 270) % 360);
 }
 
+// helpers sélection multiple
+function uniqueIds(ids: ID[]): ID[] {
+  return Array.from(new Set(ids));
+}
+
+function groupBBox(scene: SceneDraft, ids: ID[]) {
+  const rects = ids
+    .map((id) => scene.pieces[id])
+    .filter(Boolean)
+    .map((p) => ({ x: p.position.x, y: p.position.y, w: p.size.w, h: p.size.h }));
+  if (rects.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.x + r.w));
+  const maxY = Math.max(...rects.map((r) => r.y + r.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 type SceneState = {
   scene: SceneDraft;
   ui: {
     selectedId?: ID;
+    selectedIds?: ID[];
+    primaryId?: ID;
     flashInvalidAt?: number;
     dragging?: {
       id: ID;
       start: { x: number; y: number };
       candidate?: { x: number; y: number; valid: boolean };
+      groupOffsets?: Record<ID, { dx: number; dy: number }>;
     };
+    marquee?: { x0: number; y0: number; x1: number; y1: number };
     snap10mm?: boolean;
     guides?: SnapGuide[];
   };
@@ -60,6 +82,14 @@ type SceneActions = {
   initSceneWithDefaults: (w: Milli, h: Milli) => void;
   selectPiece: (id: ID | undefined) => void;
   nudgeSelected: (dx: Milli, dy: Milli) => void;
+  selectOnly: (id: ID) => void;
+  toggleSelect: (id: ID) => void;
+  clearSelection: () => void;
+  selectAll: () => void;
+  setSelection: (ids: ID[]) => void;
+  startMarquee: (x: Milli, y: Milli) => void;
+  updateMarquee: (x: Milli, y: Milli) => void;
+  endMarquee: () => void;
   beginDrag: (id: ID) => void;
   updateDrag: (dx: number, dy: number) => void;
   endDrag: () => void;
@@ -87,8 +117,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   },
   ui: {
     selectedId: undefined,
+    selectedIds: undefined,
+    primaryId: undefined,
     flashInvalidAt: undefined,
     dragging: undefined,
+    marquee: undefined,
     snap10mm: true,
     guides: undefined,
   },
@@ -186,51 +219,140 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   selectPiece: (id) =>
     set(produce((draft: SceneState) => {
       draft.ui.selectedId = id;
+      draft.ui.selectedIds = id ? [id] : undefined;
+      draft.ui.primaryId = id;
+    })),
+
+  selectOnly: (id) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.selectedId = id;
+      draft.ui.selectedIds = [id];
+      draft.ui.primaryId = id;
+    })),
+
+  toggleSelect: (id) =>
+    set(produce((draft: SceneState) => {
+      const current = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (current.includes(id)) {
+        const newIds = current.filter((x) => x !== id);
+        draft.ui.selectedIds = newIds.length > 0 ? newIds : undefined;
+        draft.ui.selectedId = newIds[0];
+        draft.ui.primaryId = newIds[0];
+      } else {
+        draft.ui.selectedIds = uniqueIds([...current, id]);
+        draft.ui.selectedId = id;
+        draft.ui.primaryId = id;
+      }
+    })),
+
+  clearSelection: () =>
+    set(produce((draft: SceneState) => {
+      draft.ui.selectedId = undefined;
+      draft.ui.selectedIds = undefined;
+      draft.ui.primaryId = undefined;
+    })),
+
+  selectAll: () =>
+    set(produce((draft: SceneState) => {
+      const allIds = Object.keys(draft.scene.pieces);
+      draft.ui.selectedIds = allIds;
+      draft.ui.selectedId = allIds[0];
+      draft.ui.primaryId = allIds[0];
+    })),
+
+  setSelection: (ids) =>
+    set(produce((draft: SceneState) => {
+      const validIds = uniqueIds(ids.filter((id) => draft.scene.pieces[id]));
+      draft.ui.selectedIds = validIds.length > 0 ? validIds : undefined;
+      draft.ui.selectedId = validIds[0];
+      draft.ui.primaryId = validIds[0];
+    })),
+
+  startMarquee: (x, y) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.marquee = { x0: x, y0: y, x1: x, y1: y };
+    })),
+
+  updateMarquee: (x, y) =>
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.marquee) return;
+      draft.ui.marquee.x1 = x;
+      draft.ui.marquee.y1 = y;
+    })),
+
+  endMarquee: () =>
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.marquee) return;
+      const { x0, y0, x1, y1 } = draft.ui.marquee;
+      const minX = Math.min(x0, x1);
+      const maxX = Math.max(x0, x1);
+      const minY = Math.min(y0, y1);
+      const maxY = Math.max(y0, y1);
+
+      const intersected = Object.values(draft.scene.pieces)
+        .filter((p) => {
+          const pRight = p.position.x + p.size.w;
+          const pBottom = p.position.y + p.size.h;
+          return !(pRight < minX || p.position.x > maxX || pBottom < minY || p.position.y > minY);
+        })
+        .map((p) => p.id);
+
+      draft.ui.selectedIds = intersected.length > 0 ? intersected : undefined;
+      draft.ui.selectedId = intersected[0];
+      draft.ui.primaryId = intersected[0];
+      draft.ui.marquee = undefined;
     })),
 
   nudgeSelected: (dx, dy) =>
     set(produce((draft: SceneState) => {
-      const selectedId = draft.ui.selectedId;
-      if (!selectedId) return;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length === 0) return;
 
-      const piece = draft.scene.pieces[selectedId];
-      if (!piece) return;
-
-      // Calculer position candidate
-      let candidateX = piece.position.x + dx;
-      let candidateY = piece.position.y + dy;
+      // Nudge de groupe : calculer bbox du groupe
+      const bbox = groupBBox(draft.scene, selectedIds);
 
       // Clamper dans la scène
       const clamped = clampToScene(
-        candidateX,
-        candidateY,
-        piece.size.w,
-        piece.size.h,
+        bbox.x + dx,
+        bbox.y + dy,
+        bbox.w,
+        bbox.h,
         draft.scene.size.w,
         draft.scene.size.h,
       );
 
-      // Appliquer snap si activé
-      let finalX = clamped.x;
-      let finalY = clamped.y;
+      const actualDx = clamped.x - bbox.x;
+      const actualDy = clamped.y - bbox.y;
+
+      // Appliquer snap grille si activé
+      let finalDx = actualDx;
+      let finalDy = actualDy;
       if (draft.ui.snap10mm) {
-        finalX = snapTo10mm(clamped.x);
-        finalY = snapTo10mm(clamped.y);
+        const snappedX = snapTo10mm(bbox.x + actualDx);
+        const snappedY = snapTo10mm(bbox.y + actualDy);
+        finalDx = snappedX - bbox.x;
+        finalDy = snappedY - bbox.y;
       }
 
-      // Simuler le déplacement et vérifier overlap
+      // Simuler le déplacement du groupe
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-      testScene.pieces[selectedId] = { ...piece, position: { x: finalX, y: finalY } };
+      for (const id of selectedIds) {
+        const p = draft.scene.pieces[id];
+        if (!p) continue;
+        testScene.pieces[id] = { ...p, position: { x: p.position.x + finalDx, y: p.position.y + finalDy } };
+      }
 
       const validation = validateNoOverlap(testScene);
 
       if (!validation.ok) {
-        // Conflit détecté → flasher l'invalide
         draft.ui.flashInvalidAt = Date.now();
       } else {
-        // OK → appliquer le déplacement
-        piece.position.x = finalX;
-        piece.position.y = finalY;
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
+          p.position.x += finalDx;
+          p.position.y += finalDy;
+        }
       }
     })),
 
@@ -239,11 +361,33 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const piece = draft.scene.pieces[id];
       if (!piece) return;
 
-      draft.ui.selectedId = id;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+
+      // Si la pièce n'est pas dans la sélection, selectOnly
+      if (!selectedIds.includes(id)) {
+        draft.ui.selectedId = id;
+        draft.ui.selectedIds = [id];
+        draft.ui.primaryId = id;
+      }
+
+      const finalSelectedIds = draft.ui.selectedIds ?? [id];
+
+      // Stocker les offsets pour le groupe
+      const groupOffsets: Record<ID, { dx: number; dy: number }> = {};
+      for (const sid of finalSelectedIds) {
+        const sp = draft.scene.pieces[sid];
+        if (!sp) continue;
+        groupOffsets[sid] = {
+          dx: sp.position.x - piece.position.x,
+          dy: sp.position.y - piece.position.y,
+        };
+      }
+
       draft.ui.dragging = {
         id,
         start: { x: piece.position.x, y: piece.position.y },
         candidate: undefined,
+        groupOffsets,
       };
     })),
 
@@ -255,38 +399,79 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const piece = draft.scene.pieces[dragging.id];
       if (!piece) return;
 
-      // Calculer position candidate
+      const selectedIds = draft.ui.selectedIds ?? [dragging.id];
+      const isGroupDrag = selectedIds.length > 1;
+
+      // Drag de groupe : désactiver snap entre pièces
       const candidateX = dragging.start.x + dx;
       const candidateY = dragging.start.y + dy;
 
-      // Clamper dans la scène
-      const clamped = clampToScene(
-        candidateX,
-        candidateY,
-        piece.size.w,
-        piece.size.h,
-        draft.scene.size.w,
-        draft.scene.size.h,
-      );
+      let finalX = candidateX;
+      let finalY = candidateY;
 
-      // Snap entre pièces (après clamp, avant snap grid)
-      const candidateRect = { x: clamped.x, y: clamped.y, w: piece.size.w, h: piece.size.h };
-      const snapResult = snapToPieces(draft.scene, candidateRect, 5, dragging.id);
+      if (isGroupDrag) {
+        // Clamp de groupe
+        const offsets = dragging.groupOffsets ?? {};
+        const groupRects = selectedIds
+          .map((sid) => {
+            const off = offsets[sid] ?? { dx: 0, dy: 0 };
+            const sp = draft.scene.pieces[sid];
+            if (!sp) return null;
+            return {
+              x: candidateX + off.dx,
+              y: candidateY + off.dy,
+              w: sp.size.w,
+              h: sp.size.h,
+            };
+          })
+          .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
 
-      // Stocker les guides
-      draft.ui.guides = snapResult.guides;
+        if (groupRects.length > 0) {
+          const gMinX = Math.min(...groupRects.map((r) => r.x));
+          const gMinY = Math.min(...groupRects.map((r) => r.y));
+          const gMaxX = Math.max(...groupRects.map((r) => r.x + r.w));
+          const gMaxY = Math.max(...groupRects.map((r) => r.y + r.h));
+          const gW = gMaxX - gMinX;
+          const gH = gMaxY - gMinY;
 
-      // Appliquer snap 10mm optionnel
-      let finalX = snapResult.x;
-      let finalY = snapResult.y;
-      if (draft.ui.snap10mm) {
-        finalX = snapTo10mm(snapResult.x);
-        finalY = snapTo10mm(snapResult.y);
+          const clamped = clampToScene(gMinX, gMinY, gW, gH, draft.scene.size.w, draft.scene.size.h);
+          const clampDx = clamped.x - gMinX;
+          const clampDy = clamped.y - gMinY;
+          finalX = candidateX + clampDx;
+          finalY = candidateY + clampDy;
+        }
+
+        draft.ui.guides = undefined;
+      } else {
+        // Drag simple : clamp + snap entre pièces
+        const clamped = clampToScene(candidateX, candidateY, piece.size.w, piece.size.h, draft.scene.size.w, draft.scene.size.h);
+        const candidateRect = { x: clamped.x, y: clamped.y, w: piece.size.w, h: piece.size.h };
+        const snapResult = snapToPieces(draft.scene, candidateRect, 5, dragging.id);
+        draft.ui.guides = snapResult.guides;
+        finalX = snapResult.x;
+        finalY = snapResult.y;
       }
 
-      // Simuler le déplacement et vérifier overlap
+      // Snap grille optionnel
+      if (draft.ui.snap10mm) {
+        finalX = snapTo10mm(finalX);
+        finalY = snapTo10mm(finalY);
+      }
+
+      // Simuler et valider
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-      testScene.pieces[dragging.id] = { ...piece, position: { x: finalX, y: finalY } };
+
+      if (isGroupDrag) {
+        const offsets = dragging.groupOffsets ?? {};
+        for (const sid of selectedIds) {
+          const off = offsets[sid] ?? { dx: 0, dy: 0 };
+          const sp = draft.scene.pieces[sid];
+          if (!sp) continue;
+          testScene.pieces[sid] = { ...sp, position: { x: finalX + off.dx, y: finalY + off.dy } };
+        }
+      } else {
+        testScene.pieces[dragging.id] = { ...piece, position: { x: finalX, y: finalY } };
+      }
 
       const validation = validateNoOverlap(testScene);
 
@@ -306,15 +491,27 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         return;
       }
 
-      // Commit si valide (position déjà snappée dans updateDrag)
+      const selectedIds = draft.ui.selectedIds ?? [dragging.id];
+      const isGroupDrag = selectedIds.length > 1;
+
       if (dragging.candidate.valid) {
-        const piece = draft.scene.pieces[dragging.id];
-        if (piece) {
-          piece.position.x = dragging.candidate.x;
-          piece.position.y = dragging.candidate.y;
+        if (isGroupDrag) {
+          const offsets = dragging.groupOffsets ?? {};
+          for (const sid of selectedIds) {
+            const off = offsets[sid] ?? { dx: 0, dy: 0 };
+            const sp = draft.scene.pieces[sid];
+            if (!sp) continue;
+            sp.position.x = dragging.candidate.x + off.dx;
+            sp.position.y = dragging.candidate.y + off.dy;
+          }
+        } else {
+          const piece = draft.scene.pieces[dragging.id];
+          if (piece) {
+            piece.position.x = dragging.candidate.x;
+            piece.position.y = dragging.candidate.y;
+          }
         }
       }
-      // Sinon revert implicite (ne pas modifier la position)
 
       draft.ui.dragging = undefined;
       draft.ui.guides = undefined;
@@ -379,23 +576,24 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   deleteSelected: () =>
     set(produce((draft: SceneState) => {
-      const selectedId = draft.ui.selectedId;
-      if (!selectedId) return;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length === 0) return;
 
-      const piece = draft.scene.pieces[selectedId];
-      if (!piece) return;
+      for (const selectedId of selectedIds) {
+        const piece = draft.scene.pieces[selectedId];
+        if (!piece) continue;
 
-      // Retirer la pièce du layer
-      const layer = draft.scene.layers[piece.layerId];
-      if (layer) {
-        layer.pieces = layer.pieces.filter((id) => id !== selectedId);
+        const layer = draft.scene.layers[piece.layerId];
+        if (layer) {
+          layer.pieces = layer.pieces.filter((id) => id !== selectedId);
+        }
+
+        delete draft.scene.pieces[selectedId];
       }
 
-      // Supprimer la pièce
-      delete draft.scene.pieces[selectedId];
-
-      // Désélectionner
       draft.ui.selectedId = undefined;
+      draft.ui.selectedIds = undefined;
+      draft.ui.primaryId = undefined;
     })),
 
   setPieceMaterial: (pieceId, materialId) =>
@@ -428,65 +626,91 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   rotateSelected: (deltaDeg) =>
     set(produce((draft: SceneState) => {
-      const selectedId = draft.ui.selectedId;
-      if (!selectedId) return;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length === 0) return;
 
-      const piece = draft.scene.pieces[selectedId];
-      if (!piece) return;
-
-      const currentDeg = (piece.rotationDeg ?? 0) as Deg;
-      piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
+      for (const selectedId of selectedIds) {
+        const piece = draft.scene.pieces[selectedId];
+        if (!piece) continue;
+        const currentDeg = (piece.rotationDeg ?? 0) as Deg;
+        piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
+      }
     })),
 
   setSelectedRotation: (deg) =>
     set(produce((draft: SceneState) => {
-      const selectedId = draft.ui.selectedId;
-      if (!selectedId) return;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length === 0) return;
 
-      const piece = draft.scene.pieces[selectedId];
-      if (!piece) return;
-
-      piece.rotationDeg = normDeg(deg);
+      for (const selectedId of selectedIds) {
+        const piece = draft.scene.pieces[selectedId];
+        if (!piece) continue;
+        piece.rotationDeg = normDeg(deg);
+      }
     })),
 
   duplicateSelected: () =>
     set(produce((draft: SceneState) => {
-      const selectedId = draft.ui.selectedId;
-      if (!selectedId) return;
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length === 0) return;
 
-      const originalPiece = draft.scene.pieces[selectedId];
-      if (!originalPiece) return;
-
-      // Créer une copie avec un nouvel ID
-      const newId = genId('piece');
       const offsetX = 20;
       const offsetY = 20;
+      const newIds: ID[] = [];
 
-      // Calculer position candidate
-      let newX = originalPiece.position.x + offsetX;
-      let newY = originalPiece.position.y + offsetY;
+      if (selectedIds.length === 1) {
+        // Duplication simple
+        const originalPiece = draft.scene.pieces[selectedIds[0]];
+        if (!originalPiece) return;
 
-      // Clamper dans la scène
-      const clamped = clampToScene(
-        newX,
-        newY,
-        originalPiece.size.w,
-        originalPiece.size.h,
-        draft.scene.size.w,
-        draft.scene.size.h,
-      );
+        const newId = genId('piece');
+        const clamped = clampToScene(
+          originalPiece.position.x + offsetX,
+          originalPiece.position.y + offsetY,
+          originalPiece.size.w,
+          originalPiece.size.h,
+          draft.scene.size.w,
+          draft.scene.size.h,
+        );
 
-      const newPiece: Piece = {
-        ...originalPiece,
-        id: newId,
-        position: { x: clamped.x, y: clamped.y },
-      };
+        const newPiece: Piece = {
+          ...originalPiece,
+          id: newId,
+          position: { x: clamped.x, y: clamped.y },
+        };
 
-      // Ajouter au layer
-      draft.scene.pieces[newId] = newPiece;
-      draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
+        draft.scene.pieces[newId] = newPiece;
+        draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
+        newIds.push(newId);
+      } else {
+        // Duplication de groupe
+        const bbox = groupBBox(draft.scene, selectedIds);
+        const clamped = clampToScene(bbox.x + offsetX, bbox.y + offsetY, bbox.w, bbox.h, draft.scene.size.w, draft.scene.size.h);
+        const groupDx = clamped.x - bbox.x;
+        const groupDy = clamped.y - bbox.y;
 
-      // Sélectionner la nouvelle pièce
-      draft.ui.selectedId = newId;
+        for (const selectedId of selectedIds) {
+          const originalPiece = draft.scene.pieces[selectedId];
+          if (!originalPiece) continue;
+
+          const newId = genId('piece');
+          const newPiece: Piece = {
+            ...originalPiece,
+            id: newId,
+            position: {
+              x: originalPiece.position.x + groupDx,
+              y: originalPiece.position.y + groupDy,
+            },
+          };
+
+          draft.scene.pieces[newId] = newPiece;
+          draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
+          newIds.push(newId);
+        }
+      }
+
+      draft.ui.selectedIds = newIds;
+      draft.ui.selectedId = newIds[0];
+      draft.ui.primaryId = newIds[0];
     })),
 }));
