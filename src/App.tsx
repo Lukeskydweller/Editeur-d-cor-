@@ -1,5 +1,5 @@
 import './App.css';
-import { useCounter } from './state/useCounter';
+import { useCounter } from '@/state/useCounter';
 
 export default function App() {
   const { count, inc, reset } = useCounter();
