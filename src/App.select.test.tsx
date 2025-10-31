@@ -17,6 +17,8 @@ beforeEach(() => {
     },
     ui: {
       selectedId: undefined,
+      flashInvalidAt: undefined,
+      dragging: undefined,
     },
   });
 });
@@ -36,7 +38,7 @@ test('selects piece on click', () => {
   const rect = canvas.querySelector('rect[fill="#60a5fa"]');
   expect(rect).toBeInTheDocument();
 
-  fireEvent.click(rect!);
+  fireEvent.pointerDown(rect!, { clientX: 100, clientY: 100 });
 
   // Vérifier que la pièce est maintenant sélectionnée
   const selectedId = useSceneStore.getState().ui.selectedId;
