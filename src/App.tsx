@@ -7,7 +7,7 @@ import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
 import { ResizeHandlesOverlay } from '@/components/ResizeHandlesOverlay';
 import type { ResizeHandle } from '@/lib/ui/resize';
-import { pieceBBox } from '@/lib/geom';
+import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -575,21 +575,27 @@ export default function App() {
                 const piece = scene.pieces[dragging.id];
                 if (!piece || piece.kind !== 'rect') return null;
 
-                const bbox = pieceBBox(piece); // Use rotation-aware AABB
+                // Ghost must show the piece AS IT WILL APPEAR after drop
+                // This means: using piece.position (converted from AABB candidate)
+                // with the piece's actual rotation and original size
                 const { x, y, valid } = dragging.candidate;
+                const { w, h } = piece.size; // Original size, not AABB
+
+                // Convert AABB position back to piece.position for rendering
+                const ghostPiecePos = aabbToPiecePosition(x, y, piece);
 
                 return (
                   <g
                     key="ghost"
-                    transform={`translate(${x} ${y}) rotate(0)`}
+                    transform={`translate(${ghostPiecePos.x} ${ghostPiecePos.y}) rotate(${piece.rotationDeg ?? 0})`}
                     data-testid="ghost-piece"
                     data-valid={valid ? 'true' : 'false'}
                   >
                     <rect
                       x="0"
                       y="0"
-                      width={bbox.w}
-                      height={bbox.h}
+                      width={w}
+                      height={h}
                       rx="6"
                       ry="6"
                       fill={valid ? '#60a5fa' : '#ef4444'}

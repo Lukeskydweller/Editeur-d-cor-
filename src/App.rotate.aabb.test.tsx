@@ -75,12 +75,18 @@ describe('Rotation-aware AABB calculations', () => {
 
     // Render and check ghost dimensions
     const { container } = render(<App />);
-    const ghost = container.querySelector('[data-testid="ghost-piece"] rect');
-    expect(ghost).toBeInTheDocument();
+    const ghostGroup = container.querySelector('[data-testid="ghost-piece"]');
+    const ghostRect = ghostGroup?.querySelector('rect');
+    expect(ghostRect).toBeInTheDocument();
 
-    // Ghost should match rotated AABB (80x120), not raw size (120x80)
-    expect(ghost?.getAttribute('width')).toBe('80');
-    expect(ghost?.getAttribute('height')).toBe('120');
+    // Ghost should use ORIGINAL dimensions (120x80) with rotation applied
+    // This matches how the piece will actually appear after drop
+    expect(ghostRect?.getAttribute('width')).toBe('120');
+    expect(ghostRect?.getAttribute('height')).toBe('80');
+
+    // Check that ghost has the same rotation as the piece
+    const transform = ghostGroup?.getAttribute('transform');
+    expect(transform).toContain('rotate(90)');
   });
 
   it('collision uses rotated AABB', () => {
