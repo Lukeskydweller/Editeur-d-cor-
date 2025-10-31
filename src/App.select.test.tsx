@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { beforeEach } from 'vitest';
 import App from './App';
 import { useSceneStore } from '@/state/useSceneStore';
@@ -51,11 +51,14 @@ test('selects piece on click', () => {
 
 test('nudges selected piece with arrow keys', () => {
   // Init scène avec pièce par défaut
-  const { initSceneWithDefaults, selectPiece } = useSceneStore.getState();
+  const { initSceneWithDefaults, selectPiece, setSnap10mm } = useSceneStore.getState();
   initSceneWithDefaults(600, 600);
 
   const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
   selectPiece(pieceId);
+
+  // Set snap OFF for 1mm steps
+  setSnap10mm(false);
 
   render(<App />);
 
@@ -63,23 +66,31 @@ test('nudges selected piece with arrow keys', () => {
   let piece = useSceneStore.getState().scene.pieces[pieceId];
   expect(piece.position).toEqual({ x: 40, y: 40 });
 
-  // ArrowRight → +1 en x
+  // ArrowRight → +1 en x (snap OFF)
   fireEvent.keyDown(window, { key: 'ArrowRight' });
   piece = useSceneStore.getState().scene.pieces[pieceId];
   expect(piece.position.x).toBe(41);
 
-  // Shift+ArrowRight → +10 en x
-  fireEvent.keyDown(window, { key: 'ArrowRight', shiftKey: true });
-  piece = useSceneStore.getState().scene.pieces[pieceId];
-  expect(piece.position.x).toBe(51);
+  // Set snap ON for 10mm steps
+  act(() => {
+    setSnap10mm(true);
+  });
 
-  // ArrowDown → +1 en y
+  // ArrowRight → +10 en x (snap ON)
+  // 41 + 10 = 51, but snaps to 50 (nearest 10mm grid)
+  fireEvent.keyDown(window, { key: 'ArrowRight' });
+  piece = useSceneStore.getState().scene.pieces[pieceId];
+  expect(piece.position.x).toBe(50);
+
+  // ArrowDown → +10 en y (snap ON)
+  // 40 + 10 = 50 (already on grid)
   fireEvent.keyDown(window, { key: 'ArrowDown' });
   piece = useSceneStore.getState().scene.pieces[pieceId];
-  expect(piece.position.y).toBe(41);
+  expect(piece.position.y).toBe(50);
 
-  // Shift+ArrowUp → -10 en y
-  fireEvent.keyDown(window, { key: 'ArrowUp', shiftKey: true });
+  // ArrowUp → -10 en y (snap ON)
+  // 50 - 10 = 40 (already on grid)
+  fireEvent.keyDown(window, { key: 'ArrowUp' });
   piece = useSceneStore.getState().scene.pieces[pieceId];
-  expect(piece.position.y).toBe(31);
+  expect(piece.position.y).toBe(40);
 });

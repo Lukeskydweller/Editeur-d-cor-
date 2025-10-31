@@ -5,7 +5,7 @@ import { useSceneStore } from '@/state/useSceneStore';
 import { validateNoOverlap, validateInsideScene, validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
-import { ResizeHandles } from '@/components/ResizeHandles';
+import { ResizeHandlesOverlay } from '@/components/ResizeHandlesOverlay';
 import type { ResizeHandle } from '@/lib/ui/resize';
 
 export default function App() {
@@ -69,6 +69,12 @@ export default function App() {
   // Gestion du nudge clavier + Delete + Rotation + Duplication + Escape + Ctrl+A + Undo/Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Space → Prevent page scroll (used for drag mode)
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault();
+        return;
+      }
+
       // Ctrl+Z → Undo
       if (e.key === 'z' && e.ctrlKey && !e.shiftKey) {
         e.preventDefault();
@@ -76,8 +82,11 @@ export default function App() {
         return;
       }
 
-      // Ctrl+Y or Ctrl+Shift+Z → Redo
-      if ((e.key === 'y' && e.ctrlKey) || (e.key === 'z' && e.ctrlKey && e.shiftKey)) {
+      // Ctrl+Y or Ctrl+Shift+Z → Redo (support metaKey for Mac)
+      if (
+        ((e.ctrlKey || e.metaKey) && e.key === 'y') ||
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')
+      ) {
         e.preventDefault();
         redo();
         return;
@@ -144,7 +153,8 @@ export default function App() {
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       e.preventDefault();
 
-      const step = e.shiftKey ? 10 : 1;
+      // Step depends on snap10mm: ON = 10mm, OFF = 1mm
+      const step = snap10mm ? 10 : 1;
       let dx = 0;
       let dy = 0;
 
@@ -158,7 +168,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo, resizing, endResize]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo, resizing, endResize, snap10mm]);
 
   // Export JSON
   const handleExport = () => {
@@ -214,6 +224,9 @@ export default function App() {
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
     e.stopPropagation();
+
+    // Don't start drag if resizing
+    if (resizing) return;
 
     // Shift-click → toggle selection
     if (e.shiftKey) {
@@ -305,12 +318,37 @@ export default function App() {
   };
 
   // Resize handle start
-  const handleResizeStart = (pieceId: string, handle: ResizeHandle) => {
+  const handleResizeStart = (pieceId: string, handle: ResizeHandle, clientX: number, clientY: number) => {
     const rect = svgRef.current?.getBoundingClientRect();
-    const factor = pxToMmFactor(rect?.width ?? 0, scene.size.w);
+    if (!rect) return;
+
+    const factor = pxToMmFactor(rect.width, scene.size.w);
     resizeFactorRef.current = factor;
 
+    // Convert client coordinates to SVG mm coordinates
+    const svgX = (clientX - rect.left) * factor;
+    const svgY = (clientY - rect.top) * factor;
+
+    resizeStartRef.current = { x: clientX, y: clientY };
+
     startResize(pieceId, handle);
+    updateResize({ x: svgX, y: svgY });
+  };
+
+  const handleResizeMove = (clientX: number, clientY: number) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || !resizeStartRef.current) return;
+
+    const factor = resizeFactorRef.current;
+    const svgX = (clientX - rect.left) * factor;
+    const svgY = (clientY - rect.top) * factor;
+
+    updateResize({ x: svgX, y: svgY });
+  };
+
+  const handleResizeEnd = () => {
+    endResize(true);
+    resizeStartRef.current = null;
   };
 
   // Validation des règles
@@ -326,9 +364,11 @@ export default function App() {
   return (
     <main className="min-h-dvh p-6" tabIndex={0}>
       <div className="mx-auto max-w-7xl grid grid-cols-1 md:grid-cols-[18rem_1fr] gap-6 items-start">
-        <Sidebar />
+        <div className="relative z-20">
+          <Sidebar />
+        </div>
 
-        <section>
+        <section className="relative z-10">
           <Card className="w-full">
             <CardContent className="p-6 space-y-4">
               <header className="flex items-baseline justify-between">
@@ -357,10 +397,10 @@ export default function App() {
                     Rotate +90°
                   </Button>
                   <Button onClick={() => setSelectedRotation(0)} disabled={!selectedId} size="sm" variant="outline">
-                    Set 0°
+                    Rotation 0°
                   </Button>
                   <Button onClick={() => setSelectedRotation(90)} disabled={!selectedId} size="sm" variant="outline">
-                    Set 90°
+                    Rotation 90°
                   </Button>
                 </div>
                 <div className="flex gap-2">
@@ -471,7 +511,7 @@ export default function App() {
 
           {/* Canvas SVG */}
           <div
-            className="w-full overflow-auto rounded-xl border border-white/10 bg-black/20"
+            className="relative w-full overflow-auto rounded-xl border border-white/10 bg-black/20"
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerLeave}
@@ -561,26 +601,6 @@ export default function App() {
                   </g>
                 );
               })()}
-              {/* Resize handles - only for single selection */}
-              {selectedId && (!selectedIds || selectedIds.length === 1) && (() => {
-                const piece = scene.pieces[selectedId];
-                if (!piece || piece.kind !== 'rect') return null;
-
-                const rect = {
-                  x: piece.position.x,
-                  y: piece.position.y,
-                  w: piece.size.w,
-                  h: piece.size.h,
-                };
-
-                return (
-                  <ResizeHandles
-                    rect={rect}
-                    onStart={(handle) => handleResizeStart(selectedId, handle)}
-                    disabled={false}
-                  />
-                );
-              })()}
               {/* Snap guides */}
               {guides && guides.length > 0 && (
                 <g data-testid="snap-guides">
@@ -652,6 +672,32 @@ export default function App() {
                 strokeWidth="1"
               />
             </svg>
+            {/* Resize handles overlay - only for single selection and rotation 0° */}
+            {selectedId && (!selectedIds || selectedIds.length === 1) && (() => {
+              const piece = scene.pieces[selectedId];
+              if (!piece || piece.kind !== 'rect') return null;
+
+              // V1: Only show handles for non-rotated pieces (axis-aligned)
+              if (piece.rotationDeg !== 0) return null;
+
+              const rect = {
+                x: piece.position.x,
+                y: piece.position.y,
+                w: piece.size.w,
+                h: piece.size.h,
+              };
+
+              return (
+                <ResizeHandlesOverlay
+                  rect={rect}
+                  svgElement={svgRef.current}
+                  onStart={(handle, clientX, clientY) => handleResizeStart(selectedId, handle, clientX, clientY)}
+                  onMove={handleResizeMove}
+                  onEnd={handleResizeEnd}
+                  isResizing={!!resizing}
+                />
+              );
+            })()}
               </div>
             </CardContent>
           </Card>

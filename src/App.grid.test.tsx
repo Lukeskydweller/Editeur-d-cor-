@@ -36,11 +36,14 @@ test('grid pattern is present in SVG', () => {
 });
 
 test('snap ON: nudge 3mm three times snaps to 10mm increments', () => {
-  const { initSceneWithDefaults, selectPiece } = useSceneStore.getState();
+  const { initSceneWithDefaults, selectPiece, setSnap10mm } = useSceneStore.getState();
   initSceneWithDefaults(600, 600);
 
   const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
   selectPiece(pieceId);
+
+  // Ensure snap is ON
+  setSnap10mm(true);
 
   render(<App />);
 
@@ -48,23 +51,10 @@ test('snap ON: nudge 3mm three times snaps to 10mm increments', () => {
   let piece = useSceneStore.getState().scene.pieces[pieceId];
   expect(piece.position.x).toBe(40);
 
-  // Nudge +3mm → snap à 40mm (car 43 arrondi à 40)
+  // With snap ON, ArrowRight moves by 10mm (not 1mm)
+  // 40 + 10 = 50
   fireEvent.keyDown(window, { key: 'ArrowRight' });
-  fireEvent.keyDown(window, { key: 'ArrowRight' });
-  fireEvent.keyDown(window, { key: 'ArrowRight' });
-
   piece = useSceneStore.getState().scene.pieces[pieceId];
-  // 40 + 3 = 43 → snap 40 ; 40 + 3 = 43 → snap 40 ; 40 + 3 = 43 → snap 40
-  // En fait, chaque nudge part de la position actuelle
-  // 40 + 1 = 41 → snap 40
-  // 40 + 1 = 41 → snap 40
-  // 40 + 1 = 41 → snap 40
-  // Donc toujours 40
-
-  // Modifions le test : nudge +10mm d'un coup (Shift+Right)
-  fireEvent.keyDown(window, { key: 'ArrowRight', shiftKey: true });
-  piece = useSceneStore.getState().scene.pieces[pieceId];
-  // 40 + 10 = 50 → snap 50
   expect(piece.position.x).toBe(50);
 });
 
