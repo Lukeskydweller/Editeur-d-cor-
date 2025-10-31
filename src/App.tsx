@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
 import { validateNoOverlap, validateInsideScene } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
@@ -17,6 +18,8 @@ export default function App() {
   const updateDrag = useSceneStore((s) => s.updateDrag);
   const endDrag = useSceneStore((s) => s.endDrag);
   const cancelDrag = useSceneStore((s) => s.cancelDrag);
+  const addRectAtCenter = useSceneStore((s) => s.addRectAtCenter);
+  const deleteSelected = useSceneStore((s) => s.deleteSelected);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -29,9 +32,17 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
-  // Gestion du nudge clavier
+  // Gestion du nudge clavier + Delete
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Delete key
+      if (e.key === 'Delete') {
+        e.preventDefault();
+        deleteSelected();
+        return;
+      }
+
+      // Arrow keys
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       e.preventDefault();
 
@@ -49,7 +60,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected]);
+  }, [nudgeSelected, deleteSelected]);
 
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
@@ -111,6 +122,14 @@ export default function App() {
               {Object.keys(scene.pieces).length} pièce(s) • {scene.size.w}×{scene.size.h} mm
             </div>
           </header>
+
+          {/* Toolbar */}
+          <div className="flex gap-2">
+            <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
+            <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
+              Supprimer
+            </Button>
+          </div>
 
           {/* Barre de statut des règles */}
           <div

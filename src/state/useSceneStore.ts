@@ -43,6 +43,8 @@ type SceneActions = {
   updateDrag: (dx: number, dy: number) => void;
   endDrag: () => void;
   cancelDrag: () => void;
+  addRectAtCenter: (w: Milli, h: Milli) => void;
+  deleteSelected: () => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -267,5 +269,77 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   cancelDrag: () =>
     set(produce((draft: SceneState) => {
       draft.ui.dragging = undefined;
+    })),
+
+  addRectAtCenter: (w, h) =>
+    set(produce((draft: SceneState) => {
+      // Utiliser le premier layer (pour l'instant)
+      let layerId = draft.scene.layerOrder[0];
+      if (!layerId) {
+        // Créer un layer si absent
+        layerId = genId('layer');
+        draft.scene.layers[layerId] = {
+          id: layerId,
+          name: 'Calque 1',
+          z: 0,
+          pieces: [],
+        };
+        draft.scene.layerOrder.push(layerId);
+      }
+
+      // Utiliser le premier matériau
+      let materialId = Object.keys(draft.scene.materials)[0];
+      if (!materialId) {
+        // Créer un matériau si absent
+        materialId = genId('mat');
+        draft.scene.materials[materialId] = {
+          id: materialId,
+          name: 'Matériau 1',
+          oriented: false,
+        };
+      }
+
+      // Créer la nouvelle pièce au centre
+      const pieceId = genId('piece');
+      const centerX = (draft.scene.size.w - w) / 2;
+      const centerY = (draft.scene.size.h - h) / 2;
+
+      const newPiece: Piece = {
+        id: pieceId,
+        layerId,
+        materialId,
+        position: { x: centerX, y: centerY },
+        rotationDeg: 0,
+        scale: { x: 1, y: 1 },
+        kind: 'rect',
+        size: { w, h },
+      };
+
+      draft.scene.pieces[pieceId] = newPiece;
+      draft.scene.layers[layerId].pieces.push(pieceId);
+
+      // Auto-sélectionner la nouvelle pièce
+      draft.ui.selectedId = pieceId;
+    })),
+
+  deleteSelected: () =>
+    set(produce((draft: SceneState) => {
+      const selectedId = draft.ui.selectedId;
+      if (!selectedId) return;
+
+      const piece = draft.scene.pieces[selectedId];
+      if (!piece) return;
+
+      // Retirer la pièce du layer
+      const layer = draft.scene.layers[piece.layerId];
+      if (layer) {
+        layer.pieces = layer.pieces.filter((id) => id !== selectedId);
+      }
+
+      // Supprimer la pièce
+      delete draft.scene.pieces[selectedId];
+
+      // Désélectionner
+      draft.ui.selectedId = undefined;
     })),
 }));
