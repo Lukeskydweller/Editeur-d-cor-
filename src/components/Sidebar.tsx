@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
+import { SidebarDrafts } from '@/components/SidebarDrafts';
 
 export function Sidebar() {
   const scene = useSceneStore((s) => s.scene);
@@ -29,6 +30,8 @@ export function Sidebar() {
 
   return (
     <aside role="complementary" className="w-full md:w-72 flex flex-col gap-4">
+      <SidebarDrafts />
+
       <Card>
         <CardHeader>
           <CardTitle>Layers</CardTitle>

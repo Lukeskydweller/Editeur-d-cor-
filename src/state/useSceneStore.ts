@@ -3,6 +3,16 @@ import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
 import { validateNoOverlap } from '@/lib/sceneRules';
 import { snapToPieces, snapGroupToPieces, type SnapGuide } from '@/lib/ui/snap';
+import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
+import {
+  listDrafts,
+  saveDraft,
+  loadDraft,
+  deleteDraft as deleteDraftFromStorage,
+  upsertDraftName,
+  newDraftName,
+  type DraftMeta,
+} from '@/lib/drafts';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -51,6 +61,16 @@ function groupBBox(scene: SceneDraft, ids: ID[]) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+type SceneStateSnapshot = {
+  scene: SceneDraft;
+  ui: {
+    snap10mm?: boolean;
+    selectedIds?: ID[];
+    selectedId?: ID;
+    primaryId?: ID;
+  };
+};
+
 type SceneState = {
   scene: SceneDraft;
   ui: {
@@ -67,6 +87,11 @@ type SceneState = {
     marquee?: { x0: number; y0: number; x1: number; y1: number };
     snap10mm?: boolean;
     guides?: SnapGuide[];
+    history?: {
+      past: SceneStateSnapshot[];
+      future: SceneStateSnapshot[];
+      limit: number;
+    };
   };
 };
 
@@ -106,7 +131,71 @@ type SceneActions = {
   moveLayerBackward: (layerId: ID) => void;
   moveLayerToFront: (layerId: ID) => void;
   moveLayerToBack: (layerId: ID) => void;
+  undo: () => void;
+  redo: () => void;
+  toSceneFileV1: () => SceneFileV1;
+  importSceneFileV1: (file: SceneFileV1) => void;
+  createDraft: () => void;
+  saveToDraft: (id: string) => void;
+  loadDraftById: (id: string) => void;
+  renameDraft: (id: string, name: string) => void;
+  deleteDraftById: (id: string) => void;
 };
+
+// Helper: deep clone minimal snapshot
+function takeSnapshot(s: SceneState): SceneStateSnapshot {
+  return {
+    scene: JSON.parse(JSON.stringify(s.scene)),
+    ui: {
+      snap10mm: s.ui.snap10mm,
+      selectedIds: s.ui.selectedIds ? [...s.ui.selectedIds] : undefined,
+      selectedId: s.ui.selectedId,
+      primaryId: s.ui.primaryId,
+    },
+  };
+}
+
+// Helper: restore snapshot
+function applySnapshot(draft: SceneState, snap: SceneStateSnapshot): void {
+  draft.scene = JSON.parse(JSON.stringify(snap.scene));
+  draft.ui.snap10mm = snap.ui.snap10mm;
+  draft.ui.selectedIds = snap.ui.selectedIds ? [...snap.ui.selectedIds] : undefined;
+  draft.ui.selectedId = snap.ui.selectedId;
+  draft.ui.primaryId = snap.ui.primaryId;
+}
+
+// Helper: push to history with FIFO limit
+function pushHistory(draft: SceneState, snap: SceneStateSnapshot): void {
+  if (!draft.ui.history) {
+    draft.ui.history = { past: [], future: [], limit: 100 };
+  }
+  draft.ui.history.past.push(snap);
+  if (draft.ui.history.past.length > draft.ui.history.limit) {
+    draft.ui.history.past.shift(); // FIFO drop
+  }
+  draft.ui.history.future = []; // Clear future on new action
+}
+
+// Helper: autosave to localStorage
+function autosave(snap: SceneStateSnapshot): void {
+  try {
+    localStorage.setItem('editeur.scene.v1', JSON.stringify(snap));
+  } catch (e) {
+    console.error('Autosave failed:', e);
+  }
+}
+
+// Helper: restore from localStorage
+function restoreFromAutosave(): SceneStateSnapshot | null {
+  try {
+    const stored = localStorage.getItem('editeur.scene.v1');
+    if (!stored) return null;
+    return JSON.parse(stored);
+  } catch (e) {
+    console.error('Restore failed:', e);
+    return null;
+  }
+}
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   // État initial minimal
@@ -128,6 +217,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     marquee: undefined,
     snap10mm: true,
     guides: undefined,
+    history: {
+      past: [],
+      future: [],
+      limit: 100,
+    },
   },
 
   // Actions
@@ -153,7 +247,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   setMaterialOrientation: (materialId, orientationDeg) =>
     set(produce((draft: SceneState) => {
       const mat = draft.scene.materials[materialId];
-      if (mat && mat.oriented) mat.orientationDeg = orientationDeg;
+      if (mat && mat.oriented) {
+        const snap = takeSnapshot(draft);
+        mat.orientationDeg = orientationDeg;
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }
     })),
 
   addLayer: (name) =>
@@ -196,6 +295,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   initSceneWithDefaults: (w, h) =>
     set(produce((draft: SceneState) => {
+      // Try to restore from autosave (skip in test mode)
+      const isTest = typeof import.meta !== 'undefined' && (import.meta as any).vitest === true;
+      if (!isTest) {
+        const restored = restoreFromAutosave();
+        if (restored && restored.scene.layerOrder.length > 0) {
+          applySnapshot(draft, restored);
+          return;
+        }
+      }
+
       // Reset scène
       draft.scene = {
         id: genId('scene'),
@@ -312,6 +421,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
 
+      const snap = takeSnapshot(draft);
+
       // Nudge de groupe : calculer bbox du groupe
       const bbox = groupBBox(draft.scene, selectedIds);
 
@@ -351,11 +462,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!validation.ok) {
         draft.ui.flashInvalidAt = Date.now();
       } else {
-        for (const id of selectedIds) {
-          const p = draft.scene.pieces[id];
-          if (!p) continue;
-          p.position.x += finalDx;
-          p.position.y += finalDy;
+        if (finalDx !== 0 || finalDy !== 0) {
+          for (const id of selectedIds) {
+            const p = draft.scene.pieces[id];
+            if (!p) continue;
+            p.position.x += finalDx;
+            p.position.y += finalDy;
+          }
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
         }
       }
     })),
@@ -506,6 +621,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         return;
       }
 
+      const snap = takeSnapshot(draft);
       const selectedIds = draft.ui.selectedIds ?? [dragging.id];
       const isGroupDrag = selectedIds.length > 1;
 
@@ -526,6 +642,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             piece.position.y = dragging.candidate.y;
           }
         }
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
       }
 
       draft.ui.dragging = undefined;
@@ -540,6 +658,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   addRectAtCenter: (w, h) =>
     set(produce((draft: SceneState) => {
+      const snap = takeSnapshot(draft);
+
       // Utiliser le premier layer (pour l'instant)
       let layerId = draft.scene.layerOrder[0];
       if (!layerId) {
@@ -587,12 +707,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       // Auto-sélectionner la nouvelle pièce
       draft.ui.selectedId = pieceId;
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   deleteSelected: () =>
     set(produce((draft: SceneState) => {
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
+
+      const snap = takeSnapshot(draft);
 
       for (const selectedId of selectedIds) {
         const piece = draft.scene.pieces[selectedId];
@@ -609,13 +734,19 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = undefined;
       draft.ui.selectedIds = undefined;
       draft.ui.primaryId = undefined;
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   setPieceMaterial: (pieceId, materialId) =>
     set(produce((draft: SceneState) => {
       const p = draft.scene.pieces[pieceId];
       if (p && draft.scene.materials[materialId]) {
+        const snap = takeSnapshot(draft);
         p.materialId = materialId;
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
       }
     })),
 
@@ -628,6 +759,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(produce((draft: SceneState) => {
       const m = draft.scene.materials[materialId];
       if (m) {
+        const snap = takeSnapshot(draft);
         m.oriented = oriented;
         if (!oriented) {
           // Retirer orientationDeg si on désactive oriented
@@ -636,6 +768,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           // Initialiser à 0 par défaut
           m.orientationDeg = 0;
         }
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
       }
     })),
 
@@ -644,12 +778,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
 
+      const snap = takeSnapshot(draft);
+
       for (const selectedId of selectedIds) {
         const piece = draft.scene.pieces[selectedId];
         if (!piece) continue;
         const currentDeg = (piece.rotationDeg ?? 0) as Deg;
         piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
       }
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   setSelectedRotation: (deg) =>
@@ -657,17 +796,24 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
 
+      const snap = takeSnapshot(draft);
+
       for (const selectedId of selectedIds) {
         const piece = draft.scene.pieces[selectedId];
         if (!piece) continue;
         piece.rotationDeg = normDeg(deg);
       }
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   duplicateSelected: () =>
     set(produce((draft: SceneState) => {
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
+
+      const snap = takeSnapshot(draft);
 
       const offsetX = 20;
       const offsetY = 20;
@@ -727,45 +873,208 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = newIds;
       draft.ui.selectedId = newIds[0];
       draft.ui.primaryId = newIds[0];
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   moveLayerForward: (layerId) =>
     set(produce((draft: SceneState) => {
       const idx = draft.scene.layerOrder.indexOf(layerId);
       if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
+
+      const snap = takeSnapshot(draft);
+
       // Swap with next
       [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx + 1]] = [
         draft.scene.layerOrder[idx + 1],
         draft.scene.layerOrder[idx],
       ];
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   moveLayerBackward: (layerId) =>
     set(produce((draft: SceneState) => {
       const idx = draft.scene.layerOrder.indexOf(layerId);
       if (idx === -1 || idx === 0) return;
+
+      const snap = takeSnapshot(draft);
+
       // Swap with previous
       [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx - 1]] = [
         draft.scene.layerOrder[idx - 1],
         draft.scene.layerOrder[idx],
       ];
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   moveLayerToFront: (layerId) =>
     set(produce((draft: SceneState) => {
       const idx = draft.scene.layerOrder.indexOf(layerId);
       if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
+
+      const snap = takeSnapshot(draft);
+
       // Remove and push to end
       draft.scene.layerOrder.splice(idx, 1);
       draft.scene.layerOrder.push(layerId);
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
     })),
 
   moveLayerToBack: (layerId) =>
     set(produce((draft: SceneState) => {
       const idx = draft.scene.layerOrder.indexOf(layerId);
       if (idx === -1 || idx === 0) return;
+
+      const snap = takeSnapshot(draft);
+
       // Remove and unshift to beginning
       draft.scene.layerOrder.splice(idx, 1);
       draft.scene.layerOrder.unshift(layerId);
+
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
+    })),
+
+  undo: () =>
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.history || draft.ui.history.past.length === 0) return;
+
+      const currentSnap = takeSnapshot(draft);
+      const prevSnap = draft.ui.history.past.pop();
+      if (!prevSnap) return;
+
+      draft.ui.history.future.push(currentSnap);
+      applySnapshot(draft, prevSnap);
+      autosave(prevSnap);
+    })),
+
+  redo: () =>
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.history || draft.ui.history.future.length === 0) return;
+
+      const currentSnap = takeSnapshot(draft);
+      const nextSnap = draft.ui.history.future.pop();
+      if (!nextSnap) return;
+
+      draft.ui.history.past.push(currentSnap);
+      applySnapshot(draft, nextSnap);
+      autosave(nextSnap);
+    })),
+
+  toSceneFileV1: () => {
+    const state = useSceneStore.getState();
+    const snap = takeSnapshot(state);
+    return {
+      version: 1,
+      scene: snap.scene,
+      ui: snap.ui,
+    };
+  },
+
+  importSceneFileV1: (file) =>
+    set(produce((draft: SceneState) => {
+      // Validate file format
+      if (!isSceneFileV1(file)) {
+        throw new Error('Invalid scene file format (version non supportée ou structure invalide)');
+      }
+
+      // Normalize the file
+      const normalized = normalizeSceneFileV1(file);
+
+      // Take snapshot before import for history
+      const snap = takeSnapshot(draft);
+
+      // Apply the imported scene
+      applySnapshot(draft, {
+        scene: normalized.scene,
+        ui: normalized.ui ?? {},
+      });
+
+      // Push to history and autosave
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
+    })),
+
+  createDraft: () =>
+    set(produce((draft: SceneState) => {
+      const id = genId('draft');
+      const name = newDraftName();
+      const data = useSceneStore.getState().toSceneFileV1();
+      const jsonString = JSON.stringify(data);
+
+      const meta: DraftMeta = {
+        id,
+        name,
+        updatedAt: new Date().toISOString(),
+        bytes: jsonString.length,
+      };
+
+      saveDraft(meta, data);
+    })),
+
+  saveToDraft: (id) =>
+    set(produce((draft: SceneState) => {
+      const data = useSceneStore.getState().toSceneFileV1();
+      const jsonString = JSON.stringify(data);
+
+      const existing = loadDraft(id);
+      if (!existing) return;
+
+      const meta: DraftMeta = {
+        id,
+        name: existing.meta.name,
+        updatedAt: new Date().toISOString(),
+        bytes: jsonString.length,
+      };
+
+      saveDraft(meta, data);
+    })),
+
+  loadDraftById: (id) =>
+    set(produce((draft: SceneState) => {
+      const loaded = loadDraft(id);
+      if (!loaded) {
+        console.warn(`[drafts] Draft ${id} not found`);
+        return;
+      }
+
+      // Validate loaded data
+      if (!isSceneFileV1(loaded.data)) {
+        console.warn(`[drafts] Draft ${id} has invalid format`);
+        return;
+      }
+
+      // Normalize the file
+      const normalized = normalizeSceneFileV1(loaded.data);
+
+      // Take snapshot before load for history
+      const snap = takeSnapshot(draft);
+
+      // Apply the loaded scene
+      applySnapshot(draft, {
+        scene: normalized.scene,
+        ui: normalized.ui ?? {},
+      });
+
+      // Push to history and autosave
+      pushHistory(draft, snap);
+      autosave(takeSnapshot(draft));
+    })),
+
+  renameDraft: (id, name) =>
+    set(produce((draft: SceneState) => {
+      upsertDraftName(id, name);
+    })),
+
+  deleteDraftById: (id) =>
+    set(produce((draft: SceneState) => {
+      deleteDraftFromStorage(id);
     })),
 }));
