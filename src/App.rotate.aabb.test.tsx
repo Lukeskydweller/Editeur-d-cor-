@@ -84,9 +84,9 @@ describe('Rotation-aware AABB calculations', () => {
     expect(ghostRect?.getAttribute('width')).toBe('120');
     expect(ghostRect?.getAttribute('height')).toBe('80');
 
-    // Check that ghost has the same rotation as the piece
+    // Check that ghost has the same rotation as the piece (rotation around center)
     const transform = ghostGroup?.getAttribute('transform');
-    expect(transform).toContain('rotate(90)');
+    expect(transform).toMatch(/rotate\(90\s/);
   });
 
   it('collision uses rotated AABB', () => {

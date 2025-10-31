@@ -549,7 +549,7 @@ export default function App() {
                 return (
                   <g
                     key={p.id}
-                    transform={`translate(${x} ${y}) rotate(${p.rotationDeg})`}
+                    transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
                     data-testid={isSelected ? 'piece-selected' : undefined}
                     data-invalid={isFlashingInvalid ? 'true' : undefined}
                   >
@@ -587,7 +587,7 @@ export default function App() {
                 return (
                   <g
                     key="ghost"
-                    transform={`translate(${ghostPiecePos.x} ${ghostPiecePos.y}) rotate(${piece.rotationDeg ?? 0})`}
+                    transform={`translate(${ghostPiecePos.x} ${ghostPiecePos.y}) rotate(${piece.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
                     data-testid="ghost-piece"
                     data-valid={valid ? 'true' : 'false'}
                   >
