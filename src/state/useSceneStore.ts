@@ -14,6 +14,11 @@ function clampToScene(x: number, y: number, w: number, h: number, sceneW: number
   return { x: nx, y: ny };
 }
 
+// helper interne : snap à la grille 10mm
+function snapTo10mm(x: number): number {
+  return Math.round(x / 10) * 10;
+}
+
 type SceneState = {
   scene: SceneDraft;
   ui: {
@@ -24,6 +29,7 @@ type SceneState = {
       start: { x: number; y: number };
       candidate?: { x: number; y: number; valid: boolean };
     };
+    snap10mm?: boolean;
   };
 };
 
@@ -46,6 +52,7 @@ type SceneActions = {
   addRectAtCenter: (w: Milli, h: Milli) => void;
   deleteSelected: () => void;
   setPieceMaterial: (pieceId: ID, materialId: ID) => void;
+  setSnap10mm: (on: boolean) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -63,6 +70,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     selectedId: undefined,
     flashInvalidAt: undefined,
     dragging: undefined,
+    snap10mm: true,
   },
 
   // Actions
@@ -169,8 +177,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!piece) return;
 
       // Calculer position candidate
-      const candidateX = piece.position.x + dx;
-      const candidateY = piece.position.y + dy;
+      let candidateX = piece.position.x + dx;
+      let candidateY = piece.position.y + dy;
 
       // Clamper dans la scène
       const clamped = clampToScene(
@@ -182,9 +190,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.scene.size.h,
       );
 
+      // Appliquer snap si activé
+      let finalX = clamped.x;
+      let finalY = clamped.y;
+      if (draft.ui.snap10mm) {
+        finalX = snapTo10mm(clamped.x);
+        finalY = snapTo10mm(clamped.y);
+      }
+
       // Simuler le déplacement et vérifier overlap
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-      testScene.pieces[selectedId] = { ...piece, position: { x: clamped.x, y: clamped.y } };
+      testScene.pieces[selectedId] = { ...piece, position: { x: finalX, y: finalY } };
 
       const validation = validateNoOverlap(testScene);
 
@@ -193,8 +209,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.flashInvalidAt = Date.now();
       } else {
         // OK → appliquer le déplacement
-        piece.position.x = clamped.x;
-        piece.position.y = clamped.y;
+        piece.position.x = finalX;
+        piece.position.y = finalY;
       }
     })),
 
@@ -258,8 +274,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (dragging.candidate.valid) {
         const piece = draft.scene.pieces[dragging.id];
         if (piece) {
-          piece.position.x = dragging.candidate.x;
-          piece.position.y = dragging.candidate.y;
+          let finalX = dragging.candidate.x;
+          let finalY = dragging.candidate.y;
+
+          // Appliquer snap si activé
+          if (draft.ui.snap10mm) {
+            finalX = snapTo10mm(dragging.candidate.x);
+            finalY = snapTo10mm(dragging.candidate.y);
+          }
+
+          piece.position.x = finalX;
+          piece.position.y = finalY;
         }
       }
       // Sinon revert implicite (ne pas modifier la position)
@@ -350,5 +375,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (p && draft.scene.materials[materialId]) {
         p.materialId = materialId;
       }
+    })),
+
+  setSnap10mm: (on) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.snap10mm = on;
     })),
 }));

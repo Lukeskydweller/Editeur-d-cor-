@@ -21,6 +21,8 @@ export default function App() {
   const cancelDrag = useSceneStore((s) => s.cancelDrag);
   const addRectAtCenter = useSceneStore((s) => s.addRectAtCenter);
   const deleteSelected = useSceneStore((s) => s.deleteSelected);
+  const snap10mm = useSceneStore((s) => s.ui.snap10mm ?? true);
+  const setSnap10mm = useSceneStore((s) => s.setSnap10mm);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -129,11 +131,23 @@ export default function App() {
               </header>
 
               {/* Toolbar */}
-              <div className="flex gap-2">
-                <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
-                <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
-                  Supprimer
-                </Button>
+              <div className="flex items-center gap-4">
+                <div className="flex gap-2">
+                  <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
+                  <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
+                    Supprimer
+                  </Button>
+                </div>
+                <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!snap10mm}
+                    onChange={(e) => setSnap10mm(e.target.checked)}
+                    aria-label="toggle-snap-10mm"
+                    className="cursor-pointer"
+                  />
+                  <span>Snap 10 mm</span>
+                </label>
               </div>
 
           {/* Barre de statut des règles */}
@@ -182,8 +196,17 @@ export default function App() {
               role="img"
               aria-label="editor-canvas"
             >
+              {/* Grille 10mm */}
+              <defs>
+                <pattern id="grid10mm" width="10" height="10" patternUnits="userSpaceOnUse">
+                  <path d="M 10 0 L 0 0 0 10" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5" />
+                </pattern>
+              </defs>
+
               {/* fond */}
               <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="#0f172a" />
+              {/* grille sous les pièces */}
+              <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="url(#grid10mm)" />
               {/* pièces rect */}
               {Object.values(scene.pieces).map((p) => {
                 if (p.kind !== 'rect') return null;
