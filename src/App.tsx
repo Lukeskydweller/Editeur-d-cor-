@@ -23,6 +23,8 @@ export default function App() {
   const deleteSelected = useSceneStore((s) => s.deleteSelected);
   const snap10mm = useSceneStore((s) => s.ui.snap10mm ?? true);
   const setSnap10mm = useSceneStore((s) => s.setSnap10mm);
+  const rotateSelected = useSceneStore((s) => s.rotateSelected);
+  const setSelectedRotation = useSceneStore((s) => s.setSelectedRotation);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -35,13 +37,36 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
-  // Gestion du nudge clavier + Delete
+  // Gestion du nudge clavier + Delete + Rotation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Delete key
       if (e.key === 'Delete') {
         e.preventDefault();
         deleteSelected();
+        return;
+      }
+
+      // Rotation keys
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          rotateSelected(-90);
+        } else {
+          rotateSelected(90);
+        }
+        return;
+      }
+
+      if (e.key === '0') {
+        e.preventDefault();
+        setSelectedRotation(0);
+        return;
+      }
+
+      if (e.key === '9') {
+        e.preventDefault();
+        setSelectedRotation(90);
         return;
       }
 
@@ -63,7 +88,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation]);
 
   // Gestion du drag souris
   const handlePointerDown = (e: React.PointerEvent, pieceId: string) => {
@@ -133,11 +158,25 @@ export default function App() {
               </header>
 
               {/* Toolbar */}
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-4 flex-wrap">
                 <div className="flex gap-2">
                   <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
                   <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
                     Supprimer
+                  </Button>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={() => rotateSelected(-90)} disabled={!selectedId} size="sm">
+                    Rotate −90°
+                  </Button>
+                  <Button onClick={() => rotateSelected(90)} disabled={!selectedId} size="sm">
+                    Rotate +90°
+                  </Button>
+                  <Button onClick={() => setSelectedRotation(0)} disabled={!selectedId} size="sm" variant="outline">
+                    Set 0°
+                  </Button>
+                  <Button onClick={() => setSelectedRotation(90)} disabled={!selectedId} size="sm" variant="outline">
+                    Set 90°
                   </Button>
                 </div>
                 <label className="inline-flex items-center gap-2 text-sm cursor-pointer">

@@ -19,6 +19,19 @@ function snapTo10mm(x: number): number {
   return Math.round(x / 10) * 10;
 }
 
+// helpers internes : normalisation et rotation d'angles
+function normDeg(d: number): Deg {
+  // normalise en {0,90,180,270} via modulo 360
+  const n = ((Math.round(d) % 360) + 360) % 360;
+  return (n === 0 || n === 90 || n === 180 || n === 270 ? n : (Math.round(n / 90) * 90) % 360) as Deg;
+}
+function add90(d: Deg): Deg {
+  return normDeg((d + 90) % 360);
+}
+function sub90(d: Deg): Deg {
+  return normDeg((d + 270) % 360);
+}
+
 type SceneState = {
   scene: SceneDraft;
   ui: {
@@ -54,6 +67,8 @@ type SceneActions = {
   setPieceMaterial: (pieceId: ID, materialId: ID) => void;
   setSnap10mm: (on: boolean) => void;
   setMaterialOriented: (materialId: ID, oriented: boolean) => void;
+  rotateSelected: (deltaDeg: 90 | -90) => void;
+  setSelectedRotation: (deg: 0 | 90) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -396,5 +411,28 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           m.orientationDeg = 0;
         }
       }
+    })),
+
+  rotateSelected: (deltaDeg) =>
+    set(produce((draft: SceneState) => {
+      const selectedId = draft.ui.selectedId;
+      if (!selectedId) return;
+
+      const piece = draft.scene.pieces[selectedId];
+      if (!piece) return;
+
+      const currentDeg = (piece.rotationDeg ?? 0) as Deg;
+      piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
+    })),
+
+  setSelectedRotation: (deg) =>
+    set(produce((draft: SceneState) => {
+      const selectedId = draft.ui.selectedId;
+      if (!selectedId) return;
+
+      const piece = draft.scene.pieces[selectedId];
+      if (!piece) return;
+
+      piece.rotationDeg = normDeg(deg);
     })),
 }));
