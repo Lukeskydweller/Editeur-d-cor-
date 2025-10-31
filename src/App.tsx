@@ -6,6 +6,9 @@ import { validateNoOverlap, validateInsideScene } from '@/lib/sceneRules';
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
   const initSceneWithDefaults = useSceneStore((s) => s.initSceneWithDefaults);
+  const selectedId = useSceneStore((s) => s.ui.selectedId);
+  const selectPiece = useSceneStore((s) => s.selectPiece);
+  const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -13,6 +16,28 @@ export default function App() {
       initSceneWithDefaults(600, 600);
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
+
+  // Gestion du nudge clavier
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+
+      const step = e.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+
+      if (e.key === 'ArrowLeft') dx = -step;
+      if (e.key === 'ArrowRight') dx = step;
+      if (e.key === 'ArrowUp') dy = -step;
+      if (e.key === 'ArrowDown') dy = step;
+
+      nudgeSelected(dx, dy);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [nudgeSelected]);
 
   // Validation des règles
   const noOverlap = validateNoOverlap(scene);
@@ -23,7 +48,7 @@ export default function App() {
     (insideScene.ok ? 0 : insideScene.outside.length);
 
   return (
-    <main className="min-h-dvh flex items-center justify-center p-6">
+    <main className="min-h-dvh flex items-center justify-center p-6" tabIndex={0}>
       <Card className="w-full max-w-5xl">
         <CardContent className="p-6 space-y-4">
           <header className="flex items-baseline justify-between">
@@ -80,6 +105,7 @@ export default function App() {
                 if (p.kind !== 'rect') return null;
                 const { x, y } = p.position;
                 const { w, h } = p.size;
+                const isSelected = p.id === selectedId;
                 return (
                   <g key={p.id} transform={`translate(${x} ${y}) rotate(${p.rotationDeg})`}>
                     <rect
@@ -90,8 +116,10 @@ export default function App() {
                       rx="6"
                       ry="6"
                       fill="#60a5fa" /* bleu */
-                      stroke="#1e3a8a"
-                      strokeWidth="2"
+                      stroke={isSelected ? '#22d3ee' : '#1e3a8a'}
+                      strokeWidth={isSelected ? '3' : '2'}
+                      onClick={() => selectPiece(p.id)}
+                      style={{ cursor: 'pointer' }}
                     />
                   </g>
                 );

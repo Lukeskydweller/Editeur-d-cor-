@@ -8,6 +8,9 @@ function genId(prefix = 'id'): ID {
 
 type SceneState = {
   scene: SceneDraft;
+  ui: {
+    selectedId?: ID;
+  };
 };
 
 type SceneActions = {
@@ -20,6 +23,8 @@ type SceneActions = {
   movePiece: (pieceId: ID, x: Milli, y: Milli) => void;
   rotatePiece: (pieceId: ID, rotationDeg: Deg) => void;
   initSceneWithDefaults: (w: Milli, h: Milli) => void;
+  selectPiece: (id: ID | undefined) => void;
+  nudgeSelected: (dx: Milli, dy: Milli) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -32,6 +37,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     layers: {},
     pieces: {},
     layerOrder: [],
+  },
+  ui: {
+    selectedId: undefined,
   },
 
   // Actions
@@ -122,5 +130,22 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.scene.pieces[pieceId] = {
         id: pieceId, layerId, materialId, position: { x: 40, y: 40 }, rotationDeg: 0, scale: { x: 1, y: 1 }, kind: 'rect', size: { w: 120, h: 80 },
       };
+    })),
+
+  selectPiece: (id) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.selectedId = id;
+    })),
+
+  nudgeSelected: (dx, dy) =>
+    set(produce((draft: SceneState) => {
+      const selectedId = draft.ui.selectedId;
+      if (!selectedId) return;
+
+      const piece = draft.scene.pieces[selectedId];
+      if (piece) {
+        piece.position.x += dx;
+        piece.position.y += dy;
+      }
     })),
 }));
