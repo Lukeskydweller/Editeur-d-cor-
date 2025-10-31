@@ -102,6 +102,10 @@ type SceneActions = {
   rotateSelected: (deltaDeg: 90 | -90) => void;
   setSelectedRotation: (deg: 0 | 90) => void;
   duplicateSelected: () => void;
+  moveLayerForward: (layerId: ID) => void;
+  moveLayerBackward: (layerId: ID) => void;
+  moveLayerToFront: (layerId: ID) => void;
+  moveLayerToBack: (layerId: ID) => void;
 };
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -723,5 +727,45 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = newIds;
       draft.ui.selectedId = newIds[0];
       draft.ui.primaryId = newIds[0];
+    })),
+
+  moveLayerForward: (layerId) =>
+    set(produce((draft: SceneState) => {
+      const idx = draft.scene.layerOrder.indexOf(layerId);
+      if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
+      // Swap with next
+      [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx + 1]] = [
+        draft.scene.layerOrder[idx + 1],
+        draft.scene.layerOrder[idx],
+      ];
+    })),
+
+  moveLayerBackward: (layerId) =>
+    set(produce((draft: SceneState) => {
+      const idx = draft.scene.layerOrder.indexOf(layerId);
+      if (idx === -1 || idx === 0) return;
+      // Swap with previous
+      [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx - 1]] = [
+        draft.scene.layerOrder[idx - 1],
+        draft.scene.layerOrder[idx],
+      ];
+    })),
+
+  moveLayerToFront: (layerId) =>
+    set(produce((draft: SceneState) => {
+      const idx = draft.scene.layerOrder.indexOf(layerId);
+      if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
+      // Remove and push to end
+      draft.scene.layerOrder.splice(idx, 1);
+      draft.scene.layerOrder.push(layerId);
+    })),
+
+  moveLayerToBack: (layerId) =>
+    set(produce((draft: SceneState) => {
+      const idx = draft.scene.layerOrder.indexOf(layerId);
+      if (idx === -1 || idx === 0) return;
+      // Remove and unshift to beginning
+      draft.scene.layerOrder.splice(idx, 1);
+      draft.scene.layerOrder.unshift(layerId);
     })),
 }));

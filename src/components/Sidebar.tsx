@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
 
 export function Sidebar() {
@@ -7,6 +8,10 @@ export function Sidebar() {
   const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
   const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
   const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
+  const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
+  const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
+  const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
+  const moveLayerToBack = useSceneStore((s) => s.moveLayerToBack);
 
   // Comptages
   const layerCounts = scene.layerOrder.map((lid) => ({
@@ -29,13 +34,66 @@ export function Sidebar() {
           <CardTitle>Layers</CardTitle>
         </CardHeader>
         <CardContent>
-          <ul className="space-y-1" aria-label="layers-list">
-            {layerCounts.map((l) => (
-              <li key={l.id} className="flex items-center justify-between">
-                <span>{l.name}</span>
-                <span className="text-muted-foreground">{l.count}</span>
-              </li>
-            ))}
+          <ul className="space-y-2" aria-label="layers-list">
+            {layerCounts.map((l, idx) => {
+              const isAtBack = idx === 0;
+              const isAtFront = idx === layerCounts.length - 1;
+
+              return (
+                <li key={l.id} className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-1">
+                    <span>{l.name}</span>
+                    <span className="text-muted-foreground text-sm">{l.count}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      disabled={isAtBack}
+                      onClick={() => moveLayerToBack(l.id)}
+                      aria-label="send-layer-to-back"
+                      title="Send to back"
+                    >
+                      ⤒
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      disabled={isAtBack}
+                      onClick={() => moveLayerBackward(l.id)}
+                      aria-label="send-layer-backward"
+                      title="Send backward"
+                    >
+                      ‹
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      disabled={isAtFront}
+                      onClick={() => moveLayerForward(l.id)}
+                      aria-label="send-layer-forward"
+                      title="Send forward"
+                    >
+                      ›
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      disabled={isAtFront}
+                      onClick={() => moveLayerToFront(l.id)}
+                      aria-label="send-layer-to-front"
+                      title="Send to front"
+                    >
+                      ⤓
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </CardContent>
       </Card>
