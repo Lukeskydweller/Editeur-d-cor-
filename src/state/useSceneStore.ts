@@ -13,6 +13,7 @@ import {
   newDraftName,
   type DraftMeta,
 } from '@/lib/drafts';
+import { applyHandle, type ResizeHandle } from '@/lib/ui/resize';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -87,6 +88,13 @@ type SceneState = {
     marquee?: { x0: number; y0: number; x1: number; y1: number };
     snap10mm?: boolean;
     guides?: SnapGuide[];
+    resizing?: {
+      pieceId: ID;
+      handle: ResizeHandle;
+      origin: { x: Milli; y: Milli; w: Milli; h: Milli };
+      snapshot: SceneStateSnapshot;
+    };
+    lockEdge?: boolean;
     history?: {
       past: SceneStateSnapshot[];
       future: SceneStateSnapshot[];
@@ -140,6 +148,10 @@ type SceneActions = {
   loadDraftById: (id: string) => void;
   renameDraft: (id: string, name: string) => void;
   deleteDraftById: (id: string) => void;
+  startResize: (pieceId: ID, handle: ResizeHandle) => void;
+  updateResize: (pointerMm: { x: Milli; y: Milli }) => void;
+  endResize: (commit: boolean) => void;
+  setLockEdge: (on: boolean) => void;
 };
 
 // Helper: deep clone minimal snapshot
@@ -1076,5 +1088,133 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   deleteDraftById: (id) =>
     set(produce((draft: SceneState) => {
       deleteDraftFromStorage(id);
+    })),
+
+  startResize: (pieceId, handle) =>
+    set(produce((draft: SceneState) => {
+      const piece = draft.scene.pieces[pieceId];
+      if (!piece) return;
+
+      // Capture pre-resize state for history
+      const snapshot = takeSnapshot(draft);
+
+      draft.ui.resizing = {
+        pieceId,
+        handle,
+        origin: {
+          x: piece.position.x,
+          y: piece.position.y,
+          w: piece.size.w,
+          h: piece.size.h,
+        },
+        snapshot,
+      };
+    })),
+
+  updateResize: (pointerMm) =>
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.resizing;
+      if (!resizing) return;
+
+      const piece = draft.scene.pieces[resizing.pieceId];
+      if (!piece) return;
+
+      const lockEdge = draft.ui.lockEdge ?? false;
+
+      // Apply handle to get new rect
+      const newRect = applyHandle(
+        resizing.origin,
+        resizing.handle,
+        pointerMm,
+        { minW: 5, minH: 5, lockEdge }
+      );
+
+      // Clamp to scene bounds
+      const sceneW = draft.scene.size.w;
+      const sceneH = draft.scene.size.h;
+
+      let { x, y, w, h } = newRect;
+
+      // Ensure rect stays within scene
+      if (x < 0) {
+        w += x; // Reduce width by amount outside
+        x = 0;
+      }
+      if (y < 0) {
+        h += y; // Reduce height by amount outside
+        y = 0;
+      }
+      if (x + w > sceneW) {
+        w = sceneW - x;
+      }
+      if (y + h > sceneH) {
+        h = sceneH - y;
+      }
+
+      // Reapply min size after clamping
+      w = Math.max(5, w);
+      h = Math.max(5, h);
+
+      // Snap to pieces (edges and centers)
+      const candidateRect = { x, y, w, h };
+      const snapResult = snapToPieces(draft.scene, candidateRect, 5, resizing.pieceId);
+      draft.ui.guides = snapResult.guides;
+
+      x = snapResult.x;
+      y = snapResult.y;
+
+      // Snap to grid if enabled
+      if (draft.ui.snap10mm) {
+        x = snapTo10mm(x);
+        y = snapTo10mm(y);
+        w = snapTo10mm(w);
+        h = snapTo10mm(h);
+        // Ensure min size after grid snap
+        w = Math.max(10, w);
+        h = Math.max(10, h);
+      }
+
+      // Update piece (without history - preview only)
+      piece.position.x = x;
+      piece.position.y = y;
+      piece.size.w = w;
+      piece.size.h = h;
+    })),
+
+  endResize: (commit) =>
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.resizing;
+      if (!resizing) return;
+
+      const piece = draft.scene.pieces[resizing.pieceId];
+
+      if (commit && piece) {
+        // Check if dimensions actually changed
+        const changed =
+          piece.position.x !== resizing.origin.x ||
+          piece.position.y !== resizing.origin.y ||
+          piece.size.w !== resizing.origin.w ||
+          piece.size.h !== resizing.origin.h;
+
+        if (changed) {
+          // Push pre-resize snapshot to history
+          pushHistory(draft, resizing.snapshot);
+          autosave(takeSnapshot(draft));
+        }
+      } else if (!commit && piece) {
+        // Rollback to origin
+        piece.position.x = resizing.origin.x;
+        piece.position.y = resizing.origin.y;
+        piece.size.w = resizing.origin.w;
+        piece.size.h = resizing.origin.h;
+      }
+
+      draft.ui.resizing = undefined;
+      draft.ui.guides = undefined;
+    })),
+
+  setLockEdge: (on) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.lockEdge = on;
     })),
 }));

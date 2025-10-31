@@ -5,6 +5,8 @@ import { useSceneStore } from '@/state/useSceneStore';
 import { validateNoOverlap, validateInsideScene, validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
+import { ResizeHandles } from '@/components/ResizeHandles';
+import type { ResizeHandle } from '@/lib/ui/resize';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -39,6 +41,12 @@ export default function App() {
   const redo = useSceneStore((s) => s.redo);
   const toSceneFileV1 = useSceneStore((s) => s.toSceneFileV1);
   const importSceneFileV1 = useSceneStore((s) => s.importSceneFileV1);
+  const resizing = useSceneStore((s) => s.ui.resizing);
+  const startResize = useSceneStore((s) => s.startResize);
+  const updateResize = useSceneStore((s) => s.updateResize);
+  const endResize = useSceneStore((s) => s.endResize);
+  const lockEdge = useSceneStore((s) => s.ui.lockEdge ?? false);
+  const setLockEdge = useSceneStore((s) => s.setLockEdge);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -46,6 +54,8 @@ export default function App() {
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const marqueeFactorRef = useRef<number>(1);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const resizeFactorRef = useRef<number>(1);
 
   const [importError, setImportError] = useState<string | null>(null);
 
@@ -73,10 +83,16 @@ export default function App() {
         return;
       }
 
-      // Escape → Clear selection
+      // Escape → Cancel resize or clear selection
       if (e.key === 'Escape') {
         e.preventDefault();
-        clearSelection();
+        if (resizing) {
+          endResize(false);
+          resizeStartRef.current = null;
+          resizeFactorRef.current = 1;
+        } else {
+          clearSelection();
+        }
         return;
       }
 
@@ -142,7 +158,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo]);
+  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo, resizing, endResize]);
 
   // Export JSON
   const handleExport = () => {
@@ -238,6 +254,14 @@ export default function App() {
       const dyMm = dyPx * dragFactorRef.current;
 
       updateDrag(dxMm, dyMm);
+    } else if (resizing && resizeStartRef.current) {
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const svgX = (e.clientX - rect.left) * resizeFactorRef.current;
+      const svgY = (e.clientY - rect.top) * resizeFactorRef.current;
+
+      updateResize({ x: svgX, y: svgY });
     } else if (marquee && marqueeStartRef.current) {
       const rect = svgRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -253,6 +277,10 @@ export default function App() {
       endDrag();
       dragStartRef.current = null;
       dragFactorRef.current = 1;
+    } else if (resizing) {
+      endResize(true);
+      resizeStartRef.current = null;
+      resizeFactorRef.current = 1;
     } else if (marquee) {
       endMarquee();
       marqueeStartRef.current = null;
@@ -265,11 +293,24 @@ export default function App() {
       cancelDrag();
       dragStartRef.current = null;
       dragFactorRef.current = 1;
+    } else if (resizing) {
+      endResize(false);
+      resizeStartRef.current = null;
+      resizeFactorRef.current = 1;
     } else if (marquee) {
       endMarquee();
       marqueeStartRef.current = null;
       marqueeFactorRef.current = 1;
     }
+  };
+
+  // Resize handle start
+  const handleResizeStart = (pieceId: string, handle: ResizeHandle) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    const factor = pxToMmFactor(rect?.width ?? 0, scene.size.w);
+    resizeFactorRef.current = factor;
+
+    startResize(pieceId, handle);
   };
 
   // Validation des règles
@@ -346,6 +387,16 @@ export default function App() {
                     className="cursor-pointer"
                   />
                   <span>Snap 10 mm</span>
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={lockEdge}
+                    onChange={(e) => setLockEdge(e.target.checked)}
+                    aria-label="toggle-lock-edge"
+                    className="cursor-pointer"
+                  />
+                  <span>Lock edge</span>
                 </label>
               </div>
 
@@ -508,6 +559,26 @@ export default function App() {
                       pointerEvents="none"
                     />
                   </g>
+                );
+              })()}
+              {/* Resize handles - only for single selection */}
+              {selectedId && (!selectedIds || selectedIds.length === 1) && (() => {
+                const piece = scene.pieces[selectedId];
+                if (!piece || piece.kind !== 'rect') return null;
+
+                const rect = {
+                  x: piece.position.x,
+                  y: piece.position.y,
+                  w: piece.size.w,
+                  h: piece.size.h,
+                };
+
+                return (
+                  <ResizeHandles
+                    rect={rect}
+                    onStart={(handle) => handleResizeStart(selectedId, handle)}
+                    disabled={false}
+                  />
                 );
               })()}
               {/* Snap guides */}
