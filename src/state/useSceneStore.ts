@@ -62,6 +62,18 @@ function groupBBox(scene: SceneDraft, ids: ID[]) {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+/**
+ * Clears transient UI state (drag/resize previews, guides, marquee)
+ * while preserving selection state (selectedId/selectedIds/primaryId)
+ */
+function clearTransientUI(ui: SceneState['ui']) {
+  ui.dragging = undefined;
+  ui.resizing = undefined;
+  ui.guides = undefined;
+  ui.marquee = undefined;
+  // Keep selection intact: selectedId, selectedIds, primaryId
+}
+
 type SceneStateSnapshot = {
   scene: SceneDraft;
   ui: {
@@ -656,6 +668,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         }
         pushHistory(draft, snap);
         autosave(takeSnapshot(draft));
+      } else {
+        // Invalid drop: flash invalid feedback
+        draft.ui.flashInvalidAt = Date.now();
       }
 
       draft.ui.dragging = undefined;
@@ -743,6 +758,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         delete draft.scene.pieces[selectedId];
       }
 
+      // Clear transient UI before clearing selection
+      clearTransientUI(draft.ui);
+
       draft.ui.selectedId = undefined;
       draft.ui.selectedIds = undefined;
       draft.ui.primaryId = undefined;
@@ -757,6 +775,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (p && draft.scene.materials[materialId]) {
         const snap = takeSnapshot(draft);
         p.materialId = materialId;
+        // Clear transient UI after material change
+        clearTransientUI(draft.ui);
         pushHistory(draft, snap);
         autosave(takeSnapshot(draft));
       }
@@ -799,6 +819,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
       }
 
+      // Clear transient UI state after rotation
+      clearTransientUI(draft.ui);
+
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
     })),
@@ -815,6 +838,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         if (!piece) continue;
         piece.rotationDeg = normDeg(deg);
       }
+
+      // Clear transient UI state after rotation
+      clearTransientUI(draft.ui);
 
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
@@ -881,6 +907,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           newIds.push(newId);
         }
       }
+
+      // Clear transient UI before changing selection
+      clearTransientUI(draft.ui);
 
       draft.ui.selectedIds = newIds;
       draft.ui.selectedId = newIds[0];
@@ -1009,6 +1038,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         ui: normalized.ui ?? {},
       });
 
+      // Clear transient UI after scene replacement
+      clearTransientUI(draft.ui);
+
       // Push to history and autosave
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
@@ -1074,6 +1106,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         scene: normalized.scene,
         ui: normalized.ui ?? {},
       });
+
+      // Clear transient UI after scene replacement
+      clearTransientUI(draft.ui);
 
       // Push to history and autosave
       pushHistory(draft, snap);
@@ -1169,9 +1204,40 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         y = snapTo10mm(y);
         w = snapTo10mm(w);
         h = snapTo10mm(h);
-        // Ensure min size after grid snap
-        w = Math.max(10, w);
-        h = Math.max(10, h);
+      }
+
+      // Final minSize enforcement (5mm always, regardless of snap state)
+      // Must respect lockEdge: the opposite edge should stay fixed
+      const MIN_SIZE = 5;
+
+      if (w < MIN_SIZE) {
+        const deficit = MIN_SIZE - w;
+        w = MIN_SIZE;
+
+        // Adjust position to keep locked edge fixed
+        if (lockEdge) {
+          // If handle includes 'w' (moving left edge), adjust x left
+          if (resizing.handle.includes('w')) {
+            x -= deficit;
+          }
+          // If handle includes 'e' (moving right edge), x stays (right edge moved)
+          // No adjustment needed - locked left edge stays at x
+        }
+      }
+
+      if (h < MIN_SIZE) {
+        const deficit = MIN_SIZE - h;
+        h = MIN_SIZE;
+
+        // Adjust position to keep locked edge fixed
+        if (lockEdge) {
+          // If handle includes 'n' (moving top edge), adjust y up
+          if (resizing.handle.includes('n')) {
+            y -= deficit;
+          }
+          // If handle includes 's' (moving bottom edge), y stays (bottom edge moved)
+          // No adjustment needed - locked top edge stays at y
+        }
       }
 
       // Update piece (without history - preview only)

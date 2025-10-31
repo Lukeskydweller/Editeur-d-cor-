@@ -311,6 +311,27 @@ describe('Resize functionality', () => {
         expect(handle.getAttribute('tabindex')).toBe('0');
       });
     });
+
+    it('hides resize handles when piece is rotated', () => {
+      const { initSceneWithDefaults, rotateSelected } = useSceneStore.getState();
+      initSceneWithDefaults(600, 600);
+
+      const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+      useSceneStore.getState().selectPiece(pieceId);
+
+      const { rerender } = render(<App />);
+
+      // Initially, handles should be visible (rotation = 0)
+      expect(screen.queryByLabelText('resize-handle-e')).toBeInTheDocument();
+
+      // Rotate piece by 90°
+      rotateSelected(90);
+      rerender(<App />);
+
+      // Handles should now be hidden (V1: only show for rotation = 0)
+      expect(screen.queryByLabelText('resize-handle-e')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('resize-handle-n')).not.toBeInTheDocument();
+    });
   });
 
   describe('Store actions - Snap to pieces', () => {
@@ -340,6 +361,110 @@ describe('Resize functionality', () => {
       const guides = useSceneStore.getState().ui.guides;
       expect(guides).toBeDefined();
       expect(guides && guides.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Minimum size enforcement after snap', () => {
+    it('cannot resize below 5mm even with snap ON', () => {
+      const { initSceneWithDefaults, startResize, updateResize, endResize, setSnap10mm } =
+        useSceneStore.getState();
+      initSceneWithDefaults(600, 600);
+
+      const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+      const piece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Enable snap
+      setSnap10mm(true);
+
+      // Start resize from east handle (moving right edge left)
+      startResize(pieceId, 'e');
+
+      // Try to resize to very small width (would snap to 0 or negative)
+      // Piece at x=40, w=100 → right edge at 140
+      // Move pointer to x=42 (would give w=2, snap to 0)
+      updateResize({
+        x: piece.position.x + 2, // Would result in w=2, snapped to 0
+        y: piece.position.y + piece.size.h / 2,
+      });
+
+      const resizedPiece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Width should be at least 5mm, not 0 or negative
+      expect(resizedPiece.size.w).toBeGreaterThanOrEqual(5);
+
+      // Height should remain unchanged
+      expect(resizedPiece.size.h).toBe(piece.size.h);
+
+      endResize(false); // Cancel
+    });
+
+    it('cannot resize below 5mm even with snap OFF', () => {
+      const { initSceneWithDefaults, startResize, updateResize, endResize, setSnap10mm } =
+        useSceneStore.getState();
+      initSceneWithDefaults(600, 600);
+
+      const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+      const piece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Disable snap
+      setSnap10mm(false);
+
+      // Start resize from south handle (moving bottom edge up)
+      startResize(pieceId, 's');
+
+      // Try to resize to very small height
+      // Piece at y=40, h=50 → bottom edge at 90
+      // Move pointer to y=42 (would give h=2)
+      updateResize({
+        x: piece.position.x + piece.size.w / 2,
+        y: piece.position.y + 2, // Would result in h=2
+      });
+
+      const resizedPiece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Height should be at least 5mm
+      expect(resizedPiece.size.h).toBeGreaterThanOrEqual(5);
+
+      // Width should remain unchanged
+      expect(resizedPiece.size.w).toBe(piece.size.w);
+
+      endResize(false); // Cancel
+    });
+
+    it('respects lockEdge when enforcing minSize', () => {
+      const { initSceneWithDefaults, startResize, updateResize, endResize, setSnap10mm, setLockEdge } =
+        useSceneStore.getState();
+      initSceneWithDefaults(600, 600);
+
+      const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+      const piece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Disable snap for precise lockEdge test (snap can round to grid)
+      setSnap10mm(false);
+      setLockEdge(true);
+
+      const originalRight = piece.position.x + piece.size.w;
+
+      // Start resize from west handle (moving left edge, right edge locked)
+      startResize(pieceId, 'w');
+
+      // Try to resize to very small width
+      // Move left edge far to the right (would collapse width)
+      updateResize({
+        x: piece.position.x + piece.size.w - 2, // Would give w=2
+        y: piece.position.y + piece.size.h / 2,
+      });
+
+      const resizedPiece = useSceneStore.getState().scene.pieces[pieceId];
+
+      // Width should be at least 5mm
+      expect(resizedPiece.size.w).toBeGreaterThanOrEqual(5);
+
+      // Right edge should stay fixed (lockEdge=true)
+      const newRight = resizedPiece.position.x + resizedPiece.size.w;
+      expect(Math.abs(newRight - originalRight)).toBeLessThan(1); // Allow small rounding error
+
+      endResize(false); // Cancel
     });
   });
 });
