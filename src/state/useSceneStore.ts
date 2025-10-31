@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
 import { validateNoOverlap } from '@/lib/sceneRules';
-import { snapToPieces, type SnapGuide } from '@/lib/ui/snap';
+import { snapToPieces, snapGroupToPieces, type SnapGuide } from '@/lib/ui/snap';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -437,11 +437,22 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           const clamped = clampToScene(gMinX, gMinY, gW, gH, draft.scene.size.w, draft.scene.size.h);
           const clampDx = clamped.x - gMinX;
           const clampDy = clamped.y - gMinY;
-          finalX = candidateX + clampDx;
-          finalY = candidateY + clampDy;
-        }
+          const clampedX = candidateX + clampDx;
+          const clampedY = candidateY + clampDy;
 
-        draft.ui.guides = undefined;
+          // Snap groupe à pièces
+          const candidateGroupRect = { x: clamped.x, y: clamped.y, w: gW, h: gH };
+          const snapResult = snapGroupToPieces(draft.scene, candidateGroupRect, 5, selectedIds);
+          draft.ui.guides = snapResult.guides;
+
+          // Appliquer le delta de snap uniformément
+          const snapDx = snapResult.x - candidateGroupRect.x;
+          const snapDy = snapResult.y - candidateGroupRect.y;
+          finalX = clampedX + snapDx;
+          finalY = clampedY + snapDy;
+        } else {
+          draft.ui.guides = undefined;
+        }
       } else {
         // Drag simple : clamp + snap entre pièces
         const clamped = clampToScene(candidateX, candidateY, piece.size.w, piece.size.h, draft.scene.size.w, draft.scene.size.h);
