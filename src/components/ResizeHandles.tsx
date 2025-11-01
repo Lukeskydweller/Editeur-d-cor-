@@ -43,7 +43,7 @@ export function ResizeHandles({ rect, onStart, disabled = false }: ResizeHandles
             role="button"
             aria-label={`resize-handle-${handle}`}
             tabIndex={disabled ? -1 : 0}
-            style={{ cursor: disabled ? 'not-allowed' : cursor }}
+            style={{ cursor: disabled ? 'not-allowed' : cursor, pointerEvents: 'auto' }}
             onPointerDown={(e) => {
               if (disabled) return;
               e.stopPropagation();

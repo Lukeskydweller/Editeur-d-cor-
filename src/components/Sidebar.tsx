@@ -9,6 +9,7 @@ export function Sidebar() {
   const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
   const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
   const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
+  const addLayer = useSceneStore((s) => s.addLayer);
   const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
   const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
   const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
@@ -33,8 +34,16 @@ export function Sidebar() {
       <SidebarDrafts />
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Layers</CardTitle>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => addLayer(`C${scene.layerOrder.length + 1}`)}
+            aria-label="add-layer"
+          >
+            + Layer
+          </Button>
         </CardHeader>
         <CardContent>
           <ul className="space-y-2" aria-label="layers-list">
@@ -57,6 +66,7 @@ export function Sidebar() {
                       onClick={() => moveLayerToBack(l.id)}
                       aria-label="send-layer-to-back"
                       title="Send to back"
+                      tabIndex={0}
                     >
                       ⤒
                     </Button>
@@ -68,6 +78,7 @@ export function Sidebar() {
                       onClick={() => moveLayerBackward(l.id)}
                       aria-label="send-layer-backward"
                       title="Send backward"
+                      tabIndex={0}
                     >
                       ‹
                     </Button>
@@ -79,6 +90,7 @@ export function Sidebar() {
                       onClick={() => moveLayerForward(l.id)}
                       aria-label="send-layer-forward"
                       title="Send forward"
+                      tabIndex={0}
                     >
                       ›
                     </Button>
@@ -90,6 +102,7 @@ export function Sidebar() {
                       onClick={() => moveLayerToFront(l.id)}
                       aria-label="send-layer-to-front"
                       title="Send to front"
+                      tabIndex={0}
                     >
                       ⤓
                     </Button>
