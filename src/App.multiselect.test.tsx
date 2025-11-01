@@ -257,6 +257,54 @@ test('Ctrl+D duplicates group', () => {
   expect(newPiece1.position.y).toBeCloseTo(origPiece1.position.y + 20, 0);
 });
 
+test('Duplicate 3 pieces then drag group without blocking', () => {
+  const { initSceneWithDefaults, addRectAtCenter, duplicateSelected, beginDrag, updateDrag, endDrag } =
+    useSceneStore.getState();
+  initSceneWithDefaults(600, 600);
+
+  // Add 2 more pieces to have 3 total
+  addRectAtCenter(80, 60);
+  addRectAtCenter(100, 50);
+
+  const pieces = Object.values(useSceneStore.getState().scene.pieces);
+  expect(pieces.length).toBe(3);
+
+  // Select all and duplicate
+  useSceneStore.getState().setSelection(pieces.map((p) => p.id));
+  duplicateSelected();
+
+  // Now we have 6 pieces, 3 selected (the duplicates)
+  expect(Object.keys(useSceneStore.getState().scene.pieces).length).toBe(6);
+
+  const selectedIds = useSceneStore.getState().ui.selectedIds ?? [];
+  expect(selectedIds.length).toBe(3);
+
+  // Begin drag on one of the selected pieces
+  const primaryId = selectedIds[0];
+  const primaryPiece = useSceneStore.getState().scene.pieces[primaryId];
+  const startX = primaryPiece.position.x;
+  const startY = primaryPiece.position.y;
+
+  beginDrag(primaryId);
+
+  // Drag the group by 50mm
+  updateDrag(50, 50);
+
+  // Should have a candidate position (not blocked during drag)
+  const dragging = useSceneStore.getState().ui.dragging;
+  expect(dragging?.candidate).toBeDefined();
+  expect(dragging?.candidate?.x).toBeCloseTo(startX + 50, 0);
+  expect(dragging?.candidate?.y).toBeCloseTo(startY + 50, 0);
+
+  // End drag - should commit if valid
+  endDrag();
+
+  // Verify drag completed (not blocked)
+  // With grid snap enabled, position may snap back, but drag should not be blocked
+  // The key test is that dragging.candidate was created during updateDrag
+  expect(useSceneStore.getState().ui.dragging).toBeUndefined(); // Should be cleared after endDrag
+});
+
 test('Delete removes all selected pieces', () => {
   const { initSceneWithDefaults, addRectAtCenter, setSelection } = useSceneStore.getState();
   initSceneWithDefaults(600, 600);

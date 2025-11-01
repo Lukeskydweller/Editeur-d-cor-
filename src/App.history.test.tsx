@@ -102,9 +102,12 @@ test('Ctrl+Y triggers redo', () => {
   const pieces3 = Object.keys(useSceneStore.getState().scene.pieces);
   expect(pieces3.length).toBe(1);
 
-  // Redo with Ctrl+Y
+  // Redo with Ctrl+Y - verify preventDefault is called
   act(() => {
-    fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
+    const event = new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true });
+    const preventDefaultSpy = vi.spyOn(event, 'preventDefault');
+    window.dispatchEvent(event);
+    expect(preventDefaultSpy).toHaveBeenCalled();
   });
 
   const pieces4 = Object.keys(useSceneStore.getState().scene.pieces);
