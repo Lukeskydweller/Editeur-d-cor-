@@ -36,37 +36,49 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     });
   };
 
-  // Test hook: create overlap for E2E testing
+  // Test hook: create overlap for E2E testing (uses useSceneStore, bridge syncs to editorStore)
   (window as any).__testCreateOverlap = async () => {
-    const { editorStore } = await import('./store/editorStore');
-    const { rebuildIndex } = await import('./core/spatial/rbushIndex');
-    const geo = await import('./core/geo/facade');
-    const state = editorStore.getState();
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const store = useSceneStore.getState();
+    const pieces = Object.values(store.scene.pieces);
 
     // Ensure we have at least 2 pieces
-    if (state.pieces.length < 2 && state.pieces.length >= 1) {
-      const p1 = state.pieces[0];
-      state.pieces.push({
-        id: "test-p2",
-        kind: "rect",
-        x: p1.x + 150,
-        y: p1.y,
-        w: p1.w,
-        h: p1.h,
-        rot: 0,
-        layerId: p1.layerId,
-        materialId: p1.materialId,
-        constraints: {}
-      });
-      // Rebuild index with new piece
-      rebuildIndex(state);
-      await geo.rebuildIndex(state);
+    if (pieces.length < 2) {
+      // Add a second piece
+      if (pieces.length === 1) {
+        const p1 = pieces[0];
+        store.addRectAtCenter(p1.size.w, p1.size.h);
+        const newPieces = Object.values(useSceneStore.getState().scene.pieces);
+        if (newPieces.length < 2) return false;
+      } else {
+        return false;
+      }
     }
 
-    if (state.pieces.length >= 2) {
-      const [p1, p2] = state.pieces;
-      // Move second piece to overlap with first
-      editorStore.dispatch({ type: 'movePiece', id: p2.id, dx: p1.x - p2.x + 5, dy: p1.y - p2.y + 5 });
+    // Get the two pieces
+    const piecesNow = Object.values(useSceneStore.getState().scene.pieces);
+    if (piecesNow.length >= 2) {
+      const [p1, p2] = piecesNow;
+      // Move p2 to overlap with p1 by directly modifying position
+      useSceneStore.setState((state) => ({
+        scene: {
+          ...state.scene,
+          pieces: {
+            ...state.scene.pieces,
+            [p2.id]: {
+              ...p2,
+              position: {
+                x: p1.position.x + 5,  // Overlap by positioning p2 near p1
+                y: p1.position.y + 5
+              }
+            }
+          }
+        }
+      }));
+
+      // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
+      await new Promise(resolve => setTimeout(resolve, 300));
+
       return true;
     }
     return false;
@@ -77,7 +89,17 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     const { selectProblems } = await import('./store/editorStore');
     return selectProblems();
   };
+
+  // Test hook: wait for geo worker to be ready
+  (window as any).__waitGeoReady = async () => {
+    const { waitGeoReady } = await import('./store/editorStore');
+    return await waitGeoReady();
+  };
 }
+
+// Start Draft→V1 synchronization bridge
+import { startValidationBridge } from './sync/bridge';
+startValidationBridge();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

@@ -3,6 +3,9 @@ import { minScene } from "../core/examples/minScene";
 import { rebuildIndex, updatePiece } from "../core/spatial/rbushIndex";
 import * as geo from "../core/geo/facade";
 
+let _geoReady: Promise<void> | null = null;
+let _state: SceneV1 | null = null;
+
 type Command =
   | { type: "movePiece"; id: string; dx: number; dy: number }
   | { type: "rotatePiece"; id: string; deg: 0|90|180|270 }
@@ -61,8 +64,32 @@ export function subscribe(fn: () => void): () => void {
 }
 
 let state: SceneV1 = structuredClone(minScene);
+_state = state;
 rebuildIndex(state);
-geo.init(state);
+// Expose a single init promise we can await in tests/dev
+_geoReady = (async () => { await geo.init(state); })();
+
+export async function waitGeoReady(): Promise<void> {
+  if (!_geoReady) return;
+  await _geoReady;
+}
+
+export function getState(): SceneV1 {
+  if (!_state) throw new Error("editorStore not initialized");
+  return _state;
+}
+
+// NEW: remplace la scène complète (projection Draft→V1)
+export async function setScene(next: SceneV1) {
+  _state = next;
+  state = next;
+  rebuildIndex(next);
+  // Update geo worker with new scene
+  await geo.init(next);
+  // Trigger validation
+  scheduleValidation();
+  notifyListeners();
+}
 
 export const editorStore = {
   getState(): SceneV1 { return state; },

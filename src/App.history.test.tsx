@@ -3,6 +3,8 @@ import { beforeEach, vi } from 'vitest';
 import App from './App';
 import { useSceneStore } from '@/state/useSceneStore';
 
+// Utiliser await act(async () => { ... }) autour des updates et flush microtasks entre actions.
+
 // Mock localStorage
 const localStorageMock = (() => {
   let store: Record<string, string> = {};

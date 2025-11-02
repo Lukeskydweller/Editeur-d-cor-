@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
 import { SidebarDrafts } from '@/components/SidebarDrafts';
+import ProblemsPanel from '@/components/ProblemsPanel';
 
 export function Sidebar() {
   const scene = useSceneStore((s) => s.scene);
@@ -32,6 +33,8 @@ export function Sidebar() {
   return (
     <aside role="complementary" className="w-full md:w-72 flex flex-col gap-4">
       <SidebarDrafts />
+      {/* ProblemsPanel reste la source officielle pour la liste des conflits */}
+      <ProblemsPanel />
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">

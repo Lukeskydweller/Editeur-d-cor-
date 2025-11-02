@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
-import { validateNoOverlap, validateInsideScene, validateMaterialOrientation } from '@/lib/sceneRules';
+import { validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
 import { ResizeHandlesOverlay } from '@/components/ResizeHandlesOverlay';
 import type { ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
+import StatusBadge from '@/components/StatusBadge';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -352,14 +353,9 @@ export default function App() {
     resizeStartRef.current = null;
   };
 
-  // Validation des règles
-  const noOverlap = validateNoOverlap(scene);
-  const insideScene = validateInsideScene(scene);
+  // Validation matériau (orientation uniquement - les overlaps sont gérés par editorStore + worker)
+  // L'affichage de validation repose désormais uniquement sur StatusBadge + ProblemsPanel (editorStore)
   const orientation = validateMaterialOrientation(scene);
-  const hasProblems = !noOverlap.ok || !insideScene.ok;
-  const problemCount =
-    (noOverlap.ok ? 0 : noOverlap.conflicts.length) +
-    (insideScene.ok ? 0 : insideScene.outside.length);
   const hasWarnings = !orientation.ok;
 
   return (
@@ -374,8 +370,11 @@ export default function App() {
             <CardContent className="p-6 space-y-4">
               <header className="flex items-baseline justify-between">
                 <h1 className="text-2xl font-bold">Éditeur — Mini smoke</h1>
-                <div className="text-sm text-muted-foreground">
-                  {Object.keys(scene.pieces).length} pièce(s) • {scene.size.w}×{scene.size.h} mm
+                <div className="flex items-center gap-4">
+                  <StatusBadge />
+                  <div className="text-sm text-muted-foreground">
+                    {Object.keys(scene.pieces).length} pièce(s) • {scene.size.w}×{scene.size.h} mm
+                  </div>
                 </div>
               </header>
 
@@ -441,37 +440,8 @@ export default function App() {
                 </label>
               </div>
 
-          {/* Barre de statut des règles */}
+          {/* Barre de statut des avertissements (orientation matériau uniquement) */}
           <div className="space-y-2">
-            <div
-              className={`rounded-lg px-4 py-3 text-sm font-medium ${
-                hasProblems
-                  ? 'bg-red-500/20 text-red-200 border border-red-500/40'
-                  : 'bg-green-500/20 text-green-200 border border-green-500/40'
-              }`}
-              role="status"
-              aria-live="polite"
-            >
-              {hasProblems ? (
-                <>
-                  <div className="font-bold">
-                    BLOCK — {problemCount} problème{problemCount > 1 ? 's' : ''} détecté{problemCount > 1 ? 's' : ''}
-                  </div>
-                  {!noOverlap.ok && (
-                    <div className="mt-1">
-                      Chevauchements : {noOverlap.conflicts.map(([a, b]) => `(${a}, ${b})`).join(', ')}
-                    </div>
-                  )}
-                  {!insideScene.ok && (
-                    <div className="mt-1">
-                      Hors-scène : {insideScene.outside.join(', ')}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div>OK — aucune anomalie détectée</div>
-              )}
-            </div>
 
             {hasWarnings && (
               <div
