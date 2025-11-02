@@ -17,7 +17,7 @@ describe("editorStore overlap detection", () => {
 
     const problems = selectProblems();
     expect(problems.hasBlock).toBe(false);
-    expect(problems.conflicts.size).toBe(0);
+    expect(problems.problems.length).toBe(0);
   });
 
   it("detects overlap_same_layer after moving piece", async () => {
@@ -65,8 +65,15 @@ describe("editorStore overlap detection", () => {
 
     const problems = selectProblems();
     expect(problems.hasBlock).toBe(true);
-    expect(problems.conflicts.has(p1.id)).toBe(true);
-    expect(problems.conflicts.has(p2.id)).toBe(true);
+    const overlapProblems = problems.problems.filter(p => p.code === "overlap_same_layer");
+    expect(overlapProblems.length).toBeGreaterThan(0);
+    const pieceIds = new Set<string>();
+    for (const p of overlapProblems) {
+      if (p.pieceId) pieceIds.add(p.pieceId);
+      if (p.meta?.otherPieceId) pieceIds.add(String(p.meta.otherPieceId));
+    }
+    expect(pieceIds.has(p1.id)).toBe(true);
+    expect(pieceIds.has(p2.id)).toBe(true);
   });
 
   it("clears overlap after moving piece away", async () => {
@@ -95,7 +102,8 @@ describe("editorStore overlap detection", () => {
 
     const problems = selectProblems();
     expect(problems.hasBlock).toBe(false);
-    expect(problems.conflicts.size).toBe(0);
+    const overlapProblems = problems.problems.filter(p => p.code === "overlap_same_layer");
+    expect(overlapProblems.length).toBe(0);
   });
 
   it("validates after rotation", async () => {

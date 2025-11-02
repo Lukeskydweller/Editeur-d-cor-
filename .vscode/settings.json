@@ -1,0 +1,16 @@
+{
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/out/**": true,
+    "**/*.pdf": true,
+    "**/*.zip": true,
+    "**/var/reports/**": true
+  },
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/out": true,
+    "**/*.pdf": true,
+    "**/*.zip": true,
+    "**/var/reports": true
+  }
+}

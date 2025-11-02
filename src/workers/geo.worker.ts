@@ -1,8 +1,9 @@
 // Worker "geo" : RBush + SAT + PathOps derrière un petit RPC
 import { rebuildIndex as coreRebuild, updatePiece as coreUpdate } from "../core/spatial/rbushIndex";
-import { collisionsForPiece as coreCollisions, collisionsSameLayer } from "../core/collision/sat";
+import { collisionsForPiece as coreCollisions } from "../core/collision/sat";
 import type { SceneV1 } from "../core/contracts/scene";
 import { opPolys, booleanOpPolys, type Poly, type Op } from "../core/booleans/pathopsAdapter";
+import { validateAll } from "../core/geo/validateAll";
 
 type MsgIn =
   | { id: number; type: "rebuildIndex"; payload: { scene: SceneV1 } }
@@ -74,14 +75,7 @@ self.onmessage = (ev: MessageEvent) => {
     }
     if (msg.type === "validateOverlaps") {
       if (!sceneRef) throw new Error("scene not initialized");
-      const pairs = collisionsSameLayer(sceneRef);
-      const problems = pairs.map(([a, b]) => ({
-        code: "overlap_same_layer" as const,
-        severity: "BLOCK" as const,
-        pieceId: a,
-        message: "Pieces overlap on the same layer",
-        meta: { otherPieceId: b }
-      }));
+      const problems = validateAll(sceneRef);
       respond(msgId, true, problems);
       return;
     }

@@ -26,3 +26,17 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Flash outline animation for zoom-to-piece */
+.outline-flash {
+  animation: oflash 0.5s ease-in-out 1;
+}
+
+@keyframes oflash {
+  0% {
+    filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.9));
+  }
+  100% {
+    filter: none;
+  }
+}

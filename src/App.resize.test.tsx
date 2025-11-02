@@ -66,7 +66,7 @@ describe('Resize functionality', () => {
       expect(screen.queryByLabelText('resize-handle-n')).toBeNull();
     });
 
-    it('hides resize handles when multiple pieces are selected', () => {
+    it('shows group resize handles when multiple pieces are selected', () => {
       const { initSceneWithDefaults, addRectAtCenter, setSelection } = useSceneStore.getState();
       initSceneWithDefaults(600, 600);
       addRectAtCenter(100, 50);
@@ -76,7 +76,8 @@ describe('Resize functionality', () => {
 
       render(<App />);
 
-      expect(screen.queryByLabelText('resize-handle-n')).toBeNull();
+      // Group handles should be visible for multi-selection
+      expect(screen.queryByLabelText('resize-handle-n')).not.toBeNull();
     });
   });
 
@@ -312,7 +313,7 @@ describe('Resize functionality', () => {
       });
     });
 
-    it('hides resize handles when piece is rotated', () => {
+    it('shows resize handles when piece is rotated', () => {
       const { initSceneWithDefaults, rotateSelected } = useSceneStore.getState();
       initSceneWithDefaults(600, 600);
 
@@ -328,9 +329,9 @@ describe('Resize functionality', () => {
       rotateSelected(90);
       rerender(<App />);
 
-      // Handles should now be hidden (V1: only show for rotation = 0)
-      expect(screen.queryByLabelText('resize-handle-e')).not.toBeInTheDocument();
-      expect(screen.queryByLabelText('resize-handle-n')).not.toBeInTheDocument();
+      // S23b: Handles should still be visible (supports all rotations)
+      expect(screen.queryByLabelText('resize-handle-e')).toBeInTheDocument();
+      expect(screen.queryByLabelText('resize-handle-n')).toBeInTheDocument();
     });
   });
 

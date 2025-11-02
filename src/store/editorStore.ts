@@ -1,4 +1,4 @@
-import { SceneV1 } from "../core/contracts/scene";
+import { SceneV1, Problem } from "../core/contracts/scene";
 import { minScene } from "../core/examples/minScene";
 import { rebuildIndex, updatePiece } from "../core/spatial/rbushIndex";
 import * as geo from "../core/geo/facade";
@@ -19,9 +19,9 @@ type Command =
   | { type: "commitGhost" }
   | { type: "rollbackGhost" };
 
-// --- Validation UI state (problems overlap) ---
-type UIProblems = { hasBlock: boolean; conflicts: Set<string> };
-let uiProblems: UIProblems = { hasBlock: false, conflicts: new Set() };
+// --- Validation UI state (all problems) ---
+type UIProblems = { hasBlock: boolean; problems: Problem[] };
+let uiProblems: UIProblems = { hasBlock: false, problems: [] };
 let _validateTimer: any = null;
 let _debounceMs = 100;
 const listeners = new Set<() => void>();
@@ -31,14 +31,11 @@ export function __setValidationDebounceForTests(ms: number) { _debounceMs = ms; 
 async function runValidation() {
   try {
     const probs = await geo.validateOverlapsAsync(state);
-    const conflictIds = new Set<string>();
     let hasBlock = false;
     for (const p of probs) {
       if (p.severity === "BLOCK") hasBlock = true;
-      if (p.pieceId) conflictIds.add(p.pieceId);
-      if (p.meta?.otherPieceId) conflictIds.add(String(p.meta.otherPieceId));
     }
-    uiProblems = { hasBlock, conflicts: conflictIds };
+    uiProblems = { hasBlock, problems: probs };
     notifyListeners();
   } catch (e) {
     console.error("Validation failed:", e);

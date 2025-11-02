@@ -1,7 +1,14 @@
 /**
  * Pure utility functions for AABB rectangle resizing
  * Supports 8 handles: N, S, E, W, NE, NW, SE, SW
+ * Now supports rotated pieces via local frame transforms
  */
+
+import {
+  makeLocalFrame,
+  worldDeltaToLocal,
+  applyLocalResize as applyLocalResizeTransform,
+} from '@/core/geo/transform';
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
@@ -185,4 +192,98 @@ export function getHandlePosition(rect: Rect, handle: ResizeHandle): { x: number
     case 'sw':
       return { x, y: bottom };
   }
+}
+
+/**
+ * Convert handle to cardinal direction (for local frame resize)
+ */
+function toCardinal(handle: ResizeHandle): 'N' | 'S' | 'E' | 'W' {
+  switch (handle) {
+    case 'n':
+      return 'N';
+    case 's':
+      return 'S';
+    case 'e':
+      return 'E';
+    case 'w':
+      return 'W';
+    case 'ne':
+    case 'se':
+      return 'E';
+    case 'nw':
+    case 'sw':
+      return 'W';
+  }
+}
+
+/**
+ * Apply resize with rotation support
+ * Uses local frame transforms when rotationDeg is provided
+ */
+export function applyHandleWithRotation(
+  rect: Rect,
+  handle: ResizeHandle,
+  startPointerMm: { x: number; y: number },
+  currentPointerMm: { x: number; y: number },
+  rotationDeg: number,
+  opts: ResizeOptions
+): Rect {
+  const { minW, minH, lockEdge } = opts;
+
+  // Calculate world delta from drag start to current position
+  const dx = currentPointerMm.x - startPointerMm.x;
+  const dy = currentPointerMm.y - startPointerMm.y;
+
+  // If not rotated, fall back to original AABB logic
+  if (rotationDeg === 0 || rotationDeg === 360) {
+    return applyHandle(rect, handle, currentPointerMm, opts);
+  }
+
+  // Create local frame (pivot = center)
+  const frame = makeLocalFrame(rect.x, rect.y, rect.w, rect.h, rotationDeg);
+
+  // Convert world delta to local delta
+  const dl = worldDeltaToLocal(dx, dy, frame);
+
+  // Get cardinal direction
+  const cardinal = toCardinal(handle);
+
+  // Apply resize in local frame
+  let { w, h } = applyLocalResizeTransform(rect.w, rect.h, cardinal, dl);
+
+  // Apply minimum size
+  w = Math.max(w, minW);
+  h = Math.max(h, minH);
+
+  // Calculate new position
+  let nx = rect.x;
+  let ny = rect.y;
+
+  if (lockEdge) {
+    // Lock opposite edge: adjust position to keep it fixed
+    switch (cardinal) {
+      case 'E':
+        // Lock W edge: shift left by width delta
+        nx = rect.x + (rect.w - w);
+        break;
+      case 'W':
+        // Lock E edge: keep x
+        nx = rect.x;
+        break;
+      case 'S':
+        // Lock N edge: shift up by height delta
+        ny = rect.y + (rect.h - h);
+        break;
+      case 'N':
+        // Lock S edge: keep y
+        ny = rect.y;
+        break;
+    }
+  } else {
+    // Center pivot: recalculate position to keep center fixed
+    nx = frame.cx - w / 2;
+    ny = frame.cy - h / 2;
+  }
+
+  return { x: nx, y: ny, w, h };
 }

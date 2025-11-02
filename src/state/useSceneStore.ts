@@ -13,7 +13,7 @@ import {
   newDraftName,
   type DraftMeta,
 } from '@/lib/drafts';
-import { applyHandle, type ResizeHandle } from '@/lib/ui/resize';
+import { applyHandle, applyHandleWithRotation, type ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
 
@@ -65,12 +65,25 @@ function groupBBox(scene: SceneDraft, ids: ID[]) {
 }
 
 /**
+ * Compute and update group bbox in UI state
+ */
+function computeGroupBBox(draft: SceneState) {
+  const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+  if (selectedIds.length < 2) {
+    draft.ui.groupBBox = undefined;
+    return;
+  }
+  draft.ui.groupBBox = groupBBox(draft.scene, selectedIds);
+}
+
+/**
  * Clears transient UI state (drag/resize previews, guides, marquee)
  * while preserving selection state (selectedId/selectedIds/primaryId)
  */
 function clearTransientUI(ui: SceneState['ui']) {
   ui.dragging = undefined;
   ui.resizing = undefined;
+  ui.groupResizing = undefined;
   ui.guides = undefined;
   ui.marquee = undefined;
   // Keep selection intact: selectedId, selectedIds, primaryId
@@ -106,13 +119,32 @@ type SceneState = {
       pieceId: ID;
       handle: ResizeHandle;
       origin: { x: Milli; y: Milli; w: Milli; h: Milli };
+      startPointerMm: { x: Milli; y: Milli };
+      rotationDeg: Deg;
       snapshot: SceneStateSnapshot;
     };
+    groupResizing?: {
+      handle: ResizeHandle;
+      originBBox: { x: Milli; y: Milli; w: Milli; h: Milli };
+      startPointerMm: { x: Milli; y: Milli };
+      pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }>;
+      snapshot: SceneStateSnapshot;
+    };
+    groupBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
     lockEdge?: boolean;
     history?: {
       past: SceneStateSnapshot[];
       future: SceneStateSnapshot[];
       limit: number;
+    };
+    effects?: {
+      focusId?: ID;
+      flashId?: ID;
+      flashUntil?: number;
+    };
+    toast?: {
+      message: string;
+      until: number;
     };
   };
 };
@@ -162,10 +194,16 @@ type SceneActions = {
   loadDraftById: (id: string) => void;
   renameDraft: (id: string, name: string) => void;
   deleteDraftById: (id: string) => void;
-  startResize: (pieceId: ID, handle: ResizeHandle) => void;
+  startResize: (pieceId: ID, handle: ResizeHandle, startPointerMm?: { x: Milli; y: Milli }) => void;
   updateResize: (pointerMm: { x: Milli; y: Milli }) => void;
   endResize: (commit: boolean) => void;
+  startGroupResize: (handle: ResizeHandle, startPointerMm?: { x: Milli; y: Milli }) => void;
+  updateGroupResize: (pointerMm: { x: Milli; y: Milli }) => void;
+  endGroupResize: (commit: boolean) => void;
   setLockEdge: (on: boolean) => void;
+  focusPiece: (id: ID) => void;
+  flashOutline: (id: ID) => void;
+  insertRect: (opts: { w: number; h: number; x?: number; y?: number; layerId?: ID; materialId?: ID }) => Promise<ID | null>;
 };
 
 // Helper: deep clone minimal snapshot
@@ -360,6 +398,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = id;
       draft.ui.selectedIds = id ? [id] : undefined;
       draft.ui.primaryId = id;
+      computeGroupBBox(draft);
     })),
 
   selectOnly: (id) =>
@@ -367,6 +406,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = id;
       draft.ui.selectedIds = [id];
       draft.ui.primaryId = id;
+      computeGroupBBox(draft);
     })),
 
   toggleSelect: (id) =>
@@ -382,6 +422,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.selectedId = id;
         draft.ui.primaryId = id;
       }
+      computeGroupBBox(draft);
     })),
 
   clearSelection: () =>
@@ -389,6 +430,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = undefined;
       draft.ui.selectedIds = undefined;
       draft.ui.primaryId = undefined;
+      computeGroupBBox(draft);
     })),
 
   selectAll: () =>
@@ -397,6 +439,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = allIds;
       draft.ui.selectedId = allIds[0];
       draft.ui.primaryId = allIds[0];
+      computeGroupBBox(draft);
     })),
 
   setSelection: (ids) =>
@@ -405,6 +448,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = validIds.length > 0 ? validIds : undefined;
       draft.ui.selectedId = validIds[0];
       draft.ui.primaryId = validIds[0];
+      computeGroupBBox(draft);
     })),
 
   startMarquee: (x, y) =>
@@ -441,6 +485,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = intersected[0];
       draft.ui.primaryId = intersected[0];
       draft.ui.marquee = undefined;
+      computeGroupBBox(draft);
     })),
 
   nudgeSelected: (dx, dy) =>
@@ -1162,13 +1207,19 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       deleteDraftFromStorage(id);
     })),
 
-  startResize: (pieceId, handle) =>
+  startResize: (pieceId, handle, startPointerMm) =>
     set(produce((draft: SceneState) => {
       const piece = draft.scene.pieces[pieceId];
       if (!piece) return;
 
       // Capture pre-resize state for history
       const snapshot = takeSnapshot(draft);
+
+      // Use center of piece as default start pointer if not provided
+      const defaultStart = {
+        x: piece.position.x + piece.size.w / 2,
+        y: piece.position.y + piece.size.h / 2,
+      };
 
       draft.ui.resizing = {
         pieceId,
@@ -1179,6 +1230,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           w: piece.size.w,
           h: piece.size.h,
         },
+        startPointerMm: startPointerMm || defaultStart,
+        rotationDeg: piece.rotationDeg,
         snapshot,
       };
     })),
@@ -1193,11 +1246,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       const lockEdge = draft.ui.lockEdge ?? false;
 
-      // Apply handle to get new rect
-      const newRect = applyHandle(
+      // Apply handle with rotation support
+      const newRect = applyHandleWithRotation(
         resizing.origin,
         resizing.handle,
+        resizing.startPointerMm,
         pointerMm,
+        resizing.rotationDeg,
         { minW: 5, minH: 5, lockEdge }
       );
 
@@ -1320,4 +1375,279 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(produce((draft: SceneState) => {
       draft.ui.lockEdge = on;
     })),
+
+  focusPiece: (id) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.effects = draft.ui.effects || {};
+      draft.ui.effects.focusId = id;
+    })),
+
+  flashOutline: (id) =>
+    set(produce((draft: SceneState) => {
+      draft.ui.effects = draft.ui.effects || {};
+      draft.ui.effects.flashId = id;
+      draft.ui.effects.flashUntil = Date.now() + 500;
+    })),
+
+  startGroupResize: (handle, startPointerMm) =>
+    set(produce((draft: SceneState) => {
+      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+      if (selectedIds.length < 2) return;
+
+      computeGroupBBox(draft);
+      if (!draft.ui.groupBBox) return;
+
+      const snapshot = takeSnapshot(draft);
+      const pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }> = {};
+
+      for (const id of selectedIds) {
+        const p = draft.scene.pieces[id];
+        if (!p) continue;
+        pieceOrigins[id] = {
+          x: p.position.x,
+          y: p.position.y,
+          w: p.size.w,
+          h: p.size.h,
+        };
+      }
+
+      const defaultStart = {
+        x: draft.ui.groupBBox.x + draft.ui.groupBBox.w / 2,
+        y: draft.ui.groupBBox.y + draft.ui.groupBBox.h / 2,
+      };
+
+      draft.ui.groupResizing = {
+        handle,
+        originBBox: { ...draft.ui.groupBBox },
+        startPointerMm: startPointerMm || defaultStart,
+        pieceOrigins,
+        snapshot,
+      };
+    })),
+
+  updateGroupResize: (pointerMm) =>
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.groupResizing;
+      if (!resizing) return;
+
+      const selectedIds = draft.ui.selectedIds ?? [];
+      if (selectedIds.length < 2) return;
+
+      const { originBBox, startPointerMm, handle, pieceOrigins } = resizing;
+
+      // Calculate delta
+      const dx = pointerMm.x - startPointerMm.x;
+      const dy = pointerMm.y - startPointerMm.y;
+
+      // Apply handle to bbox
+      let newW = originBBox.w;
+      let newH = originBBox.h;
+      let newX = originBBox.x;
+      let newY = originBBox.y;
+
+      if (handle.includes('e')) newW = Math.max(10, originBBox.w + dx);
+      if (handle.includes('w')) { newW = Math.max(10, originBBox.w - dx); newX = originBBox.x + originBBox.w - newW; }
+      if (handle.includes('s')) newH = Math.max(10, originBBox.h + dy);
+      if (handle.includes('n')) { newH = Math.max(10, originBBox.h - dy); newY = originBBox.y + originBBox.h - newH; }
+
+      // Calculate scale factors
+      let sx = newW / Math.max(originBBox.w, 1);
+      let sy = newH / Math.max(originBBox.h, 1);
+
+      // Clamp scale factors to respect minSize (5mm) per piece
+      const MIN = 5;
+      for (const id of selectedIds) {
+        const orig = pieceOrigins[id];
+        if (!orig) continue;
+        const candW = orig.w * sx;
+        const candH = orig.h * sy;
+        if (candW < MIN) sx = Math.max(sx, MIN / orig.w);
+        if (candH < MIN) sy = Math.max(sy, MIN / orig.h);
+      }
+
+      // Apply scale to each piece around bbox center
+      const cx = originBBox.x + originBBox.w / 2;
+      const cy = originBBox.y + originBBox.h / 2;
+
+      for (const id of selectedIds) {
+        const orig = pieceOrigins[id];
+        if (!orig) continue;
+
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+
+        // Scale position and size around center
+        const nx = cx + (orig.x - cx) * sx;
+        const ny = cy + (orig.y - cy) * sy;
+        const nw = Math.max(MIN, orig.w * sx);
+        const nh = Math.max(MIN, orig.h * sy);
+
+        piece.position.x = nx;
+        piece.position.y = ny;
+        piece.size.w = nw;
+        piece.size.h = nh;
+      }
+
+      // Recompute bbox
+      computeGroupBBox(draft);
+    })),
+
+  endGroupResize: (commit) =>
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.groupResizing;
+      if (!resizing) return;
+
+      if (commit) {
+        // Check if dimensions actually changed
+        const changed = Object.keys(resizing.pieceOrigins).some(id => {
+          const p = draft.scene.pieces[id];
+          const orig = resizing.pieceOrigins[id];
+          if (!p || !orig) return false;
+          return p.position.x !== orig.x || p.position.y !== orig.y ||
+                 p.size.w !== orig.w || p.size.h !== orig.h;
+        });
+
+        if (changed) {
+          pushHistory(draft, resizing.snapshot);
+          autosave(takeSnapshot(draft));
+        }
+      } else {
+        // Rollback to origins
+        for (const [id, orig] of Object.entries(resizing.pieceOrigins)) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
+          p.position.x = orig.x;
+          p.position.y = orig.y;
+          p.size.w = orig.w;
+          p.size.h = orig.h;
+        }
+        computeGroupBBox(draft);
+      }
+
+      draft.ui.groupResizing = undefined;
+      draft.ui.guides = undefined;
+    })),
+
+  insertRect: async (opts) => {
+    const { projectDraftToV1 } = await import('../sync/projector');
+    const { validateOverlapsAsync } = await import('../core/geo/facade');
+
+    // Get current state
+    const currentState = useSceneStore.getState();
+    const snap = takeSnapshot(currentState);
+
+    // Enforce min 5mm and round values
+    const w = Math.max(5, Math.round(opts.w));
+    const h = Math.max(5, Math.round(opts.h));
+
+    // Apply snap to 10mm if enabled
+    const finalW = currentState.ui.snap10mm ? snapTo10mm(w) : w;
+    const finalH = currentState.ui.snap10mm ? snapTo10mm(h) : h;
+
+    // Default position (50, 50) with scene bounds clamping
+    const defaultX = opts.x ?? 50;
+    const defaultY = opts.y ?? 50;
+    const clamped = clampToScene(defaultX, defaultY, finalW, finalH, currentState.scene.size.w, currentState.scene.size.h);
+
+    // Get active layer (first layer) or create one
+    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
+
+    // Create piece ID upfront
+    const pieceId = genId('piece');
+
+    // Add piece synchronously
+    set(produce((draft: SceneState) => {
+      // Create layer if needed
+      if (!layerId) {
+        layerId = genId('layer');
+        draft.scene.layers[layerId] = {
+          id: layerId,
+          name: 'Calque 1',
+          z: 0,
+          pieces: [],
+        };
+        draft.scene.layerOrder.push(layerId);
+      }
+
+      // Create material if needed
+      if (!materialId) {
+        materialId = genId('mat');
+        draft.scene.materials[materialId] = {
+          id: materialId,
+          name: 'Matériau 1',
+          oriented: false,
+        };
+      }
+
+      // Create new piece
+      const newPiece: Piece = {
+        id: pieceId,
+        layerId,
+        materialId,
+        position: { x: clamped.x, y: clamped.y },
+        rotationDeg: 0,
+        scale: { x: 1, y: 1 },
+        kind: 'rect',
+        size: { w: finalW, h: finalH },
+      };
+
+      draft.scene.pieces[pieceId] = newPiece;
+      draft.scene.layers[layerId].pieces.push(pieceId);
+    }));
+
+    // Get updated state for validation
+    const updatedState = useSceneStore.getState();
+    const sceneV1 = projectDraftToV1({ scene: updatedState.scene });
+
+    // Validate
+    try {
+      const problems = await validateOverlapsAsync(sceneV1);
+      const hasBlockProblems = problems.some(p => p.severity === 'BLOCK');
+
+      if (hasBlockProblems) {
+        // Rollback: remove the piece
+        set(produce((draft: SceneState) => {
+          const layer = draft.scene.layers[layerId];
+          if (layer) {
+            layer.pieces = layer.pieces.filter(id => id !== pieceId);
+          }
+          delete draft.scene.pieces[pieceId];
+
+          // Show toast warning
+          draft.ui.toast = {
+            message: 'Impossible d\'insérer : chevauchement détecté',
+            until: Date.now() + 3000,
+          };
+        }));
+        return null;
+      } else {
+        // Success: select the new piece and push history
+        set(produce((draft: SceneState) => {
+          draft.ui.selectedId = pieceId;
+          draft.ui.selectedIds = [pieceId];
+          draft.ui.primaryId = pieceId;
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+        }));
+        return pieceId;
+      }
+    } catch (err) {
+      console.error('Validation error:', err);
+      // On error, rollback and show toast
+      set(produce((draft: SceneState) => {
+        const layer = draft.scene.layers[layerId];
+        if (layer) {
+          layer.pieces = layer.pieces.filter(id => id !== pieceId);
+        }
+        delete draft.scene.pieces[pieceId];
+
+        draft.ui.toast = {
+          message: 'Erreur de validation',
+          until: Date.now() + 3000,
+        };
+      }));
+      return null;
+    }
+  },
 }));

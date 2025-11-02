@@ -9,6 +9,7 @@ import { ResizeHandlesOverlay } from '@/components/ResizeHandlesOverlay';
 import type { ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import StatusBadge from '@/components/StatusBadge';
+import Toast from '@/components/Toast';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -18,6 +19,7 @@ export default function App() {
   const selectPiece = useSceneStore((s) => s.selectPiece);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
   const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
+  const effects = useSceneStore((s) => s.ui.effects);
 
   const dragging = useSceneStore((s) => s.ui.dragging);
   const beginDrag = useSceneStore((s) => s.beginDrag);
@@ -49,6 +51,11 @@ export default function App() {
   const endResize = useSceneStore((s) => s.endResize);
   const lockEdge = useSceneStore((s) => s.ui.lockEdge ?? false);
   const setLockEdge = useSceneStore((s) => s.setLockEdge);
+  const groupResizing = useSceneStore((s) => s.ui.groupResizing);
+  const groupBBox = useSceneStore((s) => s.ui.groupBBox);
+  const startGroupResize = useSceneStore((s) => s.startGroupResize);
+  const updateGroupResize = useSceneStore((s) => s.updateGroupResize);
+  const endGroupResize = useSceneStore((s) => s.endGroupResize);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -58,6 +65,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
   const resizeFactorRef = useRef<number>(1);
+  const groupResizeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const groupResizeFactorRef = useRef<number>(1);
 
   const [importError, setImportError] = useState<string | null>(null);
 
@@ -94,13 +103,17 @@ export default function App() {
         return;
       }
 
-      // Escape → Cancel resize or clear selection
+      // Escape → Cancel resize/group resize or clear selection
       if (e.key === 'Escape') {
         e.preventDefault();
         if (resizing) {
           endResize(false);
           resizeStartRef.current = null;
           resizeFactorRef.current = 1;
+        } else if (groupResizing) {
+          endGroupResize(false);
+          groupResizeStartRef.current = null;
+          groupResizeFactorRef.current = 1;
         } else {
           clearSelection();
         }
@@ -333,7 +346,7 @@ export default function App() {
 
     resizeStartRef.current = { x: clientX, y: clientY };
 
-    startResize(pieceId, handle);
+    startResize(pieceId, handle, { x: svgX, y: svgY });
     updateResize({ x: svgX, y: svgY });
   };
 
@@ -351,6 +364,40 @@ export default function App() {
   const handleResizeEnd = () => {
     endResize(true);
     resizeStartRef.current = null;
+  };
+
+  // Group resize handlers
+  const handleGroupResizeStart = (handle: ResizeHandle, clientX: number, clientY: number) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const factor = pxToMmFactor(rect.width, scene.size.w);
+    groupResizeFactorRef.current = factor;
+
+    // Convert client coordinates to SVG mm coordinates
+    const svgX = (clientX - rect.left) * factor;
+    const svgY = (clientY - rect.top) * factor;
+
+    groupResizeStartRef.current = { x: clientX, y: clientY };
+
+    startGroupResize(handle, { x: svgX, y: svgY });
+    updateGroupResize({ x: svgX, y: svgY });
+  };
+
+  const handleGroupResizeMove = (clientX: number, clientY: number) => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect || !groupResizeStartRef.current) return;
+
+    const factor = groupResizeFactorRef.current;
+    const svgX = (clientX - rect.left) * factor;
+    const svgY = (clientY - rect.top) * factor;
+
+    updateGroupResize({ x: svgX, y: svgY });
+  };
+
+  const handleGroupResizeEnd = () => {
+    endGroupResize(true);
+    groupResizeStartRef.current = null;
   };
 
   // Validation matériau (orientation uniquement - les overlaps sont gérés par editorStore + worker)
@@ -515,6 +562,8 @@ export default function App() {
                 const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : []);
                 const isSelected = actualSelectedIds.includes(p.id);
                 const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
+                const isFocused = effects?.focusId === p.id;
+                const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
 
                 return (
                   <g
@@ -531,11 +580,11 @@ export default function App() {
                       rx="6"
                       ry="6"
                       fill="#60a5fa" /* bleu */
-                      stroke={isFlashingInvalid ? '#ef4444' : isSelected ? '#22d3ee' : '#1e3a8a'}
-                      strokeWidth={isFlashingInvalid ? '4' : isSelected ? '3' : '2'}
+                      stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : '#1e3a8a'}
+                      strokeWidth={isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
                       onPointerDown={(e) => handlePointerDown(e, p.id)}
                       style={{ cursor: 'pointer' }}
-                      className={isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''}
+                      className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''}`}
                     />
                   </g>
                 );
@@ -649,13 +698,13 @@ export default function App() {
                 strokeWidth="1"
               />
             </svg>
-            {/* Resize handles overlay - only for single selection and rotation 0° */}
+            {/* Resize handles overlay - supports rotation via local frame transforms */}
             {selectedId && (!selectedIds || selectedIds.length === 1) && (() => {
               const piece = scene.pieces[selectedId];
               if (!piece || piece.kind !== 'rect') return null;
 
-              // V1: Only show handles for non-rotated pieces (axis-aligned)
-              if (piece.rotationDeg !== 0) return null;
+              // S23b: Handles now visible at all rotations (0/90/180/270)
+              // Resize logic uses local frame transforms
 
               const rect = {
                 x: piece.position.x,
@@ -675,11 +724,23 @@ export default function App() {
                 />
               );
             })()}
+            {/* Group resize handles for multi-selection */}
+            {selectedIds && selectedIds.length >= 2 && groupBBox && (
+              <ResizeHandlesOverlay
+                rect={groupBBox}
+                svgElement={svgRef.current}
+                onStart={(handle, clientX, clientY) => handleGroupResizeStart(handle, clientX, clientY)}
+                onMove={handleGroupResizeMove}
+                onEnd={handleGroupResizeEnd}
+                isResizing={!!groupResizing}
+              />
+            )}
               </div>
             </CardContent>
           </Card>
         </section>
       </div>
+      <Toast />
     </main>
   );
 }

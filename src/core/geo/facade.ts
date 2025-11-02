@@ -1,7 +1,8 @@
 import type { SceneV1, Problem } from "../contracts/scene";
 import { rebuildIndex as coreRebuild, updatePiece as coreUpdate } from "../spatial/rbushIndex";
-import { collisionsForPiece as coreCollisions, collisionsSameLayer } from "../collision/sat";
+import { collisionsForPiece as coreCollisions } from "../collision/sat";
 import type { Poly, Op } from "../booleans/pathopsAdapter";
+import { validateAll } from "./validateAll";
 
 let useWorker = false;
 let reqId = 1;
@@ -106,13 +107,6 @@ export async function validateOverlapsAsync(scene: SceneV1): Promise<Problem[]> 
       worker!._lastTimer = to;
     });
   }
-  // Fallback (Node): calcul synchrone
-  const pairs = collisionsSameLayer(scene);
-  return pairs.map(([a, b]) => ({
-    code: "overlap_same_layer" as any,
-    severity: "BLOCK" as any,
-    pieceId: a,
-    message: "Pieces overlap on the same layer",
-    meta: { otherPieceId: b }
-  } as Problem));
+  // Fallback (Node): calcul synchrone avec validateAll
+  return validateAll(scene);
 }

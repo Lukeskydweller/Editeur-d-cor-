@@ -95,6 +95,131 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     const { waitGeoReady } = await import('./store/editorStore');
     return await waitGeoReady();
   };
+
+  // Test hook: create validation problems (outside_scene + min_size_violation)
+  (window as any).__testCreateValidationProblems = async () => {
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const store = useSceneStore.getState();
+
+    // Get first layer and material
+    const firstLayerId = store.scene.layerOrder[0];
+    if (!firstLayerId) return false;
+
+    const firstMaterialId = Object.keys(store.scene.materials)[0];
+    if (!firstMaterialId) return false;
+
+    // Clear existing pieces and add two problematic pieces
+    useSceneStore.setState((state) => ({
+      scene: {
+        ...state.scene,
+        pieces: {
+          // Piece 1: outside scene bounds (right edge at 580+40=620 > 600)
+          'test-outside': {
+            id: 'test-outside',
+            kind: 'rect' as const,
+            position: { x: 580, y: 10 },
+            size: { w: 40, h: 40 },
+            rotationDeg: 0,
+            scale: { x: 1, y: 1 },
+            layerId: firstLayerId,
+            materialId: firstMaterialId,
+          },
+          // Piece 2: too small (w=4 < 5mm minimum)
+          'test-minsize': {
+            id: 'test-minsize',
+            kind: 'rect' as const,
+            position: { x: 10, y: 10 },
+            size: { w: 4, h: 20 },
+            rotationDeg: 0,
+            scale: { x: 1, y: 1 },
+            layerId: firstLayerId,
+            materialId: firstMaterialId,
+          },
+        }
+      }
+    }));
+
+    // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    return true;
+  };
+
+  // Test hook: expose scene store for E2E testing
+  import('./state/useSceneStore').then(({ useSceneStore }) => {
+    (window as any).__sceneStore = useSceneStore;
+  });
+
+  // Test hook: rotate and resize piece for E2E testing
+  (window as any).__testRotateAndResize = async (opts: { rotateDeg: number; drag: { dx: number; dy: number } }) => {
+    try {
+      const { useSceneStore } = await import('./state/useSceneStore');
+      const store = useSceneStore.getState();
+
+      // Get first layer and material
+      const firstLayerId = store.scene.layerOrder[0];
+      if (!firstLayerId) return { success: false, reason: 'No layer found' };
+
+      const firstMaterialId = Object.keys(store.scene.materials)[0];
+      if (!firstMaterialId) return { success: false, reason: 'No material found' };
+
+      // Clear existing pieces and create a single test piece
+      const pieceId = 'test-rot-resize';
+      useSceneStore.setState((state) => ({
+        scene: {
+          ...state.scene,
+          pieces: {
+            // Clear all existing pieces to avoid overlaps
+            [pieceId]: {
+              id: pieceId,
+              kind: 'rect' as const,
+              position: { x: 100, y: 100 },
+              size: { w: 40, h: 20 },
+              rotationDeg: 0,
+              scale: { x: 1, y: 1 },
+              layerId: firstLayerId,
+              materialId: firstMaterialId,
+            },
+          }
+        },
+        ui: {
+          ...state.ui,
+          selectedId: pieceId,
+          selectedIds: [pieceId],
+        }
+      }));
+
+      // Set absolute rotation
+      store.setSelectedRotation(opts.rotateDeg as any);
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Perform resize via store actions
+      const piece = useSceneStore.getState().scene.pieces[pieceId];
+      if (!piece) return { success: false, reason: 'Piece not found after rotation' };
+
+      // Start resize from E handle
+      const startX = piece.position.x + piece.size.w;
+      const startY = piece.position.y + piece.size.h / 2;
+
+      store.startResize(pieceId, 'e', { x: startX, y: startY });
+
+      // Update resize with drag delta
+      const currentX = startX + opts.drag.dx;
+      const currentY = startY + opts.drag.dy;
+      store.updateResize({ x: currentX, y: currentY });
+
+      // Commit resize
+      store.endResize(true);
+
+      // Wait for bridge + validation
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, reason: e.message };
+    }
+  };
 }
 
 // Start Draft→V1 synchronization bridge

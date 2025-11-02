@@ -32,6 +32,8 @@ export type ProblemSeverity = "BLOCK" | "WARN";
 
 export enum ProblemCode {
   overlap_same_layer = "overlap_same_layer",
+  outside_scene = "outside_scene",
+  min_size_violation = "min_size_violation",
   out_of_panel_bounds = "out_of_panel_bounds",
   no_support_below = "no_support_below",
   max_layers_exceeded = "max_layers_exceeded",
