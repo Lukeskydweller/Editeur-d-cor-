@@ -1,6 +1,8 @@
 import type { SceneDraft, ID } from '@/types/scene';
 import { pieceAABB, edgesOfRect } from '@/lib/geom/aabb';
 import { getSnapNeighbors } from '@/core/snap/candidates';
+import { queryNeighbors } from '@/lib/spatial/globalIndex';
+import { metrics } from '@/lib/metrics';
 
 export type SnapGuide = { kind: 'v'; x: number } | { kind: 'h'; y: number };
 
@@ -29,26 +31,46 @@ export function snapToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // OPTIMIZATION: Use RBush to get nearby pieces only
+  // OPTIMIZATION: Use spatial index to get nearby pieces only
   let piecesToCheck: Array<typeof scene.pieces[string]>;
-  try {
-    if (excludeId) {
-      const neighborIds = getSnapNeighbors(excludeId, 12, 16);
+
+  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+    // NEW PATH: Use global spatial index with margin
+    try {
+      const margin = 12; // mm
+      const neighborIds = queryNeighbors(
+        { x: candidate.x - margin, y: candidate.y - margin, w: candidate.w + 2 * margin, h: candidate.h + 2 * margin },
+        { excludeId }
+      );
       piecesToCheck = neighborIds
         .map(id => scene.pieces[id])
         .filter(p => p !== undefined);
-
-      // If index returned no neighbors or piece not in scene, fallback to all pieces
-      // This handles cases where scene is out of sync with spatial index (e.g. tests)
-      if (piecesToCheck.length === 0 || !scene.pieces[excludeId]) {
-        piecesToCheck = Object.values(scene.pieces);
-      }
-    } else {
+      metrics.rbush_candidates_snap_total += piecesToCheck.length;
+    } catch {
+      // Fallback: index not ready, use all pieces
       piecesToCheck = Object.values(scene.pieces);
     }
-  } catch {
-    // Fallback: index not ready, use all pieces
-    piecesToCheck = Object.values(scene.pieces);
+  } else {
+    // OLD PATH: Use existing RBush via getSnapNeighbors
+    try {
+      if (excludeId) {
+        const neighborIds = getSnapNeighbors(excludeId, 12, 16);
+        piecesToCheck = neighborIds
+          .map(id => scene.pieces[id])
+          .filter(p => p !== undefined);
+
+        // If index returned no neighbors or piece not in scene, fallback to all pieces
+        // This handles cases where scene is out of sync with spatial index (e.g. tests)
+        if (piecesToCheck.length === 0 || !scene.pieces[excludeId]) {
+          piecesToCheck = Object.values(scene.pieces);
+        }
+      } else {
+        piecesToCheck = Object.values(scene.pieces);
+      }
+    } catch {
+      // Fallback: index not ready, use all pieces
+      piecesToCheck = Object.values(scene.pieces);
+    }
   }
 
   // Explore nearby pieces (using rotation-aware AABB)
@@ -132,32 +154,52 @@ export function snapGroupToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // OPTIMIZATION: Use RBush to get nearby pieces only
+  // OPTIMIZATION: Use spatial index to get nearby pieces only
   let piecesToCheck: Array<typeof scene.pieces[string]>;
-  try {
-    if (excludeIds.length > 0) {
-      // Collect neighbors of all pieces in the group
-      const neighborSet = new Set<string>();
-      for (const id of excludeIds) {
-        const neighbors = getSnapNeighbors(id, 12, 16);
-        neighbors.forEach(nid => neighborSet.add(nid));
-      }
-      piecesToCheck = Array.from(neighborSet)
-        .map(id => scene.pieces[id])
-        .filter(p => p !== undefined && !excludeIds.includes(p.id));
 
-      // If index returned no neighbors or pieces not in scene, fallback to all pieces
-      // This handles cases where scene is out of sync with spatial index (e.g. tests)
-      const allExcludedInScene = excludeIds.every(id => scene.pieces[id]);
-      if (piecesToCheck.length === 0 || !allExcludedInScene) {
-        piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
-      }
-    } else {
-      piecesToCheck = Object.values(scene.pieces);
+  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+    // NEW PATH: Use global spatial index with margin
+    try {
+      const margin = 12; // mm
+      const neighborIds = queryNeighbors(
+        { x: groupRect.x - margin, y: groupRect.y - margin, w: groupRect.w + 2 * margin, h: groupRect.h + 2 * margin },
+        { excludeIdSet: new Set(excludeIds) }
+      );
+      piecesToCheck = neighborIds
+        .map(id => scene.pieces[id])
+        .filter(p => p !== undefined);
+      metrics.rbush_candidates_snap_total += piecesToCheck.length;
+    } catch {
+      // Fallback: index not ready, use all pieces
+      piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
     }
-  } catch {
-    // Fallback: index not ready, use all pieces
-    piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+  } else {
+    // OLD PATH: Use existing RBush via getSnapNeighbors
+    try {
+      if (excludeIds.length > 0) {
+        // Collect neighbors of all pieces in the group
+        const neighborSet = new Set<string>();
+        for (const id of excludeIds) {
+          const neighbors = getSnapNeighbors(id, 12, 16);
+          neighbors.forEach(nid => neighborSet.add(nid));
+        }
+        piecesToCheck = Array.from(neighborSet)
+          .map(id => scene.pieces[id])
+          .filter(p => p !== undefined && !excludeIds.includes(p.id));
+
+        // If index returned no neighbors or pieces not in scene, fallback to all pieces
+        // This handles cases where scene is out of sync with spatial index (e.g. tests)
+        const allExcludedInScene = excludeIds.every(id => scene.pieces[id]);
+        if (piecesToCheck.length === 0 || !allExcludedInScene) {
+          piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+        }
+      } else {
+        piecesToCheck = Object.values(scene.pieces);
+      }
+    } catch {
+      // Fallback: index not ready, use all pieces
+      piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+    }
   }
 
   // Explore nearby pieces (using rotation-aware AABB)

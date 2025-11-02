@@ -3,6 +3,19 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import './index.css'
 
+// Runtime feature flags
+declare global {
+  interface Window {
+    __flags: {
+      USE_GLOBAL_SPATIAL: boolean;
+    };
+  }
+}
+
+window.__flags ??= {
+  USE_GLOBAL_SPATIAL: false, // Default OFF - enable explicitly for testing
+};
+
 // E2E test hooks for PathOps (dev and preview mode for E2E testing)
 // Check if running in development OR if window location is localhost (preview server)
 if (import.meta.env.DEV || window.location.hostname === 'localhost') {
@@ -221,6 +234,44 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     }
   };
 }
+
+// Test hook: spawn grid of pieces for performance testing (ALWAYS exposed for E2E)
+(window as any).__testSpawnGrid = async (opts: { cols: number; rows: number; w: number; h: number; gap: number }) => {
+  try {
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const store = useSceneStore.getState();
+
+    const firstLayerId = store.scene.layerOrder[0];
+    if (!firstLayerId) return false;
+
+    const firstMaterialId = Object.keys(store.scene.materials)[0];
+    if (!firstMaterialId) return false;
+
+    let x = 10;
+    let y = 10;
+
+    for (let r = 0; r < opts.rows; r++) {
+      for (let c = 0; c < opts.cols; c++) {
+        await store.insertRect({
+          w: opts.w,
+          h: opts.h,
+          x: x,
+          y: y,
+        });
+        x += opts.w + opts.gap;
+      }
+      x = 10;
+      y += opts.h + opts.gap;
+    }
+
+    // Wait for async validation
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return true;
+  } catch (e) {
+    console.error('__testSpawnGrid error:', e);
+    return false;
+  }
+};
 
 // Start Draft→V1 synchronization bridge
 import { startValidationBridge } from './sync/bridge';

@@ -1,6 +1,8 @@
 import * as SAT from "sat";
 import { SceneV1 } from "../contracts/scene";
 import { neighborsForPiece } from "../spatial/rbushIndex";
+import { queryNeighbors } from "../../lib/spatial/globalIndex";
+import { metrics } from "../../lib/metrics";
 
 export type AABB = { x:number; y:number; w:number; h:number };
 
@@ -19,7 +21,25 @@ function aabbOfPiece(scene: SceneV1, id: string): AABB | null {
 export function collisionsForPiece(scene: SceneV1, id: string, margin = 0): string[] {
   const aabb = aabbOfPiece(scene, id);
   if (!aabb) return [];
-  const neighbors = neighborsForPiece(id, Math.max(0, margin), 64);
+
+  let neighbors: string[];
+  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+    // NEW PATH: Use global spatial index
+    try {
+      neighbors = queryNeighbors(
+        { x: aabb.x - margin, y: aabb.y - margin, w: aabb.w + 2 * margin, h: aabb.h + 2 * margin },
+        { excludeId: id }
+      );
+      metrics.rbush_candidates_collision_total += neighbors.length;
+    } catch {
+      // Fallback: use old RBush
+      neighbors = neighborsForPiece(id, Math.max(0, margin), 64);
+    }
+  } else {
+    // OLD PATH: Use existing RBush
+    neighbors = neighborsForPiece(id, Math.max(0, margin), 64);
+  }
+
   const hits: string[] = [];
   for (const otherId of neighbors) {
     const b = aabbOfPiece(scene, otherId);
@@ -50,8 +70,18 @@ export function collisionsSameLayer(scene: SceneV1): Array<[string, string]> {
       const aabb1 = aabbOfPiece(scene, id1);
       if (!aabb1) continue;
 
-      // Use RBush to get neighbors
-      const neighbors = neighborsForPiece(id1, 0, 64);
+      // Use spatial index to get neighbors
+      let neighbors: string[];
+      if (window.__flags?.USE_GLOBAL_SPATIAL) {
+        try {
+          neighbors = queryNeighbors(aabb1, { excludeId: id1 });
+          metrics.rbush_candidates_collision_total += neighbors.length;
+        } catch {
+          neighbors = neighborsForPiece(id1, 0, 64);
+        }
+      } else {
+        neighbors = neighborsForPiece(id1, 0, 64);
+      }
 
       for (const id2 of neighbors) {
         // Skip if not in same layer

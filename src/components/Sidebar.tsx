@@ -4,6 +4,7 @@ import { useSceneStore } from '@/state/useSceneStore';
 import { SidebarDrafts } from '@/components/SidebarDrafts';
 import ProblemsPanel from '@/components/ProblemsPanel';
 import ShapeLibrary from '@/components/ShapeLibrary';
+import { DevMetrics } from '@/components/DevMetrics';
 
 export function Sidebar() {
   const scene = useSceneStore((s) => s.scene);
@@ -37,6 +38,8 @@ export function Sidebar() {
       <ShapeLibrary />
       {/* ProblemsPanel reste la source officielle pour la liste des conflits */}
       <ProblemsPanel />
+      {/* Dev metrics for performance monitoring */}
+      <DevMetrics />
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">

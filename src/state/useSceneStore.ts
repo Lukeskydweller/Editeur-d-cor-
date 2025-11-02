@@ -16,6 +16,7 @@ import {
 import { applyHandle, applyHandleWithRotation, type ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
+import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalIndex';
 
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
@@ -328,8 +329,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.scene.layerOrder.push(id);
     })) as unknown as ID,
 
-  addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) =>
-    set(produce((draft: SceneState) => {
+  addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) => {
+    const result = set(produce((draft: SceneState) => {
       const id = genId('piece');
       const piece: Piece = {
         id,
@@ -343,12 +344,26 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       };
       draft.scene.pieces[id] = piece;
       draft.scene.layers[layerId]?.pieces.push(id);
-    })) as unknown as ID,
+
+      // Sync to spatial index if flag enabled
+      if (window.__flags?.USE_GLOBAL_SPATIAL) {
+        syncPieceToIndex(id, { x, y, w, h });
+      }
+    })) as unknown as ID;
+    return result;
+  },
 
   movePiece: (pieceId, x, y) =>
     set(produce((draft: SceneState) => {
       const p = draft.scene.pieces[pieceId];
-      if (p) p.position = { x, y };
+      if (p) {
+        p.position = { x, y };
+
+        // Sync to spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          syncPieceToIndex(pieceId, { x, y, w: p.size.w, h: p.size.h });
+        }
+      }
     })),
 
   rotatePiece: (pieceId, rotationDeg) =>
@@ -837,6 +852,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         }
 
         delete draft.scene.pieces[selectedId];
+
+        // Remove from spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          removePieceFromIndex(selectedId);
+        }
       }
 
       // Clear transient UI before clearing selection
@@ -1337,6 +1357,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       piece.position.y = y;
       piece.size.w = w;
       piece.size.h = h;
+
+      // Sync to spatial index if flag enabled
+      if (window.__flags?.USE_GLOBAL_SPATIAL) {
+        syncPieceToIndex(resizing.pieceId, { x, y, w, h });
+      }
     })),
 
   endResize: (commit) =>
@@ -1594,6 +1619,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.scene.pieces[pieceId] = newPiece;
       draft.scene.layers[layerId].pieces.push(pieceId);
+
+      // Sync to spatial index if flag enabled
+      if (window.__flags?.USE_GLOBAL_SPATIAL) {
+        syncPieceToIndex(pieceId, { x: clamped.x, y: clamped.y, w: finalW, h: finalH });
+      }
     }));
 
     // Get updated state for validation
@@ -1613,6 +1643,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             layer.pieces = layer.pieces.filter(id => id !== pieceId);
           }
           delete draft.scene.pieces[pieceId];
+
+          // Remove from spatial index if flag enabled
+          if (window.__flags?.USE_GLOBAL_SPATIAL) {
+            removePieceFromIndex(pieceId);
+          }
 
           // Show toast warning
           draft.ui.toast = {
@@ -1641,6 +1676,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           layer.pieces = layer.pieces.filter(id => id !== pieceId);
         }
         delete draft.scene.pieces[pieceId];
+
+        // Remove from spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          removePieceFromIndex(pieceId);
+        }
 
         draft.ui.toast = {
           message: 'Erreur de validation',
