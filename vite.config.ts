@@ -9,6 +9,13 @@ export default defineConfig({
       '@': new URL('./src', import.meta.url).pathname,
     },
   },
+  // Assure le support workers module et assets .wasm chargés via ?url
+  worker: { format: "es" },
+  preview: {
+    host: "0.0.0.0",
+    port: 5173,
+    strictPort: true
+  },
   test: {
     environment: 'jsdom',
     globals: true,

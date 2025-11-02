@@ -1,5 +1,6 @@
 import type { SceneDraft, ID } from '@/types/scene';
 import { pieceAABB, edgesOfRect } from '@/lib/geom/aabb';
+import { getSnapNeighbors } from '@/core/snap/candidates';
 
 export type SnapGuide = { kind: 'v'; x: number } | { kind: 'h'; y: number };
 
@@ -13,6 +14,9 @@ export function rectEdges(r: RectMM) {
  * Compute snap-to-other-pieces for a candidate rect.
  * - thresholdMm: snap radius (e.g. 5)
  * - excludeId: piece being dragged
+ *
+ * OPTIMIZATION: Uses RBush spatial index to only check nearby pieces (margin=12mm, limit=16)
+ * instead of iterating through all pieces. Falls back to full iteration if index unavailable.
  */
 export function snapToPieces(
   scene: SceneDraft,
@@ -25,8 +29,30 @@ export function snapToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // Explore all other pieces (using rotation-aware AABB)
-  for (const p of Object.values(scene.pieces)) {
+  // OPTIMIZATION: Use RBush to get nearby pieces only
+  let piecesToCheck: Array<typeof scene.pieces[string]>;
+  try {
+    if (excludeId) {
+      const neighborIds = getSnapNeighbors(excludeId, 12, 16);
+      piecesToCheck = neighborIds
+        .map(id => scene.pieces[id])
+        .filter(p => p !== undefined);
+
+      // If index returned no neighbors or piece not in scene, fallback to all pieces
+      // This handles cases where scene is out of sync with spatial index (e.g. tests)
+      if (piecesToCheck.length === 0 || !scene.pieces[excludeId]) {
+        piecesToCheck = Object.values(scene.pieces);
+      }
+    } else {
+      piecesToCheck = Object.values(scene.pieces);
+    }
+  } catch {
+    // Fallback: index not ready, use all pieces
+    piecesToCheck = Object.values(scene.pieces);
+  }
+
+  // Explore nearby pieces (using rotation-aware AABB)
+  for (const p of piecesToCheck) {
     if (p.id === excludeId) continue;
     const r = pieceAABB(p); // Use rotated AABB instead of raw position/size
     const e = rectEdges(r);
@@ -91,6 +117,9 @@ export function snapToPieces(
  * Compute snap-to-other-pieces for a group bounding box.
  * - thresholdMm: snap radius (e.g. 5)
  * - excludeIds: pieces being dragged
+ *
+ * OPTIMIZATION: Uses RBush spatial index to only check nearby pieces (margin=12mm, limit=16)
+ * by querying neighbors of each piece in the group. Falls back to full iteration if index unavailable.
  */
 export function snapGroupToPieces(
   scene: SceneDraft,
@@ -103,8 +132,36 @@ export function snapGroupToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // Explore all other pieces (using rotation-aware AABB)
-  for (const p of Object.values(scene.pieces)) {
+  // OPTIMIZATION: Use RBush to get nearby pieces only
+  let piecesToCheck: Array<typeof scene.pieces[string]>;
+  try {
+    if (excludeIds.length > 0) {
+      // Collect neighbors of all pieces in the group
+      const neighborSet = new Set<string>();
+      for (const id of excludeIds) {
+        const neighbors = getSnapNeighbors(id, 12, 16);
+        neighbors.forEach(nid => neighborSet.add(nid));
+      }
+      piecesToCheck = Array.from(neighborSet)
+        .map(id => scene.pieces[id])
+        .filter(p => p !== undefined && !excludeIds.includes(p.id));
+
+      // If index returned no neighbors or pieces not in scene, fallback to all pieces
+      // This handles cases where scene is out of sync with spatial index (e.g. tests)
+      const allExcludedInScene = excludeIds.every(id => scene.pieces[id]);
+      if (piecesToCheck.length === 0 || !allExcludedInScene) {
+        piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+      }
+    } else {
+      piecesToCheck = Object.values(scene.pieces);
+    }
+  } catch {
+    // Fallback: index not ready, use all pieces
+    piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+  }
+
+  // Explore nearby pieces (using rotation-aware AABB)
+  for (const p of piecesToCheck) {
     if (excludeIds.includes(p.id)) continue;
     const r = pieceAABB(p); // Use rotated AABB instead of raw position/size
     const e = rectEdges(r);

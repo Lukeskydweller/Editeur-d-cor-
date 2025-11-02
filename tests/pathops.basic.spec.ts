@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { opPolys } from "../src/core/booleans/pathopsAdapter";
+import { opPolys, pathToPolys } from "../src/core/booleans/pathopsAdapter";
 
 const rect = (x: number, y: number, w: number, h: number) => [
   { x, y },
@@ -23,5 +23,9 @@ describe("pathops: basic union smoke", () => {
     // Test minimal : vérifie que le module peut être importé sans erreur
     expect(opPolys).toBeDefined();
     expect(typeof opPolys).toBe("function");
+  });
+
+  it.skip("extracts polys from path (validated by E2E browser)", () => {
+    expect(pathToPolys).toBeTypeOf("function");
   });
 });

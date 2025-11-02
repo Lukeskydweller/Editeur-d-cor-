@@ -13,18 +13,20 @@ const rect = (x: number, y: number, w: number, h: number) => [
 
 test("PathOps boolean union runs in real browser", async ({ page }) => {
   await page.goto("/");
-  const ok = await page.evaluate(async (a, b) => {
+  const ok = await page.evaluate(async (args) => {
+    const [a, b] = args;
     // @ts-ignore
     return await window.__geoBooleanOp(a, b, "union").then(() => true).catch(() => false);
-  }, rect(0, 0, 10, 10), rect(5, 0, 10, 10));
+  }, [rect(0, 0, 10, 10), rect(5, 0, 10, 10)]);
   expect(ok).toBe(true);
 });
 
 test("PathOps intersect runs in real browser", async ({ page }) => {
   await page.goto("/");
-  const ok = await page.evaluate(async (a, b) => {
+  const ok = await page.evaluate(async (args) => {
+    const [a, b] = args;
     // @ts-ignore
     return await window.__geoBooleanOp(a, b, "intersect").then(() => true).catch(() => false);
-  }, rect(0, 0, 10, 10), rect(5, 0, 10, 10));
+  }, [rect(0, 0, 10, 10), rect(5, 0, 10, 10)]);
   expect(ok).toBe(true);
 });

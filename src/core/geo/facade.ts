@@ -1,6 +1,7 @@
-import type { SceneV1 } from "../contracts/scene";
+import type { SceneV1, Problem } from "../contracts/scene";
 import { rebuildIndex as coreRebuild, updatePiece as coreUpdate } from "../spatial/rbushIndex";
-import { collisionsForPiece as coreCollisions } from "../collision/sat";
+import { collisionsForPiece as coreCollisions, collisionsSameLayer } from "../collision/sat";
+import type { Poly, Op } from "../booleans/pathopsAdapter";
 
 let useWorker = false;
 let reqId = 1;
@@ -70,4 +71,48 @@ export function updatePiece(id: string) {
 }
 export function collisionsForPieceAsync(scene: SceneV1, id: string, margin = 0) {
   return post<string[]>("collisionsForPiece", { scene, id, margin });
+}
+
+// Façade: booleanOpPolys via worker si dispo, sinon fallback direct (si WASM dispo).
+export async function booleanOpPolysAsync(a: Poly, b: Poly, kind: Op): Promise<Poly[]> {
+  if (useWorker && worker) {
+    const id = reqId++;
+    return new Promise<Poly[]>((resolve, reject) => {
+      pending.set(id, resolve);
+      worker!.postMessage({ id, type: "booleanOpPolys", payload: { a, b, kind } });
+      const to = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("geo worker timeout"));
+      }, 10_000);
+      // @ts-ignore
+      worker!._lastTimer = to;
+    });
+  }
+  const { booleanOpPolys } = await import("../booleans/pathopsAdapter");
+  return await booleanOpPolys(a, b, kind);
+}
+
+export async function validateOverlapsAsync(scene: SceneV1): Promise<Problem[]> {
+  if (useWorker && worker) {
+    const id = reqId++;
+    return new Promise<Problem[]>((resolve, reject) => {
+      pending.set(id, resolve);
+      worker!.postMessage({ id, type: "validateOverlaps", payload: {} });
+      const to = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("geo worker timeout"));
+      }, 10_000);
+      // @ts-ignore
+      worker!._lastTimer = to;
+    });
+  }
+  // Fallback (Node): calcul synchrone
+  const pairs = collisionsSameLayer(scene);
+  return pairs.map(([a, b]) => ({
+    code: "overlap_same_layer" as any,
+    severity: "BLOCK" as any,
+    pieceId: a,
+    message: "Pieces overlap on the same layer",
+    meta: { otherPieceId: b }
+  } as Problem));
 }

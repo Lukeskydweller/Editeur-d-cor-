@@ -28,3 +28,51 @@ export function collisionsForPiece(scene: SceneV1, id: string, margin = 0): stri
   }
   return hits;
 }
+
+/** Retourne toutes les paires en collision au sein d'une même couche. */
+export function collisionsSameLayer(scene: SceneV1): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  const seen = new Set<string>();
+
+  // Group pieces by layer
+  const piecesByLayer = new Map<string, string[]>();
+  for (const piece of scene.pieces) {
+    if (!piecesByLayer.has(piece.layerId)) {
+      piecesByLayer.set(piece.layerId, []);
+    }
+    piecesByLayer.get(piece.layerId)!.push(piece.id);
+  }
+
+  // Check collisions within each layer
+  for (const [, pieceIds] of piecesByLayer) {
+    for (let i = 0; i < pieceIds.length; i++) {
+      const id1 = pieceIds[i];
+      const aabb1 = aabbOfPiece(scene, id1);
+      if (!aabb1) continue;
+
+      // Use RBush to get neighbors
+      const neighbors = neighborsForPiece(id1, 0, 64);
+
+      for (const id2 of neighbors) {
+        // Skip if not in same layer
+        const piece1 = scene.pieces.find(p => p.id === id1);
+        const piece2 = scene.pieces.find(p => p.id === id2);
+        if (!piece1 || !piece2 || piece1.layerId !== piece2.layerId) continue;
+
+        // Avoid duplicates: ensure id1 < id2
+        const pairKey = id1 < id2 ? `${id1},${id2}` : `${id2},${id1}`;
+        if (seen.has(pairKey)) continue;
+
+        const aabb2 = aabbOfPiece(scene, id2);
+        if (!aabb2) continue;
+
+        if (collideRectRect(aabb1, aabb2)) {
+          seen.add(pairKey);
+          pairs.push(id1 < id2 ? [id1, id2] : [id2, id1]);
+        }
+      }
+    }
+  }
+
+  return pairs;
+}
