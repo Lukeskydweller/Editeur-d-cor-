@@ -4,6 +4,7 @@ import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/ty
 import { validateNoOverlap } from '@/lib/sceneRules';
 import { snapToPieces, snapGroupToPieces, type SnapGuide } from '@/lib/ui/snap';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
+import type { Problem } from '@/core/contracts/scene';
 import {
   listDrafts,
   saveDraft,
@@ -17,6 +18,11 @@ import { applyHandle, applyHandleWithRotation, type ResizeHandle } from '@/lib/u
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
 import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalIndex';
+import { validateOverlapsAsync } from '@/core/geo/facade';
+import { projectDraftToV1 } from '@/sync/projector';
+import { incResizeBlockPreview, incResizeBlockCommitBlocked, incResizeBlockCommitSuccess } from '@/lib/metrics';
+import { collisionsForCandidate, spacingForCandidate, type ResizeContext } from '@/core/geo/validateAll';
+import { getRotatedAABB } from '@/core/geo/geometry';
 
 // Helper to notify auto-spatial module after structural mutations
 function notifyAutoSpatial() {
@@ -51,6 +57,35 @@ function add90(d: Deg): Deg {
 }
 function sub90(d: Deg): Deg {
   return normDeg((d + 270) % 360);
+}
+
+// Helper to convert resize handle to moved direction
+function handleToMoved(handle: ResizeHandle): ResizeContext['moved'] {
+  return handle.toUpperCase() as ResizeContext['moved'];
+}
+
+// Helper functions for resize baseline tracking
+function aabbGapLocal(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
+  const dx = Math.max(0, Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w)));
+  const dy = Math.max(0, Math.max(b.y - (a.y + a.h), a.y - (b.y + b.h)));
+  if (dx === 0 && dy === 0) {
+    const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const overlapY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return -Math.min(overlapX, overlapY);
+  }
+  if (dy === 0) return dx;
+  if (dx === 0) return dy;
+  return Math.min(dx, dy);
+}
+
+function dominantSpacingAxisLocal(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): 'X' | 'Y' {
+  const xOverlap = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const yOverlap = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const yOverlapRatio = yOverlap / Math.min(a.h, b.h);
+  const xOverlapRatio = xOverlap / Math.min(a.w, b.w);
+  if (yOverlapRatio > 0.5) return 'X';
+  if (xOverlapRatio > 0.5) return 'Y';
+  return yOverlapRatio > xOverlapRatio ? 'X' : 'Y';
 }
 
 // helpers sélection multiple
@@ -129,6 +164,7 @@ type SceneState = {
       startPointerMm: { x: Milli; y: Milli };
       rotationDeg: Deg;
       snapshot: SceneStateSnapshot;
+      baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
     };
     groupResizing?: {
       handle: ResizeHandle;
@@ -136,6 +172,8 @@ type SceneState = {
       startPointerMm: { x: Milli; y: Milli };
       pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }>;
       snapshot: SceneStateSnapshot;
+      baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
+      memberIds: Set<ID>;
     };
     groupBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
     lockEdge?: boolean;
@@ -152,6 +190,11 @@ type SceneState = {
     toast?: {
       message: string;
       until: number;
+    };
+    ghost?: {
+      pieceId: ID;
+      problems: Problem[];
+      startedAt: number;
     };
   };
 };
@@ -211,7 +254,12 @@ type SceneActions = {
   setLockEdge: (on: boolean) => void;
   focusPiece: (id: ID) => void;
   flashOutline: (id: ID) => void;
+  findFreeSpot: (w: number, h: number) => Promise<{ x: number; y: number } | null>;
   insertRect: (opts: { w: number; h: number; x?: number; y?: number; layerId?: ID; materialId?: ID }) => Promise<ID | null>;
+  startGhostInsert: (opts: { w: number; h: number; layerId?: ID; materialId?: ID }) => Promise<ID>;
+  commitGhost: () => void;
+  cancelGhost: () => void;
+  validateGhost: () => Promise<void>;
 };
 
 // Helper: deep clone minimal snapshot
@@ -778,6 +826,24 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.ui.dragging = undefined;
       draft.ui.guides = undefined;
+
+      // If ghost is active, validate after drag
+      const hasGhost = draft.ui.ghost !== undefined;
+      if (hasGhost) {
+        // Trigger validation async (after state update)
+        Promise.resolve().then(() => {
+          useSceneStore.getState().validateGhost().then(() => {
+            // Auto-commit if no BLOCK problems
+            const state = useSceneStore.getState();
+            if (state.ui.ghost) {
+              const hasBlock = state.ui.ghost.problems.some(p => p.severity === 'BLOCK');
+              if (!hasBlock) {
+                useSceneStore.getState().commitGhost();
+              }
+            }
+          });
+        });
+      }
     })),
 
   cancelDrag: () =>
@@ -1259,6 +1325,31 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         y: piece.position.y + piece.size.h / 2,
       };
 
+      // Calculate baseline gaps for neighboring pieces (for orthogonal filtering)
+      const baseline: Record<string, { axis: 'X' | 'Y'; gap: number }> = {};
+      const sceneV1 = projectDraftToV1({ scene: draft.scene });
+      const pieceAABB = getRotatedAABB({
+        id: pieceId,
+        x: piece.position.x,
+        y: piece.position.y,
+        w: piece.size.w,
+        h: piece.size.h,
+        rot: piece.rotationDeg ?? 0,
+        layerId: piece.layerId,
+        materialId: piece.materialId,
+        joined: piece.joined,
+      });
+
+      // Find all pieces on same layer (excluding self)
+      const neighbors = sceneV1.pieces.filter(p => p.id !== pieceId && p.layerId === piece.layerId);
+
+      for (const neighbor of neighbors) {
+        const neighborAABB = getRotatedAABB(neighbor);
+        const gap = aabbGapLocal(pieceAABB, neighborAABB);
+        const axis = dominantSpacingAxisLocal(pieceAABB, neighborAABB);
+        baseline[neighbor.id] = { axis, gap };
+      }
+
       draft.ui.resizing = {
         pieceId,
         handle,
@@ -1271,6 +1362,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         startPointerMm: startPointerMm || defaultStart,
         rotationDeg: piece.rotationDeg,
         snapshot,
+        baseline,
       };
     })),
 
@@ -1380,6 +1472,83 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (window.__flags?.USE_GLOBAL_SPATIAL) {
         syncPieceToIndex(resizing.pieceId, { x, y, w, h });
       }
+
+      // Capture resizing piece ID and candidate geometry before async operation
+      // (Immer proxy becomes invalid after produce)
+      const resizingPieceId = resizing.pieceId;
+      const candidateGeometry = {
+        x,
+        y,
+        w,
+        h,
+        rotationDeg: piece.rotationDeg ?? 0,
+      };
+
+      // Validate resize preview asynchronously (don't block UI)
+      Promise.resolve().then(async () => {
+        const currentState = useSceneStore.getState();
+
+        // Only validate if still resizing the same piece
+        if (currentState.ui.resizing?.pieceId !== resizingPieceId) return;
+
+        // Project current scene to V1 for validation
+        const sceneV1 = projectDraftToV1({ scene: currentState.scene });
+
+        // Build ResizeContext for filtering false positives
+        const resizeContext: ResizeContext = {
+          moved: handleToMoved(currentState.ui.resizing!.handle),
+          eps: 0.10,
+          baseline: currentState.ui.resizing!.baseline,
+        };
+
+        // Validate candidate geometry (not store state) with resize context
+        const collisionResult = collisionsForCandidate(resizingPieceId, candidateGeometry, sceneV1, resizeContext);
+        const spacingProblems = spacingForCandidate(resizingPieceId, candidateGeometry, sceneV1, resizeContext);
+
+        // Combine problems
+        const pieceProblems: Problem[] = [];
+
+        if (collisionResult.overlap) {
+          // Add overlap problems for each colliding neighbor
+          for (const neighborId of collisionResult.neighbors) {
+            pieceProblems.push({
+              code: 'overlap_same_layer',
+              severity: 'BLOCK',
+              pieceId: resizingPieceId,
+              message: 'Pieces overlap on the same layer',
+              meta: { otherPieceId: neighborId },
+            });
+          }
+        }
+
+        // Add spacing problems
+        pieceProblems.push(...spacingProblems);
+
+        const hasBlock = pieceProblems.some(p => p.severity === 'BLOCK');
+
+        // Update ghost state
+        useSceneStore.setState(
+          produce((draft: SceneState) => {
+            // Only update if still resizing the same piece
+            if (draft.ui.resizing?.pieceId !== resizingPieceId) return;
+
+            if (hasBlock) {
+              // Activate ghost mode with problems
+              draft.ui.ghost = {
+                pieceId: resizingPieceId,
+                problems: pieceProblems,
+                startedAt: Date.now(),
+              };
+              incResizeBlockPreview();
+            } else {
+              // Clear ghost if no blocking problems
+              if (draft.ui.ghost?.pieceId === resizingPieceId) {
+                draft.ui.ghost = undefined;
+              }
+            }
+          })
+        );
+      });
     })),
 
   endResize: (commit) =>
@@ -1397,21 +1566,88 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           piece.size.w !== resizing.origin.w ||
           piece.size.h !== resizing.origin.h;
 
+        // Revalidate candidate geometry before committing
+        // (in case snap or other operations changed the geometry after last async validation)
+        const candidateRect = {
+          x: piece.position.x,
+          y: piece.position.y,
+          w: piece.size.w,
+          h: piece.size.h,
+          rotationDeg: piece.rotationDeg ?? 0,
+        };
+
+        // Project scene to V1 for validation
+        const sceneV1 = projectDraftToV1({ scene: draft.scene });
+
+        // Build ResizeContext for validation (same as updateResize)
+        const resizeContext: ResizeContext = {
+          moved: handleToMoved(resizing.handle),
+          eps: 0.10,
+          baseline: resizing.baseline,
+        };
+
+        // Synchronous validation at commit time with resize context
+        const collisionResult = collisionsForCandidate(resizing.pieceId, candidateRect, sceneV1, resizeContext);
+        const spacingProblems = spacingForCandidate(resizing.pieceId, candidateRect, sceneV1, resizeContext);
+
+        // NEW POLICY: Only block on actual overlap (gap < 0), not on spacing WARN
+        // Border-to-border (gap = 0) is allowed during resize
+        const hasOverlap = collisionResult.overlap;
+        // spacingProblems with context should only contain WARN (not BLOCK) for gap >= 0
+        // But check for other BLOCK problems (outside_scene, min_size, etc.)
+        const hasBlock = hasOverlap;
+
+        if (hasBlock) {
+          // Don't commit - rollback to origin
+          // User must resize again to valid position
+          piece.position.x = resizing.origin.x;
+          piece.position.y = resizing.origin.y;
+          piece.size.w = resizing.origin.w;
+          piece.size.h = resizing.origin.h;
+
+          draft.ui.toast = {
+            message: 'Resize bloqué : chevauchement détecté. Les pièces ne peuvent pas se chevaucher.',
+            until: Date.now() + 3000,
+          };
+
+          // Clear ghost and resizing state
+          draft.ui.ghost = undefined;
+          draft.ui.resizing = undefined;
+          draft.ui.guides = undefined;
+
+          incResizeBlockCommitBlocked();
+          return;
+        }
+
         if (changed) {
+          // No BLOCK problems - commit normally
           // Push pre-resize snapshot to history
           pushHistory(draft, resizing.snapshot);
           autosave(takeSnapshot(draft));
+
+          // Clear ghost if present
+          if (draft.ui.ghost?.pieceId === resizing.pieceId) {
+            draft.ui.ghost = undefined;
+          }
+
+          incResizeBlockCommitSuccess();
         }
       } else if (!commit && piece) {
-        // Rollback to origin
+        // Rollback to origin (Escape pressed)
         piece.position.x = resizing.origin.x;
         piece.position.y = resizing.origin.y;
         piece.size.w = resizing.origin.w;
         piece.size.h = resizing.origin.h;
+
+        // Clear ghost on rollback
+        if (draft.ui.ghost?.pieceId === resizing.pieceId) {
+          draft.ui.ghost = undefined;
+        }
       }
 
       draft.ui.resizing = undefined;
       draft.ui.guides = undefined;
+      // Baseline is cleared with resizing state
     })),
 
   setLockEdge: (on) =>
@@ -1442,6 +1678,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       const snapshot = takeSnapshot(draft);
       const pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }> = {};
+      const memberIds = new Set<ID>(selectedIds);
 
       for (const id of selectedIds) {
         const p = draft.scene.pieces[id];
@@ -1452,6 +1689,34 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           w: p.size.w,
           h: p.size.h,
         };
+      }
+
+      // Calculate baseline gaps for all external neighbors (not in group)
+      const baseline: Record<string, { axis: 'X' | 'Y'; gap: number }> = {};
+
+      // For each piece in the group, find its neighbors outside the group
+      for (const id of selectedIds) {
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+
+        const pieceAABB = pieceBBox(piece);
+
+        // Find all pieces on same layer that are NOT in the group
+        const externalNeighbors = Object.values(draft.scene.pieces).filter(
+          p => p.layerId === piece.layerId && !memberIds.has(p.id)
+        );
+
+        for (const neighbor of externalNeighbors) {
+          const neighborAABB = pieceBBox(neighbor);
+          const gap = aabbGapLocal(pieceAABB, neighborAABB);
+          const axis = dominantSpacingAxisLocal(pieceAABB, neighborAABB);
+
+          // Store baseline gap (use minimum gap if multiple group members touch same neighbor)
+          const existing = baseline[neighbor.id];
+          if (!existing || gap < existing.gap) {
+            baseline[neighbor.id] = { axis, gap };
+          }
+        }
       }
 
       const defaultStart = {
@@ -1465,10 +1730,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         startPointerMm: startPointerMm || defaultStart,
         pieceOrigins,
         snapshot,
+        baseline,
+        memberIds,
       };
     })),
 
-  updateGroupResize: (pointerMm) =>
+  updateGroupResize: (pointerMm) => {
     set(produce((draft: SceneState) => {
       const resizing = draft.ui.groupResizing;
       if (!resizing) return;
@@ -1533,6 +1800,106 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       // Recompute bbox
       computeGroupBBox(draft);
+    }));
+
+    // Trigger async validation after state update
+    useSceneStore.getState().validateGroupResize();
+  },
+
+  // Async validation for group resize (separate function to avoid Immer proxy issues)
+  validateGroupResize: () => {
+    Promise.resolve().then(() => {
+      const currentState = useSceneStore.getState();
+      if (!currentState.ui.groupResizing) return;
+
+      const resizing = currentState.ui.groupResizing;
+      const selectedIds = currentState.ui.selectedIds ?? [];
+
+      // Project current scene to V1 for validation
+      const sceneV1 = projectDraftToV1({ scene: currentState.scene });
+
+      // Build validation context
+      const ctx: ResizeContext = {
+        moved: handleToMoved(resizing.handle),
+        kind: 'group',
+        memberIds: resizing.memberIds,
+        baseline: resizing.baseline,
+        eps: 0.5,
+      };
+
+      // Validate all members and aggregate problems
+      const allProblems: Problem[] = [];
+
+      for (const id of selectedIds) {
+        const piece = currentState.scene.pieces[id];
+        if (!piece) continue;
+
+        const candidateRect = {
+          x: piece.position.x,
+          y: piece.position.y,
+          w: piece.size.w,
+          h: piece.size.h,
+          rotationDeg: piece.rotationDeg ?? 0,
+        };
+
+        const collisionResult = collisionsForCandidate(id, candidateRect, sceneV1, ctx);
+        const spacingProblems = spacingForCandidate(id, candidateRect, sceneV1, ctx);
+
+        // Add overlap problems
+        if (collisionResult.overlap) {
+          for (const neighborId of collisionResult.neighbors) {
+            allProblems.push({
+              code: 'overlap_same_layer',
+              level: 'BLOCK',
+              pieceId: id,
+              message: 'Pieces overlap on the same layer',
+              meta: { otherPieceId: neighborId },
+            });
+          }
+        }
+
+        // Add spacing problems
+        allProblems.push(...spacingProblems);
+      }
+
+      const hasBlock = allProblems.some(p => p.level === 'BLOCK');
+      const currentGroupBBox = currentState.ui.groupBBox;
+      useSceneStore.getState().updateGroupResizeGhost(
+        hasBlock ? allProblems : null,
+        currentGroupBBox
+      );
+    }).catch(err => {
+      console.warn('[validateGroupResize] error:', err);
+    });
+  },
+
+  updateGroupResizeGhost: (problems: Problem[] | null, groupBBox: { x: Milli; y: Milli; w: Milli; h: Milli }) =>
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.groupResizing) return;
+
+      const selectedIds = draft.ui.selectedIds ?? [];
+      if (selectedIds.length < 2) return;
+
+      if (problems && problems.length > 0) {
+        // Set ghost for the first piece in group (for visualization purposes)
+        const firstPieceId = selectedIds[0];
+        draft.ui.ghost = {
+          pieceId: firstPieceId,
+          problems,
+          startedAt: Date.now(),
+        };
+
+        // Track metric for group resize blocking
+        incResizeBlockPreview();
+      } else {
+        // Clear ghost if no problems
+        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+          draft.ui.ghost = undefined;
+        }
+      }
+
+      // Update groupBBox to keep handles in sync
+      draft.ui.groupBBox = groupBBox;
     })),
 
   endGroupResize: (commit) =>
@@ -1551,8 +1918,46 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         });
 
         if (changed) {
-          pushHistory(draft, resizing.snapshot);
-          autosave(takeSnapshot(draft));
+          // Check if ghost has BLOCK problems
+          const selectedIds = draft.ui.selectedIds ?? [];
+          const hasGhostBlock = draft.ui.ghost?.problems?.some(p => p.level === 'BLOCK');
+
+          if (hasGhostBlock) {
+            // Rollback to origins
+            for (const [id, orig] of Object.entries(resizing.pieceOrigins)) {
+              const p = draft.scene.pieces[id];
+              if (!p) continue;
+              p.position.x = orig.x;
+              p.position.y = orig.y;
+              p.size.w = orig.w;
+              p.size.h = orig.h;
+            }
+            computeGroupBBox(draft);
+
+            // Show toast
+            draft.ui.toast = {
+              message: 'Resize groupe bloqué : chevauchement ou écart < 0,5 mm',
+              until: Date.now() + 2500,
+            };
+
+            // Clear ghost
+            if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+              draft.ui.ghost = undefined;
+            }
+
+            incResizeBlockCommitBlocked();
+          } else {
+            // Commit successfully
+            pushHistory(draft, resizing.snapshot);
+            autosave(takeSnapshot(draft));
+
+            // Clear ghost
+            if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+              draft.ui.ghost = undefined;
+            }
+
+            incResizeBlockCommitSuccess();
+          }
         }
       } else {
         // Rollback to origins
@@ -1565,11 +1970,133 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           p.size.h = orig.h;
         }
         computeGroupBBox(draft);
+
+        // Clear ghost on cancel
+        const selectedIds = draft.ui.selectedIds ?? [];
+        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+          draft.ui.ghost = undefined;
+        }
       }
 
       draft.ui.groupResizing = undefined;
       draft.ui.guides = undefined;
     })),
+
+  /**
+   * Helper: find a free spot for a piece by testing positions in a spiral pattern.
+   * Returns {x, y, verdict} if found, null if no valid position exists.
+   * Verdict: 'OK' (no problems), 'WARN' (warnings only), 'BLOCK' (blocking problems).
+   */
+  findFreeSpot: async (w: number, h: number): Promise<{ x: number; y: number; verdict: 'OK' | 'WARN' | 'BLOCK' } | null> => {
+    const { projectDraftToV1 } = await import('../sync/projector');
+    const { validateOverlapsAsync } = await import('../core/geo/facade');
+
+    const currentState = useSceneStore.getState();
+    const sceneW = currentState.scene.size.w;
+    const sceneH = currentState.scene.size.h;
+    const GRID_STEP = 10; // mm
+    const PAD = 10; // padding from edges
+
+    // Helper: generate spiral positions covering the entire scene
+    function* spiralPositions() {
+      let x = PAD;
+      let y = PAD;
+      let dx = 0;
+      let dy = -GRID_STEP;
+      let segmentLength = 1;
+      let segmentPassed = 0;
+      let directionChanges = 0;
+
+      // Generate positions until we cover the scene
+      // Stop when we've gone far beyond scene bounds
+      const maxDim = Math.max(sceneW, sceneH) * 2;
+      let iterations = 0;
+      const maxIterations = (maxDim / GRID_STEP) ** 2;
+
+      while (iterations < maxIterations) {
+        // Yield position if it's within valid bounds
+        if (x >= 0 && x + w <= sceneW && y >= 0 && y + h <= sceneH) {
+          yield { x, y };
+        }
+
+        // Move to next position in spiral
+        x += dx;
+        y += dy;
+        segmentPassed++;
+
+        if (segmentPassed === segmentLength) {
+          segmentPassed = 0;
+          // Turn 90° clockwise
+          const temp = dx;
+          dx = -dy;
+          dy = temp;
+          directionChanges++;
+
+          if (directionChanges % 2 === 0) {
+            segmentLength++;
+          }
+        }
+
+        iterations++;
+      }
+    }
+
+    // Helper: check if placement is OK/WARN/BLOCK
+    async function checkPlacement(x: number, y: number): Promise<'OK' | 'WARN' | 'BLOCK'> {
+      const tempId = 'temp-test-piece';
+      const layerId = currentState.scene.layerOrder[0];
+      if (!layerId) return 'BLOCK';
+
+      // Create test draft (deep clone to avoid mutations)
+      const testDraft: SceneDraft = JSON.parse(JSON.stringify(currentState.scene));
+      testDraft.pieces[tempId] = {
+        id: tempId,
+        layerId,
+        materialId: Object.keys(testDraft.materials)[0] || '',
+        position: { x, y },
+        rotationDeg: 0,
+        scale: { x: 1, y: 1 },
+        kind: 'rect',
+        size: { w, h },
+      };
+
+      try {
+        const sceneV1 = projectDraftToV1({ scene: testDraft });
+        const problems = await validateOverlapsAsync(sceneV1);
+
+        // Check problems for this piece
+        const hasBlock = problems.some(p => p.severity === 'BLOCK');
+        const hasWarn = problems.some(p => p.severity === 'WARN');
+
+        if (hasBlock) return 'BLOCK';
+        if (hasWarn) return 'WARN';
+        return 'OK';
+      } catch (err) {
+        // Treat errors as BLOCK
+        return 'BLOCK';
+      }
+    }
+
+    // Search for best position: prefer OK, fallback to WARN
+    let bestWarn: { x: number; y: number; verdict: 'WARN' } | null = null;
+
+    for (const pos of spiralPositions()) {
+      const verdict = await checkPlacement(pos.x, pos.y);
+
+      if (verdict === 'OK') {
+        // Found perfect spot
+        return { x: pos.x, y: pos.y, verdict: 'OK' };
+      }
+
+      if (verdict === 'WARN' && !bestWarn) {
+        // Remember first WARN position as fallback
+        bestWarn = { x: pos.x, y: pos.y, verdict: 'WARN' };
+      }
+    }
+
+    // Return WARN position if found, otherwise null
+    return bestWarn;
+  },
 
   insertRect: async (opts) => {
     const { projectDraftToV1 } = await import('../sync/projector');
@@ -1587,10 +2114,31 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     const finalW = currentState.ui.snap10mm ? snapTo10mm(w) : w;
     const finalH = currentState.ui.snap10mm ? snapTo10mm(h) : h;
 
-    // Default position (50, 50) with scene bounds clamping
-    const defaultX = opts.x ?? 50;
-    const defaultY = opts.y ?? 50;
-    const clamped = clampToScene(defaultX, defaultY, finalW, finalH, currentState.scene.size.w, currentState.scene.size.h);
+    // Find a free spot or use provided position
+    let targetX: number;
+    let targetY: number;
+
+    if (opts.x !== undefined && opts.y !== undefined) {
+      // Use provided position
+      targetX = opts.x;
+      targetY = opts.y;
+    } else {
+      // Auto-find free spot
+      const freeSpot = await useSceneStore.getState().findFreeSpot(finalW, finalH);
+      if (!freeSpot) {
+        // No free spot found - start ghost insert instead
+        return await useSceneStore.getState().startGhostInsert({
+          w: finalW,
+          h: finalH,
+          layerId: opts.layerId,
+          materialId: opts.materialId,
+        });
+      }
+      targetX = freeSpot.x;
+      targetY = freeSpot.y;
+    }
+
+    const clamped = clampToScene(targetX, targetY, finalW, finalH, currentState.scene.size.w, currentState.scene.size.h);
 
     // Get active layer (first layer) or create one
     let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
@@ -1707,5 +2255,186 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       }));
       return null;
     }
+  },
+
+  /**
+   * Start a ghost insert: create a piece in an illegal position that the user can adjust.
+   * The piece will be marked as a ghost until validated (no BLOCK problems).
+   */
+  startGhostInsert: async (opts) => {
+    const { projectDraftToV1 } = await import('../sync/projector');
+    const { validateOverlapsAsync } = await import('../core/geo/facade');
+
+    const currentState = useSceneStore.getState();
+
+    // Enforce min 5mm and round values
+    const w = Math.max(5, Math.round(opts.w));
+    const h = Math.max(5, Math.round(opts.h));
+
+    // Apply snap to 10mm if enabled
+    const finalW = currentState.ui.snap10mm ? snapTo10mm(w) : w;
+    const finalH = currentState.ui.snap10mm ? snapTo10mm(h) : h;
+
+    // Place at a safe visible position (clamped to scene)
+    const x = Math.min(10, currentState.scene.size.w - finalW);
+    const y = Math.min(10, currentState.scene.size.h - finalH);
+
+    // Get active layer (first layer) or create one
+    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
+
+    // Create piece ID
+    const pieceId = genId('piece');
+
+    // Add piece to scene
+    set(produce((draft: SceneState) => {
+      // Create layer if needed
+      if (!layerId) {
+        layerId = genId('layer');
+        draft.scene.layers[layerId] = {
+          id: layerId,
+          name: 'Calque 1',
+          pieces: [],
+          zIndex: 0,
+        };
+        draft.scene.layerOrder.push(layerId);
+      }
+
+      // Create material if needed
+      if (!materialId) {
+        materialId = genId('material');
+        draft.scene.materials[materialId] = {
+          id: materialId,
+          name: 'Matière 1',
+          oriented: false,
+          orientationDeg: 0,
+        };
+      }
+
+      // Add piece
+      draft.scene.pieces[pieceId] = {
+        id: pieceId,
+        kind: 'rect',
+        layerId,
+        materialId,
+        position: { x, y },
+        size: { w: finalW, h: finalH },
+        rotationDeg: 0,
+        scale: { x: 1, y: 1 },
+        joined: false, // Ghost pieces are not joined by default
+      };
+
+      // Add to layer
+      draft.scene.layers[layerId].pieces.push(pieceId);
+
+      // Select the ghost piece
+      draft.ui.selectedId = pieceId;
+      draft.ui.selectedIds = [pieceId];
+      draft.ui.primaryId = pieceId;
+
+      // Mark as ghost
+      draft.ui.ghost = {
+        pieceId,
+        problems: [],
+        startedAt: Date.now(),
+      };
+    }));
+
+    // Validate ghost immediately
+    await useSceneStore.getState().validateGhost();
+
+    return pieceId;
+  },
+
+  /**
+   * Validate the current ghost piece and update problems.
+   */
+  validateGhost: async () => {
+    const { projectDraftToV1 } = await import('../sync/projector');
+    const { validateOverlapsAsync } = await import('../core/geo/facade');
+
+    const currentState = useSceneStore.getState();
+    if (!currentState.ui.ghost) return;
+
+    try {
+      const sceneV1 = projectDraftToV1({ scene: currentState.scene });
+      const problems = await validateOverlapsAsync(sceneV1);
+
+      // Filter problems for the ghost piece
+      const ghostProblems = problems.filter(p => p.pieceId === currentState.ui.ghost?.pieceId);
+
+      // Update ghost problems
+      set(produce((draft: SceneState) => {
+        if (draft.ui.ghost) {
+          draft.ui.ghost.problems = ghostProblems;
+        }
+      }));
+    } catch (err) {
+      console.error('Ghost validation error:', err);
+    }
+  },
+
+  /**
+   * Commit the ghost piece if it has no BLOCK problems.
+   * Clears ghost state and pushes to history.
+   */
+  commitGhost: () => {
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.ghost) return;
+
+      const hasBlock = draft.ui.ghost.problems.some(p => p.severity === 'BLOCK');
+
+      if (hasBlock) {
+        // Cannot commit with BLOCK problems
+        draft.ui.toast = {
+          message: 'Impossible de valider : des problèmes bloquants subsistent',
+          until: Date.now() + 3000,
+        };
+        return;
+      }
+
+      // Clear ghost state (piece stays in scene)
+      draft.ui.ghost = undefined;
+
+      // Push to history
+      pushHistory(draft);
+    }));
+  },
+
+  /**
+   * Cancel the ghost insert and remove the piece from the scene.
+   */
+  cancelGhost: () => {
+    set(produce((draft: SceneState) => {
+      if (!draft.ui.ghost) return;
+
+      const pieceId = draft.ui.ghost.pieceId;
+
+      // Remove piece from scene
+      const piece = draft.scene.pieces[pieceId];
+      if (piece) {
+        const layerId = piece.layerId;
+        const layer = draft.scene.layers[layerId];
+        if (layer) {
+          layer.pieces = layer.pieces.filter(id => id !== pieceId);
+        }
+        delete draft.scene.pieces[pieceId];
+
+        // Remove from spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          removePieceFromIndex(pieceId);
+        }
+      }
+
+      // Clear selection if ghost was selected
+      if (draft.ui.selectedId === pieceId) {
+        draft.ui.selectedId = undefined;
+        draft.ui.selectedIds = [];
+        draft.ui.primaryId = undefined;
+      }
+
+      // Clear ghost state
+      draft.ui.ghost = undefined;
+    }));
   },
 }));

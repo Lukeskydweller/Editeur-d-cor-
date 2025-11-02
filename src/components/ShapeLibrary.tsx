@@ -11,9 +11,20 @@ export default function ShapeLibrary() {
   const [customW, setCustomW] = useState('60');
   const [customH, setCustomH] = useState('60');
   const insertRect = useSceneStore((s) => s.insertRect);
+  const sceneSize = useSceneStore((s) => s.scene.size);
 
   const handlePreset = async (w: number, h: number) => {
     await insertRect({ w, h });
+  };
+
+  // Clamp value between min and scene max
+  const clampValue = (value: string, max: number): string => {
+    if (value === '' || value === '0') return '5';
+    const num = parseFloat(value);
+    if (isNaN(num)) return '5';
+    if (num < 5) return '5';
+    if (num > max) return String(max);
+    return String(num);
   };
 
   const handleCustomInsert = async () => {
@@ -26,6 +37,31 @@ export default function ShapeLibrary() {
 
     await insertRect({ w, h });
   };
+
+  // Handle Enter key press
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleCustomInsert();
+    }
+  };
+
+  // Tolerant input change handler - accept empty string and digits
+  const handleWidthChange = (value: string) => {
+    if (value === '' || /^\d+$/.test(value)) {
+      setCustomW(value);
+    }
+  };
+
+  const handleHeightChange = (value: string) => {
+    if (value === '' || /^\d+$/.test(value)) {
+      setCustomH(value);
+    }
+  };
+
+  // Check if insert button should be disabled
+  const w = parseFloat(customW);
+  const h = parseFloat(customH);
+  const isInsertDisabled = isNaN(w) || isNaN(h) || w < 5 || h < 5;
 
   return (
     <div className="p-3 bg-zinc-800/60 rounded-xl" data-testid="shape-library">
@@ -59,11 +95,11 @@ export default function ShapeLibrary() {
             </label>
             <input
               id="custom-width"
-              type="number"
-              min="5"
-              step="1"
+              type="text"
               value={customW}
-              onChange={(e) => setCustomW(e.target.value)}
+              onChange={(e) => handleWidthChange(e.target.value)}
+              onBlur={(e) => setCustomW(clampValue(e.target.value, sceneSize.w))}
+              onKeyDown={handleKeyDown}
               data-testid="custom-width"
               className="w-full px-2 py-1 text-sm bg-zinc-700 text-zinc-100 rounded border border-zinc-600 focus:border-zinc-500 focus:outline-none"
             />
@@ -74,19 +110,20 @@ export default function ShapeLibrary() {
             </label>
             <input
               id="custom-height"
-              type="number"
-              min="5"
-              step="1"
+              type="text"
               value={customH}
-              onChange={(e) => setCustomH(e.target.value)}
+              onChange={(e) => handleHeightChange(e.target.value)}
+              onBlur={(e) => setCustomH(clampValue(e.target.value, sceneSize.h))}
+              onKeyDown={handleKeyDown}
               data-testid="custom-height"
               className="w-full px-2 py-1 text-sm bg-zinc-700 text-zinc-100 rounded border border-zinc-600 focus:border-zinc-500 focus:outline-none"
             />
           </div>
           <button
             onClick={handleCustomInsert}
+            disabled={isInsertDisabled}
             data-testid="custom-insert"
-            className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-500 rounded text-white font-medium"
+            className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-600 disabled:cursor-not-allowed disabled:opacity-50 rounded text-white font-medium"
             aria-label="Insérer rectangle personnalisé"
           >
             +

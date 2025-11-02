@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
 import { SidebarDrafts } from '@/components/SidebarDrafts';
 import ProblemsPanel from '@/components/ProblemsPanel';
+import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
 
@@ -37,6 +38,7 @@ export function Sidebar() {
     <aside role="complementary" className="w-full md:w-72 flex flex-col gap-4">
       <SidebarDrafts />
       <ShapeLibrary />
+      <SidebarMaterials />
       {/* ProblemsPanel reste la source officielle pour la liste des conflits */}
       <ProblemsPanel />
       {/* Dev metrics for performance monitoring */}

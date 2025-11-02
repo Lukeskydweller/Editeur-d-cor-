@@ -56,6 +56,8 @@ export default function App() {
   const startGroupResize = useSceneStore((s) => s.startGroupResize);
   const updateGroupResize = useSceneStore((s) => s.updateGroupResize);
   const endGroupResize = useSceneStore((s) => s.endGroupResize);
+  const ghost = useSceneStore((s) => s.ui.ghost);
+  const cancelGhost = useSceneStore((s) => s.cancelGhost);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -103,7 +105,7 @@ export default function App() {
         return;
       }
 
-      // Escape → Cancel resize/group resize or clear selection
+      // Escape → Cancel resize/group resize/ghost or clear selection
       if (e.key === 'Escape') {
         e.preventDefault();
         if (resizing) {
@@ -114,6 +116,9 @@ export default function App() {
           endGroupResize(false);
           groupResizeStartRef.current = null;
           groupResizeFactorRef.current = 1;
+        } else if (ghost) {
+          // Cancel ghost insert
+          cancelGhost();
         } else {
           clearSelection();
         }
@@ -565,12 +570,18 @@ export default function App() {
                 const isFocused = effects?.focusId === p.id;
                 const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
 
+                // Check if this is a ghost piece
+                const isGhost = ghost?.pieceId === p.id;
+                const ghostHasBlock = isGhost && ghost.problems.some(prob => prob.severity === 'BLOCK');
+                const ghostHasWarn = isGhost && ghost.problems.some(prob => prob.severity === 'WARN') && !ghostHasBlock;
+
                 return (
                   <g
                     key={p.id}
                     transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
                     data-testid={isSelected ? 'piece-selected' : undefined}
                     data-invalid={isFlashingInvalid ? 'true' : undefined}
+                    data-ghost={isGhost ? 'true' : undefined}
                   >
                     <rect
                       x="0"
@@ -579,12 +590,12 @@ export default function App() {
                       height={h}
                       rx="6"
                       ry="6"
-                      fill="#60a5fa" /* bleu */
-                      stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : '#1e3a8a'}
-                      strokeWidth={isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
+                      fill={isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'} /* rouge/orange si ghost, bleu sinon */
+                      stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : isGhost ? (ghostHasBlock ? '#dc2626' : '#f59e0b') : '#1e3a8a'}
+                      strokeWidth={isGhost ? '4' : isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
                       onPointerDown={(e) => handlePointerDown(e, p.id)}
-                      style={{ cursor: 'pointer' }}
-                      className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''}`}
+                      style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
+                      className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
                     />
                   </g>
                 );
@@ -716,11 +727,13 @@ export default function App() {
               return (
                 <ResizeHandlesOverlay
                   rect={rect}
+                  rotationDeg={piece.rotationDeg ?? 0}
                   svgElement={svgRef.current}
                   onStart={(handle, clientX, clientY) => handleResizeStart(selectedId, handle, clientX, clientY)}
                   onMove={handleResizeMove}
                   onEnd={handleResizeEnd}
                   isResizing={!!resizing}
+                  hasGhostProblems={ghost?.pieceId === selectedId && ghost.problems.some(p => p.severity === 'BLOCK')}
                 />
               );
             })()}

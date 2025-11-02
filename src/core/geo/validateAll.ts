@@ -4,13 +4,34 @@ import { getRotatedAABB, getRotatedCorners } from "./geometry";
 import { rectToPolygon, polygonAABB } from "./geometry";
 import { union as polyUnion, contains as polyContains, isPathOpsUsable } from "../booleans/pathopsAdapter";
 import { getSupportStrategy } from "../../lib/env";
+import { neighborsForPiece } from "../spatial/rbushIndex";
+import { queryNeighbors, isAutoEnabled } from "../../lib/spatial/globalIndex";
+import { incShortlistSource } from "../../lib/metrics";
+import * as SAT from "sat";
 
 // Constants for spacing validation
 const EPS = 0.10;          // mm - tolerance numérique (même que checkInsideScene)
 const EPS_AREA = 0.50;     // mm² — tolérance zone non supportée
-const SPACING_BLOCK = 0.5; // mm - block if distance < 0.5mm
+const SPACING_BLOCK = 0.5; // mm - block if distance < 0.5mm (during resize: only if overlap < 0)
 const SPACING_WARN = 1.5;  // mm - warn if distance < 1.5mm
 const HALO = 3.0;          // mm - voisinage pour pré-filtrage (limite O(n²))
+
+/**
+ * Resize context for candidate validation.
+ * Used to avoid false positives when resizing orthogonal to neighbors.
+ */
+export interface ResizeContext {
+  /** Which edge(s) are moving: 'N'|'S'|'E'|'W' or combinations ('NE', 'NW', 'SE', 'SW') */
+  moved: 'N' | 'S' | 'E' | 'W' | 'NE' | 'NW' | 'SE' | 'SW';
+  /** Tolerance for border-to-border during resize (default: EPS = 0.10mm) */
+  eps?: number;
+  /** Baseline gaps before resize started: { [neighborId]: { axis: 'X'|'Y', gap: number } } */
+  baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
+  /** Operation kind: 'single' (one piece) or 'group' (multiple pieces) */
+  kind?: 'single' | 'group';
+  /** For group operations: IDs of pieces being resized (to exclude from neighbor checks) */
+  memberIds?: Set<string>;
+}
 
 /**
  * Valide tous les aspects fabricabilité de la scène.
@@ -255,6 +276,307 @@ function checkMinSpacing(scene: SceneV1): Problem[] {
             meta: { otherPieceId: pj.id, distance: d },
           });
         }
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Candidate-based collision detection.
+ * Validates explicit candidate rect against neighbors without reading from store for pieceId.
+ *
+ * @param pieceId - ID of piece being validated (excluded from collision check)
+ * @param candidateRect - Rect to validate {x, y, w, h, rotationDeg}
+ * @param sceneV1 - Scene state for neighbor lookup
+ * @returns {overlap: boolean, neighbors: string[]} - Collision result and IDs of colliding pieces
+ */
+export function collisionsForCandidate(
+  pieceId: string,
+  candidateRect: { x: number; y: number; w: number; h: number; rotationDeg?: number },
+  sceneV1: SceneV1,
+  ctx?: ResizeContext
+): { overlap: boolean; neighbors: string[] } {
+  // Get piece from scene to determine layer
+  const piece = sceneV1.pieces.find(p => p.id === pieceId);
+  if (!piece) {
+    return { overlap: false, neighbors: [] };
+  }
+
+  // Convert candidate rect to polygon (handles rotation)
+  const candidatePoly = rectToPolygon({
+    x: candidateRect.x,
+    y: candidateRect.y,
+    w: candidateRect.w,
+    h: candidateRect.h,
+    rot: candidateRect.rotationDeg ?? 0,
+  });
+
+  // Calculate AABB of candidate for spatial query
+  const candidateAABB = polygonAABB(candidatePoly);
+
+  // Shortlist strategy: GLOBAL_IDX → RBush → ALL
+  let neighbors: string[];
+  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
+
+  if (typeof window !== 'undefined' && (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled())) {
+    try {
+      neighbors = queryNeighbors(candidateAABB, { excludeId: pieceId });
+      source = 'GLOBAL_IDX';
+    } catch {
+      neighbors = neighborsForPiece(pieceId, 0, 64);
+      source = 'FALLBACK';
+    }
+  } else {
+    neighbors = neighborsForPiece(pieceId, 0, 64);
+    source = 'RBUSH';
+  }
+
+  // Fallback: if spatial index empty or not initialized, check all pieces on same layer
+  if (neighbors.length === 0) {
+    neighbors = sceneV1.pieces
+      .filter(p => p.id !== pieceId && p.layerId === piece.layerId)
+      .map(p => p.id);
+    source = 'ALL';
+  }
+
+  // Track shortlist source metric
+  incShortlistSource('collisionsForCandidate', source);
+
+  // Filter to same layer only (and exclude group members if in group context)
+  const sameLayerNeighbors = neighbors.filter(nId => {
+    // Exclude group members
+    if (ctx?.memberIds?.has(nId)) return false;
+
+    const neighbor = sceneV1.pieces.find(p => p.id === nId);
+    return neighbor && neighbor.layerId === piece.layerId;
+  });
+
+  // Pre-filter with AABB, then apply SAT
+  const colliding: string[] = [];
+  const candidateSAT = new SAT.Polygon(
+    new SAT.Vector(0, 0),
+    candidatePoly.map(p => new SAT.Vector(p.x, p.y))
+  );
+
+  for (const neighborId of sameLayerNeighbors) {
+    const neighbor = sceneV1.pieces.find(p => p.id === neighborId);
+    if (!neighbor) continue;
+
+    // Get neighbor AABB for pre-filter
+    const neighborAABB = getRotatedAABB(neighbor);
+
+    // Pre-filter: skip if AABBs don't intersect
+    if (!aabbIntersects(candidateAABB, neighborAABB)) continue;
+
+    // Full SAT test with rotation
+    const neighborPoly = rectToPolygon(neighbor);
+    const neighborSAT = new SAT.Polygon(
+      new SAT.Vector(0, 0),
+      neighborPoly.map(p => new SAT.Vector(p.x, p.y))
+    );
+
+    // Check for overlap with optional tolerance during resize
+    const response = new SAT.Response();
+    const hasContact = SAT.testPolygonPolygon(candidateSAT, neighborSAT, response);
+
+    if (hasContact) {
+      // During resize context, allow border-to-border (gap = 0)
+      // Only report overlap if penetration exceeds tolerance
+      if (ctx) {
+        const eps = ctx.eps ?? EPS;
+        // response.overlap is the penetration depth
+        if (response.overlap > eps) {
+          colliding.push(neighborId);
+        }
+      } else {
+        // Regular validation: any contact is overlap
+        colliding.push(neighborId);
+      }
+    }
+  }
+
+  return {
+    overlap: colliding.length > 0,
+    neighbors: colliding,
+  };
+}
+
+/**
+ * Determine dominant axis of spacing between two AABBs.
+ * Returns 'X' if pieces are horizontally adjacent (Y projections overlap significantly).
+ * Returns 'Y' if pieces are vertically adjacent (X projections overlap significantly).
+ */
+function dominantSpacingAxis(a: AABB, b: AABB): 'X' | 'Y' {
+  // Calculate overlap on each axis projection
+  const xOverlap = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const yOverlap = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+
+  // If Y projections overlap significantly, spacing is primarily horizontal (X axis)
+  // If X projections overlap significantly, spacing is primarily vertical (Y axis)
+  const yOverlapRatio = yOverlap / Math.min(a.h, b.h);
+  const xOverlapRatio = xOverlap / Math.min(a.w, b.w);
+
+  // Use 50% overlap as threshold for "significant"
+  if (yOverlapRatio > 0.5) return 'X'; // Horizontally adjacent
+  if (xOverlapRatio > 0.5) return 'Y'; // Vertically adjacent
+
+  // For diagonal cases, use the larger overlap ratio
+  return yOverlapRatio > xOverlapRatio ? 'X' : 'Y';
+}
+
+/**
+ * Check if gap is shrinking compared to baseline.
+ * Used to filter out false positives when resizing orthogonal to neighbor.
+ */
+function isGapShrinking(
+  neighborId: string,
+  newGap: number,
+  axis: 'X' | 'Y',
+  ctx: ResizeContext
+): boolean {
+  if (!ctx.baseline) return true; // No baseline = assume shrinking
+
+  const baseline = ctx.baseline[neighborId];
+  if (!baseline) return true; // No baseline for this neighbor = assume shrinking
+  if (baseline.axis !== axis) return true; // Different axis = not relevant
+
+  const eps = ctx.eps ?? EPS;
+  return newGap < baseline.gap - eps;
+}
+
+/**
+ * Candidate-based spacing validation.
+ * Validates minimum spacing for explicit candidate rect without reading from store for pieceId.
+ *
+ * @param pieceId - ID of piece being validated (excluded from spacing check)
+ * @param candidateRect - Rect to validate {x, y, w, h, rotationDeg}
+ * @param sceneV1 - Scene state for neighbor lookup
+ * @param ctx - Optional resize context to avoid false positives and allow border-to-border
+ * @returns Problem[] - Array of spacing problems (BLOCK or WARN)
+ */
+export function spacingForCandidate(
+  pieceId: string,
+  candidateRect: { x: number; y: number; w: number; h: number; rotationDeg?: number },
+  sceneV1: SceneV1,
+  ctx?: ResizeContext
+): Problem[] {
+  const out: Problem[] = [];
+
+  // Get piece from scene to determine layer
+  const piece = sceneV1.pieces.find(p => p.id === pieceId);
+  if (!piece) {
+    return out;
+  }
+
+  // Skip if piece marked as joined
+  if (piece.joined) {
+    return out;
+  }
+
+  // Convert candidate rect to polygon and calculate AABB
+  const candidatePoly = rectToPolygon({
+    x: candidateRect.x,
+    y: candidateRect.y,
+    w: candidateRect.w,
+    h: candidateRect.h,
+    rot: candidateRect.rotationDeg ?? 0,
+  });
+  const candidateAABB = polygonAABB(candidatePoly);
+
+  // Get all pieces on same layer (excluding group members if in group context)
+  const layerPieces = sceneV1.pieces.filter(
+    p => {
+      if (p.id === pieceId) return false;
+      if (p.joined) return false;
+      if (ctx?.memberIds?.has(p.id)) return false; // Exclude group members
+      return p.layerId === piece.layerId;
+    }
+  );
+
+  // Enlarge candidate AABB with halo for pre-filtering
+  const candidateHalo = aabbHalo(candidateAABB, HALO);
+  const eps = ctx?.eps ?? EPS;
+
+  for (const neighbor of layerPieces) {
+    // Get neighbor AABB
+    const neighborAABB = getRotatedAABB(neighbor);
+    const neighborHalo = aabbHalo(neighborAABB, HALO);
+
+    // Pre-filter: skip if halos don't intersect
+    if (!aabbIntersects(candidateHalo, neighborHalo)) continue;
+
+    // Calculate edge-to-edge gap
+    const d = aabbGap(candidateAABB, neighborAABB);
+
+    // Skip if overlap (handled by collisionsForCandidate)
+    if (d < -eps) continue;
+
+    // Determine dominant spacing axis
+    const axis = dominantSpacingAxis(candidateAABB, neighborAABB);
+
+    // Filter out false positives when resizing orthogonal to neighbor
+    if (ctx) {
+      const moved = ctx.moved;
+      const isCorner = moved.length === 2; // NE, NW, SE, SW
+
+      if (!isCorner) {
+        // Single edge move: ignore gaps on orthogonal axis unless shrinking
+        if ((moved === 'N' || moved === 'S') && axis === 'X') {
+          // Moving vertically, but neighbor is horizontally adjacent
+          if (!isGapShrinking(neighbor.id, d, axis, ctx)) continue;
+        }
+        if ((moved === 'E' || moved === 'W') && axis === 'Y') {
+          // Moving horizontally, but neighbor is vertically adjacent
+          if (!isGapShrinking(neighbor.id, d, axis, ctx)) continue;
+        }
+      }
+      // Corner moves: check both axes (don't skip)
+    }
+
+    // Check if either piece has joined=true (allows border-to-border)
+    const joinedPair = piece.joined === true || neighbor.joined === true;
+
+    // Revised rules for resize context:
+    // - gap < 0: overlap (BLOCK) - handled by collisionsForCandidate
+    // - gap >= 0 and < 0.5mm during resize: WARN only (not BLOCK), unless joined
+    // - gap >= 0.5mm and < 1.5mm: WARN
+    // - gap >= 1.5mm: OK
+
+    if (ctx) {
+      // During resize: allow border-to-border (gap >= 0), only WARN
+      if (d >= 0 && d < SPACING_WARN) {
+        if (!joinedPair) {
+          out.push({
+            code: "spacing_too_small" as ProblemCode,
+            severity: "WARN" as const,
+            pieceId: pieceId,
+            message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
+            meta: { otherPieceId: neighbor.id, distance: d },
+          });
+        }
+      }
+    } else {
+      // Regular validation (not resize): stricter rules
+      if (d + eps < SPACING_BLOCK) {
+        // BLOCK: gap < 0.5mm
+        out.push({
+          code: "spacing_too_small" as ProblemCode,
+          severity: "BLOCK" as const,
+          pieceId: pieceId,
+          message: `Écart < 0,5 mm (d≈${d.toFixed(1)} mm)`,
+          meta: { otherPieceId: neighbor.id, distance: d },
+        });
+      } else if (d + eps < SPACING_WARN) {
+        // WARN: 0.5mm <= gap < 1.5mm
+        out.push({
+          code: "spacing_too_small" as ProblemCode,
+          severity: "WARN" as const,
+          pieceId: pieceId,
+          message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
+          meta: { otherPieceId: neighbor.id, distance: d },
+        });
       }
     }
   }

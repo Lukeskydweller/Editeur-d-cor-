@@ -40,3 +40,31 @@
     filter: none;
   }
 }
+
+/* Ghost piece styles */
+.ghost-illegal {
+  animation: ghost-pulse 1.5s ease-in-out infinite;
+}
+
+.ghost-warn {
+  stroke-dasharray: 8 4;
+  animation: ghost-pulse-warn 2s ease-in-out infinite;
+}
+
+@keyframes ghost-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.8));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(239, 68, 68, 1));
+  }
+}
+
+@keyframes ghost-pulse-warn {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.6));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.9));
+  }
+}

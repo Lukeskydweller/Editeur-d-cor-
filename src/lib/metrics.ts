@@ -33,3 +33,16 @@ export function incShortlistSource(
 export function setAutoSpatialState(on: boolean) {
   setGauge('auto_spatial_state', on ? 1 : 0);
 }
+
+// Helpers for resize block overlap tracking
+export function incResizeBlockPreview() {
+  inc('resize_block_preview_total');
+}
+
+export function incResizeBlockCommitBlocked() {
+  inc('resize_block_commit_blocked_total');
+}
+
+export function incResizeBlockCommitSuccess() {
+  inc('resize_block_commit_success_total');
+}
