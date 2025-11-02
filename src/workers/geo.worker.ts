@@ -55,6 +55,20 @@ self.onmessage = (ev: MessageEvent) => {
     return;
   }
 
+  // Handle async validateOverlaps separately
+  if (msg.type === "validateOverlaps") {
+    (async () => {
+      try {
+        if (!sceneRef) throw new Error("scene not initialized");
+        const problems = await validateAll(sceneRef);
+        respond(msgId, true, problems);
+      } catch (e: any) {
+        respond(msgId, false, undefined, String(e?.message || e));
+      }
+    })();
+    return;
+  }
+
   try {
     if (msg.type === "rebuildIndex") {
       sceneRef = msg.payload.scene;
@@ -71,12 +85,6 @@ self.onmessage = (ev: MessageEvent) => {
       if (!sceneRef) throw new Error("scene not initialized");
       const res = coreCollisions(sceneRef, msg.payload.id, msg.payload.margin ?? 0);
       respond(msgId, true, res);
-      return;
-    }
-    if (msg.type === "validateOverlaps") {
-      if (!sceneRef) throw new Error("scene not initialized");
-      const problems = validateAll(sceneRef);
-      respond(msgId, true, problems);
       return;
     }
     respond(msgId, false, undefined, "unknown type");

@@ -76,6 +76,16 @@ export function getState(): SceneV1 {
   return _state;
 }
 
+// NEW: directly set problems without triggering validation (for testing)
+export function setProblemsDirectly(problems: Problem[]) {
+  let hasBlock = false;
+  for (const p of problems) {
+    if (p.severity === "BLOCK") hasBlock = true;
+  }
+  uiProblems = { hasBlock, problems };
+  notifyListeners();
+}
+
 // NEW: remplace la scène complète (projection Draft→V1)
 export async function setScene(next: SceneV1) {
   _state = next;

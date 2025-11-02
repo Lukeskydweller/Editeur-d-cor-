@@ -1,8 +1,8 @@
 import type { SceneDraft, ID } from '@/types/scene';
 import { pieceAABB, edgesOfRect } from '@/lib/geom/aabb';
 import { getSnapNeighbors } from '@/core/snap/candidates';
-import { queryNeighbors } from '@/lib/spatial/globalIndex';
-import { metrics } from '@/lib/metrics';
+import { queryNeighbors, isAutoEnabled } from '@/lib/spatial/globalIndex';
+import { metrics, incShortlistSource } from '@/lib/metrics';
 
 export type SnapGuide = { kind: 'v'; x: number } | { kind: 'h'; y: number };
 
@@ -33,8 +33,9 @@ export function snapToPieces(
 
   // OPTIMIZATION: Use spatial index to get nearby pieces only
   let piecesToCheck: Array<typeof scene.pieces[string]>;
+  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
 
-  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
     // NEW PATH: Use global spatial index with margin
     try {
       const margin = 12; // mm
@@ -46,9 +47,11 @@ export function snapToPieces(
         .map(id => scene.pieces[id])
         .filter(p => p !== undefined);
       metrics.rbush_candidates_snap_total += piecesToCheck.length;
+      source = 'GLOBAL_IDX';
     } catch {
       // Fallback: index not ready, use all pieces
       piecesToCheck = Object.values(scene.pieces);
+      source = 'FALLBACK';
     }
   } else {
     // OLD PATH: Use existing RBush via getSnapNeighbors
@@ -63,15 +66,23 @@ export function snapToPieces(
         // This handles cases where scene is out of sync with spatial index (e.g. tests)
         if (piecesToCheck.length === 0 || !scene.pieces[excludeId]) {
           piecesToCheck = Object.values(scene.pieces);
+          source = 'ALL';
+        } else {
+          source = 'RBUSH';
         }
       } else {
         piecesToCheck = Object.values(scene.pieces);
+        source = 'ALL';
       }
     } catch {
       // Fallback: index not ready, use all pieces
       piecesToCheck = Object.values(scene.pieces);
+      source = 'FALLBACK';
     }
   }
+
+  // Track shortlist source metric
+  incShortlistSource('snapToPieces', source);
 
   // Explore nearby pieces (using rotation-aware AABB)
   for (const p of piecesToCheck) {
@@ -156,8 +167,9 @@ export function snapGroupToPieces(
 
   // OPTIMIZATION: Use spatial index to get nearby pieces only
   let piecesToCheck: Array<typeof scene.pieces[string]>;
+  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
 
-  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
     // NEW PATH: Use global spatial index with margin
     try {
       const margin = 12; // mm
@@ -169,9 +181,11 @@ export function snapGroupToPieces(
         .map(id => scene.pieces[id])
         .filter(p => p !== undefined);
       metrics.rbush_candidates_snap_total += piecesToCheck.length;
+      source = 'GLOBAL_IDX';
     } catch {
       // Fallback: index not ready, use all pieces
       piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+      source = 'FALLBACK';
     }
   } else {
     // OLD PATH: Use existing RBush via getSnapNeighbors
@@ -192,15 +206,23 @@ export function snapGroupToPieces(
         const allExcludedInScene = excludeIds.every(id => scene.pieces[id]);
         if (piecesToCheck.length === 0 || !allExcludedInScene) {
           piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+          source = 'ALL';
+        } else {
+          source = 'RBUSH';
         }
       } else {
         piecesToCheck = Object.values(scene.pieces);
+        source = 'ALL';
       }
     } catch {
       // Fallback: index not ready, use all pieces
       piecesToCheck = Object.values(scene.pieces).filter(p => !excludeIds.includes(p.id));
+      source = 'FALLBACK';
     }
   }
+
+  // Track shortlist source metric
+  incShortlistSource('snapGroupToPieces', source);
 
   // Explore nearby pieces (using rotation-aware AABB)
   for (const p of piecesToCheck) {

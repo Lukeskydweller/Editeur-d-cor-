@@ -34,6 +34,9 @@ export type Piece = {
   kind: 'rect';           // on élargira plus tard (polygon, ellipse…)
   size: { w: Milli; h: Milli };
 
+  // Autoriser bord-à-bord (ignore spacing_too_small)
+  joined?: boolean;
+
   // Dérivés utiles (optionnels, calculés côté front)
   bbox?: BBox;
 };

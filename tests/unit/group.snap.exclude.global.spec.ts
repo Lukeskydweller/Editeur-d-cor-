@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { useSceneStore } from '../../src/state/useSceneStore';
 import { snapGroupToPieces } from '../../src/lib/ui/snap';
 
-describe('snap group excludes group members', () => {
+describe('snap group excludes group members (GLOBAL_IDX)', () => {
   beforeEach(() => {
-    // Force spatial index OFF for stable test behavior
+    // Force spatial index ON to test GLOBAL_IDX path
     (globalThis as any).window ||= {} as any;
-    (window as any).__flags = { USE_GLOBAL_SPATIAL: false };
+    (window as any).__flags = { USE_GLOBAL_SPATIAL: true };
 
     // Reset store to clean state
     const store = useSceneStore.getState();
@@ -24,10 +24,10 @@ describe('snap group excludes group members', () => {
     }
   });
 
-  it('does not consider any member of the group as neighbor', async () => {
+  it('does not consider any member of the group as neighbor (GLOBAL_IDX)', async () => {
     const store = useSceneStore.getState();
 
-    // Create three pieces: two in group (g-a, g-b), one outside (o-1)
+    // Create three pieces: two in group (g-a, g-b), one outside (outsider)
     const gA = await store.insertRect({ w: 40, h: 40, x: 10, y: 10 });
     const gB = await store.insertRect({ w: 40, h: 40, x: 60, y: 10 });
     const outsider = await store.insertRect({ w: 40, h: 40, x: 120, y: 10 });
@@ -59,7 +59,7 @@ describe('snap group excludes group members', () => {
     expect(snappedMoved).toBeDefined();
   });
 
-  it('excludes all group members from snap candidates', async () => {
+  it('excludes all group members from snap candidates (GLOBAL_IDX)', async () => {
     const store = useSceneStore.getState();
 
     // Create a scenario where group members are perfectly aligned
@@ -94,56 +94,7 @@ describe('snap group excludes group members', () => {
     expect(resultNearId3.guides.length).toBeGreaterThan(0);
   });
 
-  it('fallback: excludes group members even when RBush is unavailable', async () => {
-    const store = useSceneStore.getState();
-
-    // Create pieces
-    const a = await store.insertRect({ w: 30, h: 30, x: 0, y: 0 });
-    const b = await store.insertRect({ w: 30, h: 30, x: 40, y: 0 });
-    const c = await store.insertRect({ w: 30, h: 30, x: 100, y: 0 });
-
-    expect(a).not.toBeNull();
-    expect(b).not.toBeNull();
-    expect(c).not.toBeNull();
-
-    const groupIds = [a!, b!];
-    const scene = useSceneStore.getState().scene;
-
-    // Group bbox
-    const groupBBox = { x: 0, y: 0, w: 70, h: 30 };
-
-    // Snap should work even if RBush throws (fallback path)
-    const result = snapGroupToPieces(scene, groupBBox, 5, groupIds);
-
-    expect(result).toBeDefined();
-    expect(result.x).toBeDefined();
-    expect(result.y).toBeDefined();
-
-    // Verify that the pieces list doesn't include group members
-    // (This is implicit - if they were included, we'd get incorrect snaps)
-  });
-
-  it('empty excludeIds list checks all pieces', async () => {
-    const store = useSceneStore.getState();
-
-    const id1 = await store.insertRect({ w: 50, h: 50, x: 0, y: 0 });
-    const id2 = await store.insertRect({ w: 50, h: 50, x: 100, y: 0 });
-
-    expect(id1).not.toBeNull();
-    expect(id2).not.toBeNull();
-
-    const scene = useSceneStore.getState().scene;
-    const bbox = { x: 45, y: 0, w: 50, h: 50 }; // Between id1 and id2
-
-    // With empty excludeIds, should consider both pieces
-    const result = snapGroupToPieces(scene, bbox, 5, []);
-
-    expect(result).toBeDefined();
-    // Should snap to either id1 or id2
-    expect(result.guides.length).toBeGreaterThan(0);
-  });
-
-  it('verifies no self-snap when group moves', async () => {
+  it('verifies no self-snap when group moves (GLOBAL_IDX)', async () => {
     const store = useSceneStore.getState();
 
     // Two pieces in a group that are perfectly aligned
@@ -170,5 +121,25 @@ describe('snap group excludes group members', () => {
     // If exclusion works correctly, x should remain 15 (no snap)
     // or snap to something else, but NOT snap to the group's own members
     expect(result.x).toBe(15); // No snap since only group members exist
+  });
+
+  it('empty excludeIds list checks all pieces (GLOBAL_IDX)', async () => {
+    const store = useSceneStore.getState();
+
+    const id1 = await store.insertRect({ w: 50, h: 50, x: 0, y: 0 });
+    const id2 = await store.insertRect({ w: 50, h: 50, x: 100, y: 0 });
+
+    expect(id1).not.toBeNull();
+    expect(id2).not.toBeNull();
+
+    const scene = useSceneStore.getState().scene;
+    const bbox = { x: 45, y: 0, w: 50, h: 50 }; // Between id1 and id2
+
+    // With empty excludeIds, should consider both pieces
+    const result = snapGroupToPieces(scene, bbox, 5, []);
+
+    expect(result).toBeDefined();
+    // Should snap to either id1 or id2
+    expect(result.guides.length).toBeGreaterThan(0);
   });
 });

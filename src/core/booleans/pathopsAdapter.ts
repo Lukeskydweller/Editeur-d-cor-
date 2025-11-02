@@ -7,6 +7,18 @@ export type Op = "union" | "intersect" | "difference" | "xor";
 
 let PathKit: any = null;
 
+/**
+ * Vérifie si PathOps/PathKit est utilisable dans l'environnement actuel.
+ * Retourne true en environnement browser où WASM peut être chargé.
+ */
+export function isPathOpsUsable(): boolean {
+  // PathKit déjà initialisé
+  if (PathKit) return true;
+
+  // Environnement browser (WASM disponible)
+  return typeof window !== 'undefined' && typeof document !== 'undefined';
+}
+
 export async function initPathKit() {
   if (!PathKit) {
     PathKit = await loadPathOpsWasm(); // fourni locateFile -> binaire trouvé en preview/build
@@ -203,4 +215,130 @@ function approximateCubic(poly: Poly, cp1x: number, cp1y: number, cp2x: number, 
 export async function booleanOpPolys(a: Poly, b: Poly, kind: Op): Promise<Poly[]> {
   const p = await opPolys(a, b, kind);
   return pathToPolys(p);
+}
+
+/**
+ * Calcule l'union de plusieurs polygones.
+ * Retourne un seul polygone représentant l'union géométrique.
+ * Si le résultat contient plusieurs contours, retourne le contour principal (plus grande aire).
+ */
+export async function union(polys: Poly[]): Promise<Poly> {
+  if (polys.length === 0) {
+    return [];
+  }
+  if (polys.length === 1) {
+    return polys[0];
+  }
+
+  const pk = await initPathKit();
+
+  // Commencer avec le premier polygone
+  let resultPath = polyToPath(polys[0], pk);
+
+  // Union successive avec chaque polygone suivant
+  for (let i = 1; i < polys.length; i++) {
+    const nextPath = polyToPath(polys[i], pk);
+    const opType = pk.PathOp.UNION;
+    const newResult = pk.MakeFromOp(resultPath, nextPath, opType);
+
+    // Libérer l'ancien résultat
+    resultPath.delete();
+    nextPath.delete();
+
+    resultPath = newResult;
+  }
+
+  // Extraire les contours
+  const resultPolys = pathToPolys(resultPath);
+  resultPath.delete();
+
+  // Si plusieurs contours, retourner celui avec la plus grande aire
+  if (resultPolys.length === 0) {
+    return [];
+  }
+  if (resultPolys.length === 1) {
+    return resultPolys[0];
+  }
+
+  // Trouver le contour avec la plus grande aire
+  let maxArea = 0;
+  let maxPoly = resultPolys[0];
+  for (const poly of resultPolys) {
+    const area = polygonArea(poly);
+    if (area > maxArea) {
+      maxArea = area;
+      maxPoly = poly;
+    }
+  }
+
+  return maxPoly;
+}
+
+/**
+ * Teste si le polygone b est entièrement contenu dans le polygone a.
+ * Utilise la tolérance epsilon pour les comparaisons (0.10 mm).
+ * Implémentation via différence: b ⊆ a ssi area(b \ a) ≈ 0.
+ */
+export async function contains(a: Poly, b: Poly): Promise<boolean> {
+  const EPSILON_AREA = 0.01; // mm² — tolérance pour area(diff) ≈ 0
+
+  // Normaliser les coordonnées (arrondir à 0.01 mm)
+  const aNorm = normalizePolygon(a);
+  const bNorm = normalizePolygon(b);
+
+  const pk = await initPathKit();
+  const pa = polyToPath(aNorm, pk);
+  const pb = polyToPath(bNorm, pk);
+
+  // Calculer diff = b \ a (parties de b non dans a)
+  const opType = pk.PathOp.DIFFERENCE;
+  const diffPath = pk.MakeFromOp(pb, pa, opType);
+
+  const diffPolys = pathToPolys(diffPath);
+
+  // Libérer les paths
+  pa.delete();
+  pb.delete();
+  diffPath.delete();
+
+  // Si diff est vide ou aire négligeable, b est contenu dans a
+  if (diffPolys.length === 0) {
+    return true;
+  }
+
+  // Calculer l'aire totale de la différence
+  let totalArea = 0;
+  for (const poly of diffPolys) {
+    totalArea += Math.abs(polygonArea(poly));
+  }
+
+  return totalArea < EPSILON_AREA;
+}
+
+/**
+ * Calcule l'aire signée d'un polygone (Shoelace formula).
+ * Aire positive si sens horaire, négative si antihoraire.
+ */
+function polygonArea(poly: Poly): number {
+  if (poly.length < 3) return 0;
+
+  let area = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const j = (i + 1) % poly.length;
+    area += poly[i].x * poly[j].y;
+    area -= poly[j].x * poly[i].y;
+  }
+
+  return area / 2;
+}
+
+/**
+ * Normalise les coordonnées d'un polygone (arrondir à 0.01 mm).
+ * Évite les problèmes numériques dans les opérations booléennes.
+ */
+function normalizePolygon(poly: Poly): Poly {
+  return poly.map(p => ({
+    x: Math.round(p.x * 100) / 100,
+    y: Math.round(p.y * 100) / 100,
+  }));
 }

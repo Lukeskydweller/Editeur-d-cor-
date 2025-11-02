@@ -7,6 +7,8 @@ const LABELS: Partial<Record<ProblemCode, string>> = {
   overlap_same_layer: "Chevauchement même couche",
   outside_scene: "Hors cadre scène",
   min_size_violation: "Taille minimale non respectée",
+  spacing_too_small: "Écart inter-pièces insuffisant",
+  unsupported_above: "Pièce non supportée par couche inférieure",
   out_of_panel_bounds: "Hors limites panneau",
   no_support_below: "Aucun support en dessous",
   max_layers_exceeded: "Nombre max de couches dépassé",

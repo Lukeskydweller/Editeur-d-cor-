@@ -1,6 +1,9 @@
 import '@testing-library/jest-dom';
 import { beforeEach, afterEach } from 'vitest';
 
+// Force AABB strategy for unit tests (Node environment - no WASM)
+(globalThis as any).__TEST_FORCE_SUPPORT_STRATEGY = 'AABB';
+
 // Silence console errors for expected async validation warnings
 const originalError = console.error;
 beforeEach(() => {

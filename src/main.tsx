@@ -8,12 +8,16 @@ declare global {
   interface Window {
     __flags: {
       USE_GLOBAL_SPATIAL: boolean;
+      AUTO_SPATIAL?: boolean | 'auto';
+      FORCE_SUPPORT_STRATEGY?: 'PATHOPS' | 'AABB';
     };
   }
 }
 
-window.__flags ??= {
-  USE_GLOBAL_SPATIAL: false, // Default OFF - enable explicitly for testing
+window.__flags = {
+  USE_GLOBAL_SPATIAL: window.__flags?.USE_GLOBAL_SPATIAL ?? false, // Default OFF - enable explicitly for testing
+  AUTO_SPATIAL: window.__flags?.AUTO_SPATIAL ?? 'auto', // Default: auto-enable based on piece count
+  FORCE_SUPPORT_STRATEGY: window.__flags?.FORCE_SUPPORT_STRATEGY, // E2E: honored before boot
 };
 
 // E2E test hooks for PathOps (dev and preview mode for E2E testing)
@@ -158,6 +162,61 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     return true;
   };
 
+  // Test hook: create spacing problem (two pieces with spacing ~1.0mm)
+  (window as any).__testCreateSpacingProblem = async () => {
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const store = useSceneStore.getState();
+
+    // Get first layer and material
+    const firstLayerId = store.scene.layerOrder[0];
+    if (!firstLayerId) return false;
+
+    const firstMaterialId = Object.keys(store.scene.materials)[0];
+    if (!firstMaterialId) return false;
+
+    // Clear existing pieces and add two pieces with 1.0mm spacing
+    useSceneStore.setState((state) => ({
+      scene: {
+        ...state.scene,
+        pieces: {
+          // Piece 1: at (100, 100) with size 40x40
+          'test-spacing-1': {
+            id: 'test-spacing-1',
+            kind: 'rect' as const,
+            position: { x: 100, y: 100 },
+            size: { w: 40, h: 40 },
+            rotationDeg: 0,
+            scale: { x: 1, y: 1 },
+            layerId: firstLayerId,
+            materialId: firstMaterialId,
+          },
+          // Piece 2: at (141, 100) with size 40x40
+          // Edge distance: 141 - (100 + 40) = 1.0mm (should trigger WARN)
+          'test-spacing-2': {
+            id: 'test-spacing-2',
+            kind: 'rect' as const,
+            position: { x: 141, y: 100 },
+            size: { w: 40, h: 40 },
+            rotationDeg: 0,
+            scale: { x: 1, y: 1 },
+            layerId: firstLayerId,
+            materialId: firstMaterialId,
+          },
+        }
+      },
+      ui: {
+        ...state.ui,
+        selectedId: 'test-spacing-1', // Select first piece
+        selectedIds: ['test-spacing-1'],
+      }
+    }));
+
+    // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    return true;
+  };
+
   // Test hook: expose scene store for E2E testing
   import('./state/useSceneStore').then(({ useSceneStore }) => {
     (window as any).__sceneStore = useSceneStore;
@@ -272,6 +331,125 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     return false;
   }
 };
+
+// ALWAYS exposed for E2E: wait until problems contain/omit target codes
+(window as any).__testWaitForProblems = async ({
+  codes = [],
+  expectAbsent = false,
+  timeoutMs = 2000,
+  intervalMs = 50,
+}: {
+  codes?: string[];
+  expectAbsent?: boolean;
+  timeoutMs?: number;
+  intervalMs?: number;
+}) => {
+  const { selectProblems } = await import('./store/editorStore');
+  const start = Date.now();
+  return await new Promise<boolean>((resolve) => {
+    const t = setInterval(() => {
+      const state = selectProblems();
+      const ps = state.problems ?? [];
+      const set = new Set(ps.map((p: any) => p.code));
+      const allPresent = codes.every(c => set.has(c));
+      const allAbsent = codes.every(c => !set.has(c));
+      const ok = expectAbsent ? allAbsent : allPresent;
+      if (ok) { clearInterval(t); resolve(true); }
+      if (Date.now() - start > timeoutMs) { clearInterval(t); resolve(false); }
+    }, intervalMs);
+  });
+};
+
+// ALWAYS exposed: toggle joined flag on a piece by id (bypasses UI)
+(window as any).__testToggleJoined = async (id: string) => {
+  const { useSceneStore } = await import('./state/useSceneStore');
+  const store = useSceneStore.getState();
+  if (store.toggleJoined) {
+    store.toggleJoined(id);
+  }
+  await new Promise(r => setTimeout(r, 60)); // let validation debounce flush
+  return true;
+};
+
+// ALWAYS exposed for E2E: force the complete validation pipeline
+// Bypasses debouncing to run Draft→V1→validateAll→store synchronously
+(window as any).__testForceFullValidation = async () => {
+  try {
+    // 1) Get current Draft scene from useSceneStore
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const draft = useSceneStore.getState();
+
+    // 2) Project Draft→V1 using same projector as production
+    const { projectDraftToV1 } = await import('./sync/projector');
+    const v1 = projectDraftToV1(draft);
+
+    // 3) Call validateAll directly (bypass worker to avoid import.meta issues)
+    const { validateAll } = await import('./core/geo/validateAll');
+    const problems = await validateAll(v1);
+
+    // 4) Update editorStore directly with problems (bypass debounced validation)
+    const { setProblemsDirectly } = await import('./store/editorStore');
+    setProblemsDirectly(problems);
+
+    return { ok: true, count: problems?.length ?? 0 };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+};
+
+// Auto-spatial: setup auto-enable logic based on piece count
+import { setAutoEnabled, getAutoThreshold, _setOnAutoToggle } from './lib/spatial/globalIndex';
+import { setAutoSpatialState, inc } from './lib/metrics';
+
+// Wire callback to update gauge when auto-spatial state changes
+_setOnAutoToggle((enabled: boolean) => {
+  setAutoSpatialState(enabled);
+});
+
+// Debounced auto-evaluator to avoid excessive checks
+let autoEvalTimeout: ReturnType<typeof setTimeout> | null = null;
+const evaluateAutoSpatial = () => {
+  if (autoEvalTimeout) clearTimeout(autoEvalTimeout);
+  autoEvalTimeout = setTimeout(async () => {
+    const flag = window.__flags?.AUTO_SPATIAL;
+
+    // If flag is explicitly true/false, force that state and don't auto-switch
+    if (flag === true) {
+      setAutoEnabled(true);
+      return;
+    }
+    if (flag === false) {
+      setAutoEnabled(false);
+      return;
+    }
+
+    // Flag is 'auto' or undefined: apply hysteresis logic
+    const { useSceneStore } = await import('./state/useSceneStore');
+    const pieceCount = Object.keys(useSceneStore.getState().scene.pieces).length;
+    const { minOn, maxOff } = getAutoThreshold();
+
+    const wasEnabled = (window as any).__lastAutoSpatialState ?? false;
+    let shouldEnable = wasEnabled;
+
+    if (pieceCount >= minOn) {
+      shouldEnable = true;
+    } else if (pieceCount <= maxOff) {
+      shouldEnable = false;
+    }
+    // Between maxOff and minOn: keep current state (hysteresis)
+
+    if (shouldEnable !== wasEnabled) {
+      setAutoEnabled(shouldEnable);
+      (window as any).__lastAutoSpatialState = shouldEnable;
+    }
+  }, 50); // 50ms debounce
+};
+
+// Expose evaluator for store to call after mutations
+(window as any).__evaluateAutoSpatial = evaluateAutoSpatial;
+
+// Initial evaluation
+evaluateAutoSpatial();
 
 // Start Draft→V1 synchronization bridge
 import { startValidationBridge } from './sync/bridge';

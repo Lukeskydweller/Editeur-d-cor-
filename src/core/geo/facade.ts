@@ -107,6 +107,6 @@ export async function validateOverlapsAsync(scene: SceneV1): Promise<Problem[]> 
       worker!._lastTimer = to;
     });
   }
-  // Fallback (Node): calcul synchrone avec validateAll
-  return validateAll(scene);
+  // Fallback (Node): calcul asynchrone avec validateAll
+  return await validateAll(scene);
 }

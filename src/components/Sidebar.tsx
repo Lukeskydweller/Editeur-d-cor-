@@ -10,6 +10,7 @@ export function Sidebar() {
   const scene = useSceneStore((s) => s.scene);
   const selectedId = useSceneStore((s) => s.ui.selectedId);
   const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
+  const toggleJoined = useSceneStore((s) => s.toggleJoined);
   const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
   const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
   const addLayer = useSceneStore((s) => s.addLayer);
@@ -165,20 +166,35 @@ export function Sidebar() {
           </ul>
 
           {selectedPiece ? (
-            <div className="mt-3">
-              <label className="text-sm block mb-1">Matériau de la pièce sélectionnée</label>
-              <select
-                aria-label="material-select"
-                className="w-full rounded-md bg-background border border-input p-2 text-sm"
-                value={selectedPiece.materialId}
-                onChange={(e) => setPieceMaterial(selectedPiece.id, e.target.value)}
-              >
-                {Object.values(scene.materials).map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+            <div className="mt-3 space-y-3">
+              <div>
+                <label className="text-sm block mb-1">Matériau de la pièce sélectionnée</label>
+                <select
+                  aria-label="material-select"
+                  className="w-full rounded-md bg-background border border-input p-2 text-sm"
+                  value={selectedPiece.materialId}
+                  onChange={(e) => setPieceMaterial(selectedPiece.id, e.target.value)}
+                >
+                  {Object.values(scene.materials).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="toggle-joined"
+                  data-testid="toggle-joined"
+                  className="rounded border-input"
+                  checked={selectedPiece.joined ?? false}
+                  onChange={() => toggleJoined(selectedPiece.id)}
+                />
+                <label htmlFor="toggle-joined" className="text-sm cursor-pointer">
+                  Autoriser bord-à-bord
+                </label>
+              </div>
             </div>
           ) : null}
         </CardContent>

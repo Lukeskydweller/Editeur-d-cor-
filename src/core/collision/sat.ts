@@ -1,8 +1,8 @@
 import * as SAT from "sat";
 import { SceneV1 } from "../contracts/scene";
 import { neighborsForPiece } from "../spatial/rbushIndex";
-import { queryNeighbors } from "../../lib/spatial/globalIndex";
-import { metrics } from "../../lib/metrics";
+import { queryNeighbors, isAutoEnabled } from "../../lib/spatial/globalIndex";
+import { metrics, incShortlistSource } from "../../lib/metrics";
 
 export type AABB = { x:number; y:number; w:number; h:number };
 
@@ -23,7 +23,9 @@ export function collisionsForPiece(scene: SceneV1, id: string, margin = 0): stri
   if (!aabb) return [];
 
   let neighbors: string[];
-  if (window.__flags?.USE_GLOBAL_SPATIAL) {
+  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
+
+  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
     // NEW PATH: Use global spatial index
     try {
       neighbors = queryNeighbors(
@@ -31,14 +33,20 @@ export function collisionsForPiece(scene: SceneV1, id: string, margin = 0): stri
         { excludeId: id }
       );
       metrics.rbush_candidates_collision_total += neighbors.length;
+      source = 'GLOBAL_IDX';
     } catch {
       // Fallback: use old RBush
       neighbors = neighborsForPiece(id, Math.max(0, margin), 64);
+      source = 'FALLBACK';
     }
   } else {
     // OLD PATH: Use existing RBush
     neighbors = neighborsForPiece(id, Math.max(0, margin), 64);
+    source = 'RBUSH';
   }
+
+  // Track shortlist source metric
+  incShortlistSource('collisionsForPiece', source);
 
   const hits: string[] = [];
   for (const otherId of neighbors) {
@@ -70,18 +78,32 @@ export function collisionsSameLayer(scene: SceneV1): Array<[string, string]> {
       const aabb1 = aabbOfPiece(scene, id1);
       if (!aabb1) continue;
 
-      // Use spatial index to get neighbors
+      // Use spatial index to get neighbors, fallback to O(n²) if index unavailable
       let neighbors: string[];
-      if (window.__flags?.USE_GLOBAL_SPATIAL) {
+      let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
+
+      if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
         try {
           neighbors = queryNeighbors(aabb1, { excludeId: id1 });
           metrics.rbush_candidates_collision_total += neighbors.length;
+          source = 'GLOBAL_IDX';
         } catch {
           neighbors = neighborsForPiece(id1, 0, 64);
+          source = 'FALLBACK';
         }
       } else {
         neighbors = neighborsForPiece(id1, 0, 64);
+        source = 'RBUSH';
       }
+
+      // Fallback: if spatial index not initialized, check all pieces in same layer
+      if (neighbors.length === 0) {
+        neighbors = pieceIds.slice(i + 1); // Only check pieces after current to avoid duplicates
+        source = 'ALL';
+      }
+
+      // Track shortlist source metric
+      incShortlistSource('collisionsSameLayer', source);
 
       for (const id2 of neighbors) {
         // Skip if not in same layer

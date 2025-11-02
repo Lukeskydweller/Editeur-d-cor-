@@ -18,6 +18,12 @@ import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
 import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalIndex';
 
+// Helper to notify auto-spatial module after structural mutations
+function notifyAutoSpatial() {
+  const evalFn = (window as any).__evaluateAutoSpatial;
+  if (evalFn) evalFn();
+}
+
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -177,6 +183,7 @@ type SceneActions = {
   addRectAtCenter: (w: Milli, h: Milli) => void;
   deleteSelected: () => void;
   setPieceMaterial: (pieceId: ID, materialId: ID) => void;
+  toggleJoined: (pieceId: ID) => void;
   setSnap10mm: (on: boolean) => void;
   setMaterialOriented: (materialId: ID, oriented: boolean) => void;
   rotateSelected: (deltaDeg: 90 | -90) => void;
@@ -833,6 +840,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
+      notifyAutoSpatial();
     })),
 
   deleteSelected: () =>
@@ -868,6 +876,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
+      notifyAutoSpatial();
     })),
 
   setPieceMaterial: (pieceId, materialId) =>
@@ -879,6 +888,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         // Clear transient UI after material change
         clearTransientUI(draft.ui);
         pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }
+    })),
+
+  toggleJoined: (pieceId) =>
+    set(produce((draft: SceneState) => {
+      const p = draft.scene.pieces[pieceId];
+      if (p) {
+        p.joined = !p.joined;
         autosave(takeSnapshot(draft));
       }
     })),

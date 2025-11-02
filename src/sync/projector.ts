@@ -31,6 +31,7 @@ export function projectDraftToV1(draft: { scene: SceneDraft }): SceneV1 {
     rot: normalizeRot(p.rotationDeg),
     layerId: p.layerId,
     materialId: p.materialId,
+    joined: p.joined, // Pass through joined flag for spacing validation
     constraints: {}
   }));
 

@@ -33,12 +33,12 @@ function addPiece(scene: SceneV1, params: Partial<Piece> & { id: string }): void
 }
 
 describe("validateAll — inside_scene & min_size", () => {
-  it("flags outside_scene when AABB goes out of bounds (right edge)", () => {
+  it("flags outside_scene when AABB goes out of bounds (right edge)", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // Piece at (580,10) with 40×40 → right edge at 620 > 600
     addPiece(scene, { id: "p1", x: 580, y: 10, w: 40, h: 40, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const outsideProblems = problems.filter(p => p.code === "outside_scene");
 
     expect(outsideProblems.length).toBe(1);
@@ -46,45 +46,45 @@ describe("validateAll — inside_scene & min_size", () => {
     expect(outsideProblems[0].severity).toBe("BLOCK");
   });
 
-  it("flags outside_scene when AABB goes out of bounds (bottom edge)", () => {
+  it("flags outside_scene when AABB goes out of bounds (bottom edge)", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // Piece at (10,580) with 40×40 → bottom edge at 620 > 600
     addPiece(scene, { id: "p2", x: 10, y: 580, w: 40, h: 40, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const outsideProblems = problems.filter(p => p.code === "outside_scene");
 
     expect(outsideProblems.length).toBe(1);
     expect(outsideProblems[0].pieceId).toBe("p2");
   });
 
-  it("flags outside_scene when rotated AABB goes out of bounds", () => {
+  it("flags outside_scene when rotated AABB goes out of bounds", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // Piece at (580,10) with 20×60 rotated 90° → AABB 60×20, right edge at 640 > 600
     addPiece(scene, { id: "p3", x: 580, y: 10, w: 20, h: 60, rot: 90 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const outsideProblems = problems.filter(p => p.code === "outside_scene");
 
     expect(outsideProblems.length).toBe(1);
     expect(outsideProblems[0].pieceId).toBe("p3");
   });
 
-  it("does not flag outside_scene when piece is fully inside", () => {
+  it("does not flag outside_scene when piece is fully inside", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     addPiece(scene, { id: "p4", x: 100, y: 100, w: 40, h: 40, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const outsideProblems = problems.filter(p => p.code === "outside_scene");
 
     expect(outsideProblems.length).toBe(0);
   });
 
-  it("flags min_size_violation when w < 5mm", () => {
+  it("flags min_size_violation when w < 5mm", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     addPiece(scene, { id: "p5", x: 10, y: 10, w: 4, h: 20, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const minSizeProblems = problems.filter(p => p.code === "min_size_violation");
 
     expect(minSizeProblems.length).toBe(1);
@@ -93,11 +93,11 @@ describe("validateAll — inside_scene & min_size", () => {
     expect(minSizeProblems[0].message).toContain("w=4.0 mm");
   });
 
-  it("flags min_size_violation when h < 5mm", () => {
+  it("flags min_size_violation when h < 5mm", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     addPiece(scene, { id: "p6", x: 10, y: 10, w: 20, h: 3, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const minSizeProblems = problems.filter(p => p.code === "min_size_violation");
 
     expect(minSizeProblems.length).toBe(1);
@@ -105,31 +105,31 @@ describe("validateAll — inside_scene & min_size", () => {
     expect(minSizeProblems[0].message).toContain("h=3.0 mm");
   });
 
-  it("does not flag min_size_violation when w and h >= 5mm", () => {
+  it("does not flag min_size_violation when w and h >= 5mm", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     addPiece(scene, { id: "p7", x: 10, y: 10, w: 5, h: 5, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const minSizeProblems = problems.filter(p => p.code === "min_size_violation");
 
     expect(minSizeProblems.length).toBe(0);
   });
 
-  it("can detect multiple problem types simultaneously", () => {
+  it("can detect multiple problem types simultaneously", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // Piece outside scene
     addPiece(scene, { id: "p8", x: 580, y: 10, w: 40, h: 40, rot: 0 });
     // Piece too small
     addPiece(scene, { id: "p9", x: 10, y: 10, w: 3, h: 20, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
 
     expect(problems.length).toBeGreaterThanOrEqual(2);
     expect(problems.some(p => p.code === "outside_scene" && p.pieceId === "p8")).toBe(true);
     expect(problems.some(p => p.code === "min_size_violation" && p.pieceId === "p9")).toBe(true);
   });
 
-  it("preserves overlap_same_layer detection (no regression)", () => {
+  it("preserves overlap_same_layer detection (no regression)", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // Two overlapping pieces on same layer
     addPiece(scene, { id: "p10", x: 100, y: 100, w: 50, h: 50, rot: 0 });
@@ -138,18 +138,18 @@ describe("validateAll — inside_scene & min_size", () => {
     // Rebuild spatial index for collision detection
     rebuildIndex(scene);
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const overlapProblems = problems.filter(p => p.code === "overlap_same_layer");
 
     expect(overlapProblems.length).toBeGreaterThan(0);
   });
 
-  it("does NOT flag outside_scene for a piece exactly at the right/bottom edge (within EPS)", () => {
+  it("does NOT flag outside_scene for a piece exactly at the right/bottom edge (within EPS)", async () => {
     const scene = buildScene({ width: 600, height: 600 });
     // AABB touche exactement les bords droit et bas (x=560, y=560, w=40, h=40 → right=600, bottom=600)
     addPiece(scene, { id: "p12", x: 560, y: 560, w: 40, h: 40, rot: 0 });
 
-    const problems = validateAll(scene);
+    const problems = await validateAll(scene);
     const outsideProblems = problems.filter(p => p.code === "outside_scene" && p.pieceId === "p12");
 
     expect(outsideProblems.length).toBe(0);

@@ -24,6 +24,7 @@ export interface Piece {
   x: number; y: number; w: number; h: number; rot: Rot;
   layerId: string;
   materialId: string;
+  joined?: boolean; // si true, autorise bord-à-bord (ignore spacing_too_small)
   constraints?: PieceConstraints;
   meta?: Record<string, unknown>;
 }
@@ -34,6 +35,8 @@ export enum ProblemCode {
   overlap_same_layer = "overlap_same_layer",
   outside_scene = "outside_scene",
   min_size_violation = "min_size_violation",
+  spacing_too_small = "spacing_too_small",
+  unsupported_above = "unsupported_above",
   out_of_panel_bounds = "out_of_panel_bounds",
   no_support_below = "no_support_below",
   max_layers_exceeded = "max_layers_exceeded",
