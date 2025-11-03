@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
-import { validateNoOverlap } from '@/lib/sceneRules';
-import { snapToPieces, snapGroupToPieces, type SnapGuide } from '@/lib/ui/snap';
+import { validateNoOverlap, validateNoOverlapForCandidate as validateNoOverlapForCandidateDraft, validateInsideScene } from '@/lib/sceneRules';
+import { snapToPieces, snapGroupToPieces, snapEdgeCollage, computeMinGap, finalizeCollageGuard, normalizeGapToThreshold, MM_TO_PX, type SnapGuide } from '@/lib/ui/snap';
+import { MIN_GAP_MM, SNAP_EDGE_THRESHOLD_MM, NORMALIZE_GAP_TARGET_MM, EPSILON_GAP_NORMALIZE_MM, ENABLE_GAP_NORMALIZATION } from '@/constants/validation';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import type { Problem } from '@/core/contracts/scene';
 import {
@@ -21,7 +22,7 @@ import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalInde
 import { validateOverlapsAsync } from '@/core/geo/facade';
 import { projectDraftToV1 } from '@/sync/projector';
 import { incResizeBlockPreview, incResizeBlockCommitBlocked, incResizeBlockCommitSuccess } from '@/lib/metrics';
-import { collisionsForCandidate, spacingForCandidate, type ResizeContext } from '@/core/geo/validateAll';
+import { collisionsForCandidate, spacingForCandidate, validateNoOverlapForCandidate, type ResizeContext } from '@/core/geo/validateAll';
 import { getRotatedAABB } from '@/core/geo/geometry';
 
 // Helper to notify auto-spatial module after structural mutations
@@ -128,6 +129,9 @@ function clearTransientUI(ui: SceneState['ui']) {
   ui.groupResizing = undefined;
   ui.guides = undefined;
   ui.marquee = undefined;
+  ui.isTransientActive = false;
+  ui.transientBBox = undefined;
+  ui.transientDelta = undefined;
   // Keep selection intact: selectedId, selectedIds, primaryId
 }
 
@@ -153,6 +157,12 @@ type SceneState = {
       start: { x: number; y: number };
       candidate?: { x: number; y: number; valid: boolean };
       groupOffsets?: Record<ID, { dx: number; dy: number }>;
+      /**
+       * True si le drag en cours concerne la sélection courante
+       * (solo: selectedId; groupe: selectedIds).
+       * Utilisé par le tooltip pour éviter de suivre un autre drag.
+       */
+      affectsSelection?: boolean;
     };
     marquee?: { x0: number; y0: number; x1: number; y1: number };
     snap10mm?: boolean;
@@ -196,6 +206,14 @@ type SceneState = {
       problems: Problem[];
       startedAt: number;
     };
+    // Transient UI state during drag/resize (before commit)
+    isTransientActive: boolean;
+    transientBBox?: { x: Milli; y: Milli; w: Milli; h: Milli; rotationDeg?: Deg };
+
+    // Transient delta for group ghost overlay during drag
+    transientDelta?: { dx: Milli; dy: Milli };
+    // Selection bbox (solo/group) for handles rendering
+    selectionBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
   };
 };
 
@@ -327,6 +345,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     layers: {},
     pieces: {},
     layerOrder: [],
+    revision: 0,
   },
   ui: {
     selectedId: undefined,
@@ -337,6 +356,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     marquee: undefined,
     snap10mm: true,
     guides: undefined,
+    isTransientActive: false,
     history: {
       past: [],
       future: [],
@@ -448,6 +468,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         layers: {},
         pieces: {},
         layerOrder: [],
+        revision: 0,
       };
 
       // Créer layer, material, piece atomiquement
@@ -585,6 +606,56 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         finalDy = snappedY - bbox.y;
       }
 
+      // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
+      // Calculer prevGap pour directionnalité (ne coller que si on s'approche)
+      const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
+      const candidateWithSnap = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
+
+      // Récupérer voisins externes (exclure membres groupe)
+      const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
+      const prevGap = computeMinGap(currentBBox, neighbors);
+
+      const collageResult = snapEdgeCollage(
+        candidateWithSnap,
+        draft.scene,
+        selectedIds,
+        SNAP_EDGE_THRESHOLD_MM,
+        prevGap
+      );
+      finalDx = collageResult.x - bbox.x;
+      finalDy = collageResult.y - bbox.y;
+
+      // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
+      // Indépendant des toggles snap, appliqué juste avant commit
+      let finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
+      const guardResult = finalizeCollageGuard({
+        subjectBBox: finalBBox,
+        neighbors,
+        maxGapMm: MIN_GAP_MM,
+      });
+
+      if (guardResult.didSnap) {
+        finalDx += guardResult.dx;
+        finalDy += guardResult.dy;
+        finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
+      }
+
+      // NORMALIZATION: Normalize gap to exact 1.00mm if in [1.00, 1.00+ε] window
+      if (ENABLE_GAP_NORMALIZATION) {
+        const normalizeResult = normalizeGapToThreshold({
+          subjectBBox: finalBBox,
+          neighbors,
+          targetMm: NORMALIZE_GAP_TARGET_MM,
+          epsilonMm: EPSILON_GAP_NORMALIZE_MM,
+          sceneBounds: { w: draft.scene.size.w, h: draft.scene.size.h },
+        });
+
+        if (normalizeResult.didNormalize) {
+          finalDx += normalizeResult.dx;
+          finalDy += normalizeResult.dy;
+        }
+      }
+
       // For each piece, compute new AABB position with final clamp, then convert to piece.position
       // This ensures rotation-aware nudge and prevents escaping scene after snaps
       const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
@@ -599,7 +670,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         testScene.pieces[id] = { ...p, position: newPiecePos };
       }
 
-      const validation = validateNoOverlap(testScene);
+      // Use validateNoOverlapForCandidate to avoid rollback from internal group collisions
+      const validation = selectedIds.length > 1
+        ? validateNoOverlapForCandidateDraft(testScene, selectedIds)
+        : validateNoOverlap(testScene);
 
       if (!validation.ok) {
         draft.ui.flashInvalidAt = Date.now();
@@ -616,6 +690,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             p.position.x = newPiecePos.x;
             p.position.y = newPiecePos.y;
           }
+          draft.scene.revision++;
           pushHistory(draft, snap);
           autosave(takeSnapshot(draft));
         }
@@ -628,6 +703,20 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!piece) return;
 
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+
+      // Déterminer si le drag concerne la sélection courante
+      const selId = draft.ui.selectedId ?? null;
+      const selIds = draft.ui.selectedIds ?? null;
+      let affectsSelection = false;
+
+      if (selIds && selIds.length > 0) {
+        affectsSelection = selIds.includes(id);
+      } else if (selId) {
+        affectsSelection = selId === id;
+      } else {
+        // Aucune sélection : auto-select la pièce, donc affecte la sélection
+        affectsSelection = true;
+      }
 
       // Si la pièce n'est pas dans la sélection, selectOnly
       if (!selectedIds.includes(id)) {
@@ -659,6 +748,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         start: { x: primaryBBox.x, y: primaryBBox.y }, // AABB position, not piece.position
         candidate: undefined,
         groupOffsets,
+        affectsSelection,
       };
     })),
 
@@ -743,8 +833,40 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         finalY = snapTo10mm(finalY);
       }
 
-      // Clamp final après tous les snaps (garantit qu'on ne dépasse jamais la scène)
+      // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
       const bbox = pieceBBox(piece);
+      const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
+      const candidateForCollage = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+
+      // Calculer prevGap pour directionnalité
+      const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
+      const prevGap = computeMinGap(currentBBox, neighbors);
+
+      const collageResult = snapEdgeCollage(
+        candidateForCollage,
+        draft.scene,
+        selectedIds,
+        SNAP_EDGE_THRESHOLD_MM,
+        prevGap
+      );
+      finalX = collageResult.x;
+      finalY = collageResult.y;
+
+      // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
+      // Indépendant des toggles snap, appliqué avant commit
+      const finalBBoxBeforeClamp = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+      const guardResult = finalizeCollageGuard({
+        subjectBBox: finalBBoxBeforeClamp,
+        neighbors,
+        maxGapMm: MIN_GAP_MM,
+      });
+
+      if (guardResult.didSnap) {
+        finalX += guardResult.dx;
+        finalY += guardResult.dy;
+      }
+
+      // Clamp final après tous les snaps (garantit qu'on ne dépasse jamais la scène)
       const finalAABB = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
       const finalClamped = clampAABBToScene(finalAABB, draft.scene.size.w, draft.scene.size.h);
       finalX = finalClamped.x;
@@ -777,6 +899,65 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         y: finalY,
         valid: validation.ok,
       };
+
+      // Calculer transientBBox pour tooltip temps réel
+      if (isGroupDrag) {
+        // Groupe : calculer bbox union rotation-aware
+        const offsets = dragging.groupOffsets ?? {};
+        const groupBBoxes = selectedIds
+          .map((sid) => {
+            const off = offsets[sid] ?? { dx: 0, dy: 0 };
+            const sp = draft.scene.pieces[sid];
+            if (!sp) return null;
+            const spBBox = pieceBBox(sp);
+            return {
+              x: finalX + off.dx,
+              y: finalY + off.dy,
+              w: spBBox.w,
+              h: spBBox.h,
+            };
+          })
+          .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+
+        if (groupBBoxes.length > 0) {
+          const minX = Math.min(...groupBBoxes.map((r) => r.x));
+          const minY = Math.min(...groupBBoxes.map((r) => r.y));
+          const maxX = Math.max(...groupBBoxes.map((r) => r.x + r.w));
+          const maxY = Math.max(...groupBBoxes.map((r) => r.y + r.h));
+          draft.ui.transientBBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+          draft.ui.isTransientActive = true;
+
+          // Calculer delta entre bbox commit et bbox transitoire pour les ghosts
+          const commitBBoxes = selectedIds
+            .map((sid) => {
+              const sp = draft.scene.pieces[sid];
+              if (!sp) return null;
+              const spBBox = pieceBBox(sp);
+              return spBBox;
+            })
+            .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+
+          if (commitBBoxes.length > 0) {
+            const commitMinX = Math.min(...commitBBoxes.map((r) => r.x));
+            const commitMinY = Math.min(...commitBBoxes.map((r) => r.y));
+            draft.ui.transientDelta = {
+              dx: minX - commitMinX,
+              dy: minY - commitMinY,
+            };
+          }
+        }
+      } else {
+        // Solo : utiliser la bbox rotation-aware
+        draft.ui.transientBBox = { x: finalX, y: finalY, w: bbox.w, h: bbox.h, rotationDeg: piece.rotationDeg };
+        draft.ui.isTransientActive = true;
+
+        // Calculer delta pour solo
+        const commitBBox = pieceBBox(piece);
+        draft.ui.transientDelta = {
+          dx: finalX - commitBBox.x,
+          dy: finalY - commitBBox.y,
+        };
+      }
     })),
 
   endDrag: () =>
@@ -785,6 +966,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!dragging || !dragging.candidate) {
         draft.ui.dragging = undefined;
         draft.ui.guides = undefined;
+        clearTransientUI(draft.ui);
         return;
       }
 
@@ -792,40 +974,133 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? [dragging.id];
       const isGroupDrag = selectedIds.length > 1;
 
-      if (dragging.candidate.valid) {
-        if (isGroupDrag) {
-          const offsets = dragging.groupOffsets ?? {};
-          for (const sid of selectedIds) {
-            const off = offsets[sid] ?? { dx: 0, dy: 0 };
-            const sp = draft.scene.pieces[sid];
-            if (!sp) continue;
-            // Convert AABB position to piece.position (rotation-aware)
-            const aabbPos = {
-              x: dragging.candidate.x + off.dx,
-              y: dragging.candidate.y + off.dy,
-            };
-            const piecePos = aabbToPiecePosition(aabbPos.x, aabbPos.y, sp);
-            sp.position.x = piecePos.x;
-            sp.position.y = piecePos.y;
-          }
-        } else {
-          const piece = draft.scene.pieces[dragging.id];
-          if (piece) {
-            // Convert AABB position to piece.position (rotation-aware)
-            const piecePos = aabbToPiecePosition(dragging.candidate.x, dragging.candidate.y, piece);
-            piece.position.x = piecePos.x;
-            piece.position.y = piecePos.y;
-          }
+      // Store commit positions before any changes
+      const commitPositions: Record<ID, { x: Milli; y: Milli }> = {};
+      for (const id of selectedIds) {
+        const p = draft.scene.pieces[id];
+        if (p) {
+          commitPositions[id] = { x: p.position.x, y: p.position.y };
         }
+      }
+
+      if (isGroupDrag) {
+        // ─────────────────────────────────────────────────────────────
+        // CONSTRUCTION D'UNE SCÈNE CANDIDATE AVANT VALIDATION
+        // On applique le delta (dx,dy) à CHAQUE pièce sélectionnée,
+        // puis on valide la scène candidate contre les voisins externes.
+        // ─────────────────────────────────────────────────────────────
+        const sceneCandidate: SceneDraft = JSON.parse(JSON.stringify(draft.scene));
+
+        // Récupérer le delta uniforme issu du drag
+        const dx = draft.ui.transientDelta?.dx ?? (0 as Milli);
+        const dy = draft.ui.transientDelta?.dy ?? (0 as Milli);
+
+        // Appliquer le delta aux positions commit des membres du groupe
+        for (const id of selectedIds) {
+          const p = sceneCandidate.pieces[id];
+          if (!p) continue;
+          const commitPos = commitPositions[id];
+          if (!commitPos) continue;
+          p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+        }
+
+        // Valider chevauchements: ignorer auto-collisions internes au groupe
+        const overlapResult = validateNoOverlapForCandidateDraft(sceneCandidate, selectedIds);
+
+        // Autres validations sur la scène candidate
+        const insideResult = validateInsideScene(sceneCandidate);
+
+        const allProblems = [
+          ...(overlapResult.conflicts.map(([a, b]) => ({
+            code: 'overlap_same_layer' as const,
+            severity: 'BLOCK' as const,
+            pieceIds: [a, b],
+            message: 'Overlap detected'
+          }))),
+          ...(insideResult.outside.map(id => ({
+            code: 'outside_scene' as const,
+            severity: 'BLOCK' as const,
+            pieceIds: [id],
+            message: 'Outside scene bounds'
+          }))),
+        ];
+
+        const hasBlock = allProblems.length > 0;
+
+        if (hasBlock) {
+          // Rollback: restaurer positions commit
+          selectedIds.forEach((id) => {
+            if (commitPositions[id] && draft.scene.pieces[id]) {
+              draft.scene.pieces[id].position = commitPositions[id];
+            }
+          });
+
+          draft.scene.validation = {
+            ok: false,
+            problems: allProblems
+          };
+          clearTransientUI(draft.ui);
+          draft.ui.dragging = undefined;
+          draft.ui.guides = undefined;
+          draft.ui.flashInvalidAt = Date.now();
+          return;
+        }
+
+        // Succès: commit des positions translatées
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
+          const commitPos = commitPositions[id];
+          if (!commitPos) continue;
+          p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+        }
+        draft.scene.validation = { ok: true, problems: [] };
+        draft.scene.revision++;
         pushHistory(draft, snap);
         autosave(takeSnapshot(draft));
       } else {
-        // Invalid drop: flash invalid feedback
-        draft.ui.flashInvalidAt = Date.now();
+        // Solo drag: existing logic
+        let finalX = dragging.candidate.x;
+        let finalY = dragging.candidate.y;
+
+        if (ENABLE_GAP_NORMALIZATION && dragging.candidate.valid) {
+          const candidateBBox = { x: finalX, y: finalY, w: dragging.candidate.w, h: dragging.candidate.h };
+          const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
+
+          const normalizeResult = normalizeGapToThreshold({
+            subjectBBox: candidateBBox,
+            neighbors,
+            targetMm: NORMALIZE_GAP_TARGET_MM,
+            epsilonMm: EPSILON_GAP_NORMALIZE_MM,
+            sceneBounds: { w: draft.scene.size.w, h: draft.scene.size.h },
+          });
+
+          if (normalizeResult.didNormalize) {
+            finalX += normalizeResult.dx;
+            finalY += normalizeResult.dy;
+          }
+        }
+
+        if (dragging.candidate.valid) {
+          const piece = draft.scene.pieces[dragging.id];
+          if (piece) {
+            const piecePos = aabbToPiecePosition(finalX, finalY, piece);
+            piece.position.x = piecePos.x;
+            piece.position.y = piecePos.y;
+          }
+          draft.scene.revision++;
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+        } else {
+          draft.ui.flashInvalidAt = Date.now();
+        }
       }
 
       draft.ui.dragging = undefined;
       draft.ui.guides = undefined;
+      draft.ui.isTransientActive = false;
+      draft.ui.transientBBox = undefined;
+      draft.ui.transientDelta = undefined;
 
       // If ghost is active, validate after drag
       const hasGhost = draft.ui.ghost !== undefined;
@@ -850,6 +1125,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(produce((draft: SceneState) => {
       draft.ui.dragging = undefined;
       draft.ui.guides = undefined;
+      draft.ui.isTransientActive = false;
+      draft.ui.transientBBox = undefined;
     })),
 
   addRectAtCenter: (w, h) =>
@@ -1007,6 +1284,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       // Clear transient UI state after rotation
       clearTransientUI(draft.ui);
 
+      draft.scene.revision++;
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
     })),
@@ -1027,6 +1305,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       // Clear transient UI state after rotation
       clearTransientUI(draft.ui);
 
+      draft.scene.revision++;
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
     })),
@@ -1179,6 +1458,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.ui.history.future.push(currentSnap);
       applySnapshot(draft, prevSnap);
+      draft.scene.revision++;
       autosave(prevSnap);
     })),
 
@@ -1192,6 +1472,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.ui.history.past.push(currentSnap);
       applySnapshot(draft, nextSnap);
+      draft.scene.revision++;
       autosave(nextSnap);
     })),
 
@@ -1227,6 +1508,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       // Clear transient UI after scene replacement
       clearTransientUI(draft.ui);
 
+      draft.scene.revision++;
       // Push to history and autosave
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
@@ -1296,6 +1578,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       // Clear transient UI after scene replacement
       clearTransientUI(draft.ui);
 
+      draft.scene.revision++;
       // Push to history and autosave
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
@@ -1473,6 +1756,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         syncPieceToIndex(resizing.pieceId, { x, y, w, h });
       }
 
+      // Calculer transientBBox pour tooltip temps réel pendant resize
+      draft.ui.transientBBox = { x, y, w, h, rotationDeg: piece.rotationDeg };
+      draft.ui.isTransientActive = true;
+
       // Capture resizing piece ID and candidate geometry before async operation
       // (Immer proxy becomes invalid after produce)
       const resizingPieceId = resizing.pieceId;
@@ -1622,6 +1909,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         if (changed) {
           // No BLOCK problems - commit normally
           // Push pre-resize snapshot to history
+          draft.scene.revision++;
           pushHistory(draft, resizing.snapshot);
           autosave(takeSnapshot(draft));
 
@@ -1647,6 +1935,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.ui.resizing = undefined;
       draft.ui.guides = undefined;
+      draft.ui.isTransientActive = false;
+      draft.ui.transientBBox = undefined;
       // Baseline is cleared with resizing state
     })),
 
@@ -1668,7 +1958,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.effects.flashUntil = Date.now() + 500;
     })),
 
-  startGroupResize: (handle, startPointerMm) =>
+  startGroupResize: (handle, startPointerMm) => {
+    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
+    return;
+  },
+
+  // Legacy implementation disabled
+  _startGroupResize_disabled: (handle, startPointerMm) =>
     set(produce((draft: SceneState) => {
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length < 2) return;
@@ -1736,6 +2032,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     })),
 
   updateGroupResize: (pointerMm) => {
+    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
+    return;
+  },
+
+  // Legacy implementation disabled
+  _updateGroupResize_disabled: (pointerMm) => {
     set(produce((draft: SceneState) => {
       const resizing = draft.ui.groupResizing;
       if (!resizing) return;
@@ -1902,7 +2204,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.groupBBox = groupBBox;
     })),
 
-  endGroupResize: (commit) =>
+  endGroupResize: (commit) => {
+    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
+    return;
+  },
+
+  // Legacy implementation disabled
+  _endGroupResize_disabled: (commit) =>
     set(produce((draft: SceneState) => {
       const resizing = draft.ui.groupResizing;
       if (!resizing) return;
@@ -1936,7 +2244,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
             // Show toast
             draft.ui.toast = {
-              message: 'Resize groupe bloqué : chevauchement ou écart < 0,5 mm',
+              message: 'Resize groupe bloqué : chevauchement ou écart < 1,0 mm',
               until: Date.now() + 2500,
             };
 
@@ -1948,6 +2256,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             incResizeBlockCommitBlocked();
           } else {
             // Commit successfully
+            draft.scene.revision++;
             pushHistory(draft, resizing.snapshot);
             autosave(takeSnapshot(draft));
 

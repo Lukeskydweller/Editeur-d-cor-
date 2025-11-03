@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useSceneStore } from '../../src/state/useSceneStore';
 
-describe('Group resize - scale factor clamping', () => {
+// Group resize is disabled (Option A) - these tests are skipped
+describe.skip('Group resize - scale factor clamping', () => {
   beforeEach(() => {
     // Reset store to clean state
     const store = useSceneStore.getState();

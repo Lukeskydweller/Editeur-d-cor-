@@ -30,23 +30,23 @@ describe('checkMinSpacing validation', () => {
     };
   }
 
-  it('BLOCK if distance < 0.5mm', async () => {
+  it('BLOCK if distance < 1.0mm', async () => {
     const pieces = [
       createPiece('p1', 10, 10, 20, 20),
-      createPiece('p2', 30.3, 10, 20, 20), // distance = 0.3mm < 0.5mm
+      createPiece('p2', 30.6, 10, 20, 20), // distance = 0.6mm < 1.0mm
     ];
     const problems = await validateAll(createScene(pieces));
     const spacingProblems = problems.filter(p => p.code === 'spacing_too_small');
 
     expect(spacingProblems.length).toBe(1);
     expect(spacingProblems[0].severity).toBe('BLOCK');
-    expect(spacingProblems[0].message).toContain('Écart < 1,5 mm');
+    expect(spacingProblems[0].message).toContain('Écart < 1,0 mm'); // Message updated for BLOCK
   });
 
-  it('WARN if 0.5mm <= distance < 1.5mm', async () => {
+  it('WARN if 1.0mm <= distance < 1.5mm', async () => {
     const pieces = [
       createPiece('p1', 10, 10, 20, 20),
-      createPiece('p2', 31, 10, 20, 20), // distance = 1.0mm (0.5 <= dist < 1.5)
+      createPiece('p2', 31.2, 10, 20, 20), // distance = 1.2mm (1.0 <= dist < 1.5)
     ];
     const problems = await validateAll(createScene(pieces));
     const spacingProblems = problems.filter(p => p.code === 'spacing_too_small');
@@ -70,7 +70,7 @@ describe('checkMinSpacing validation', () => {
   it('Ignored if one piece has joined=true', async () => {
     const pieces = [
       createPiece('p1', 10, 10, 20, 20, true), // joined=true
-      createPiece('p2', 30.3, 10, 20, 20), // distance = 0.3mm < 0.5mm
+      createPiece('p2', 30.6, 10, 20, 20), // distance = 0.6mm < 1.0mm
     ];
     const problems = await validateAll(createScene(pieces));
     const spacingProblems = problems.filter(p => p.code === 'spacing_too_small');
@@ -81,7 +81,7 @@ describe('checkMinSpacing validation', () => {
   it('Ignored if both pieces have joined=true', async () => {
     const pieces = [
       createPiece('p1', 10, 10, 20, 20, true), // joined=true
-      createPiece('p2', 30.3, 10, 20, 20, true), // joined=true, distance = 0.3mm < 0.5mm
+      createPiece('p2', 30.6, 10, 20, 20, true), // joined=true, distance = 0.6mm < 1.0mm
     ];
     const problems = await validateAll(createScene(pieces));
     const spacingProblems = problems.filter(p => p.code === 'spacing_too_small');

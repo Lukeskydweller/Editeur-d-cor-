@@ -60,16 +60,22 @@ export function aabbToPiecePosition(
   return { x: aabbX, y: aabbY };
 }
 
+// Tolérance flottante pour les comparaisons AABB (en millimètres)
+const EPS_MM = 0.01;
+
+function le(a: number, b: number) { return a <= b + EPS_MM; }
+
 /**
  * Teste si deux rectangles AABB se chevauchent.
  * Retourne true s'il y a intersection (bords touchants = overlap).
+ * Avec tolérance EPS pour éviter des faux positifs sur micro-gaps.
  */
 export function rectsOverlap(a: BBox, b: BBox): boolean {
   // Pas d'overlap si l'un est complètement à gauche/droite/haut/bas de l'autre
-  if (a.x + a.w <= b.x) return false; // a est à gauche de b
-  if (b.x + b.w <= a.x) return false; // b est à gauche de a
-  if (a.y + a.h <= b.y) return false; // a est au-dessus de b
-  if (b.y + b.h <= a.y) return false; // b est au-dessus de a
+  if (le(a.x + a.w, b.x)) return false; // a est à gauche de b
+  if (le(b.x + b.w, a.x)) return false; // b est à gauche de a
+  if (le(a.y + a.h, b.y)) return false; // a est au-dessus de b
+  if (le(b.y + b.h, a.y)) return false; // b est au-dessus de a
   return true;
 }
 

@@ -37,6 +37,46 @@ export function validateNoOverlap(scene: SceneDraft): {
 }
 
 /**
+ * Variante utilisée pour un déplacement groupe:
+ * - ignore les paires internes (a,b) si a∈candidateIds && b∈candidateIds
+ * - teste bien candidats ↔ voisins externes
+ */
+export function validateNoOverlapForCandidate(
+  scene: SceneDraft,
+  candidateIds: ID[]
+): {
+  ok: boolean;
+  conflicts: Array<[ID, ID]>;
+} {
+  const pieces = Object.values(scene.pieces);
+  const conflicts: Array<[ID, ID]> = [];
+  const cand = new Set(candidateIds);
+
+  for (let i = 0; i < pieces.length; i++) {
+    for (let j = i + 1; j < pieces.length; j++) {
+      const pieceA = pieces[i];
+      const pieceB = pieces[j];
+
+      // Skip si les deux sont dans le groupe candidat (pas d'auto-collision interne)
+      if (cand.has(pieceA.id) && cand.has(pieceB.id)) {
+        continue;
+      }
+
+      const bboxA = pieceBBox(pieceA);
+      const bboxB = pieceBBox(pieceB);
+      if (rectsOverlap(bboxA, bboxB)) {
+        conflicts.push([pieceA.id, pieceB.id]);
+      }
+    }
+  }
+
+  return {
+    ok: conflicts.length === 0,
+    conflicts,
+  };
+}
+
+/**
  * Valide que toutes les pièces sont contenues dans la scène.
  * Retourne { ok: true } si toutes OK, sinon { ok: false, outside: [...] }.
  */

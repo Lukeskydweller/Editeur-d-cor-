@@ -8,12 +8,13 @@ import { neighborsForPiece } from "../spatial/rbushIndex";
 import { queryNeighbors, isAutoEnabled } from "../../lib/spatial/globalIndex";
 import { incShortlistSource } from "../../lib/metrics";
 import * as SAT from "sat";
+import { MIN_GAP_MM, SPACING_WARN_MM } from "../../constants/validation";
 
 // Constants for spacing validation
 const EPS = 0.10;          // mm - tolerance numérique (même que checkInsideScene)
 const EPS_AREA = 0.50;     // mm² — tolérance zone non supportée
-const SPACING_BLOCK = 0.5; // mm - block if distance < 0.5mm (during resize: only if overlap < 0)
-const SPACING_WARN = 1.5;  // mm - warn if distance < 1.5mm
+const SPACING_BLOCK = MIN_GAP_MM; // mm - block if distance < 1.0mm (during resize: only if overlap < 0)
+const SPACING_WARN = SPACING_WARN_MM;  // mm - warn if distance < 1.5mm
 const HALO = 3.0;          // mm - voisinage pour pré-filtrage (limite O(n²))
 
 /**
@@ -77,6 +78,42 @@ function checkOverlapSameLayer(scene: SceneV1): Problem[] {
     message: "Pieces overlap on the same layer",
     meta: { otherPieceId: b },
   }));
+}
+
+/**
+ * Variante utilisée pour un déplacement groupe:
+ * - ignore les paires internes (a,b) si a∈candidateIds && b∈candidateIds
+ * - teste bien candidats ↔ voisins externes
+ */
+export function validateNoOverlapForCandidate(
+  scene: SceneV1,
+  candidateIds: string[]
+): { ok: boolean; problems: Problem[] } {
+  const problems: Problem[] = [];
+  const cand = new Set(candidateIds);
+
+  // Get all collision pairs using existing logic
+  const allPairs = collisionsSameLayer(scene);
+
+  // Filter pairs to exclude internal collisions within candidate group
+  for (const [a, b] of allPairs) {
+    // Skip si les deux sont dans le groupe candidat (pas d'auto-collision interne)
+    if (cand.has(a) && cand.has(b)) {
+      continue;
+    }
+
+    // This is either candidate ↔ external or external ↔ external
+    // Report as BLOCK problem
+    problems.push({
+      code: "overlap_same_layer" as ProblemCode,
+      severity: "BLOCK" as const,
+      pieceId: a,
+      message: "Pieces overlap on the same layer",
+      meta: { otherPieceId: b },
+    });
+  }
+
+  return { ok: problems.length === 0, problems };
 }
 
 /**
@@ -209,7 +246,7 @@ function aabbEdgeDistance(a: AABB, b: AABB): number {
 
 /**
  * Vérifie l'espacement minimal entre pièces sur la même couche.
- * BLOCK si distance < 0.5mm, WARN si 0.5mm <= distance < 1.5mm.
+ * BLOCK si distance < 1.0mm, WARN si 1.0mm <= distance < 1.5mm.
  * Ignore les pièces marquées joined=true.
  * Version autonome sans dépendance à un index spatial externe.
  */
@@ -255,19 +292,23 @@ function checkMinSpacing(scene: SceneV1): Problem[] {
         // Skip si overlap (géré par checkOverlapSameLayer)
         if (d < -EPS) continue;
 
+        // FEAT_GAP_COLLAGE: Skip si gap ≈ 0 (collage parfait bord-à-bord via snapEdgeCollage)
+        // Cela évite les faux WARN après collage automatique
+        if (d < EPS) continue;
+
         // Détection des problèmes d'espacement
         // Un seul problème par paire, attaché à la première pièce
         if (d + EPS < SPACING_BLOCK) {
-          // BLOCK: écart < 0.5mm
+          // BLOCK: écart < 1.0mm (ne devrait plus arriver car collage auto, mais on garde par sécurité)
           out.push({
             code: "spacing_too_small" as ProblemCode,
             severity: "BLOCK" as const,
             pieceId: pi.id,
-            message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
+            message: `Écart < 1,0 mm (d≈${d.toFixed(1)} mm)`,
             meta: { otherPieceId: pj.id, distance: d },
           });
         } else if (d + EPS < SPACING_WARN) {
-          // WARN: 0.5mm <= écart < 1.5mm
+          // WARN: 1.0mm <= écart < 1.5mm
           out.push({
             code: "spacing_too_small" as ProblemCode,
             severity: "WARN" as const,
@@ -540,8 +581,8 @@ export function spacingForCandidate(
 
     // Revised rules for resize context:
     // - gap < 0: overlap (BLOCK) - handled by collisionsForCandidate
-    // - gap >= 0 and < 0.5mm during resize: WARN only (not BLOCK), unless joined
-    // - gap >= 0.5mm and < 1.5mm: WARN
+    // - gap >= 0 and < 1.0mm during resize: WARN only (not BLOCK), unless joined
+    // - gap >= 1.0mm and < 1.5mm: WARN
     // - gap >= 1.5mm: OK
 
     if (ctx) {
@@ -560,16 +601,16 @@ export function spacingForCandidate(
     } else {
       // Regular validation (not resize): stricter rules
       if (d + eps < SPACING_BLOCK) {
-        // BLOCK: gap < 0.5mm
+        // BLOCK: gap < 1.0mm
         out.push({
           code: "spacing_too_small" as ProblemCode,
           severity: "BLOCK" as const,
           pieceId: pieceId,
-          message: `Écart < 0,5 mm (d≈${d.toFixed(1)} mm)`,
+          message: `Écart < 1,0 mm (d≈${d.toFixed(1)} mm)`,
           meta: { otherPieceId: neighbor.id, distance: d },
         });
       } else if (d + eps < SPACING_WARN) {
-        // WARN: 0.5mm <= gap < 1.5mm
+        // WARN: 1.0mm <= gap < 1.5mm
         out.push({
           code: "spacing_too_small" as ProblemCode,
           severity: "WARN" as const,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
@@ -10,6 +10,11 @@ import type { ResizeHandle } from '@/lib/ui/resize';
 import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
 import StatusBadge from '@/components/StatusBadge';
 import Toast from '@/components/Toast';
+import MicroGapTooltip from '@/ui/overlays/MicroGapTooltip';
+import DebugNudgeGap from '@/ui/debug/DebugNudgeGap';
+import { pieceAABB } from '@/lib/geom/aabb';
+import SelectionHandles from '@/ui/overlays/SelectionHandles';
+import GroupGhostOverlay from '@/ui/overlays/GroupGhostOverlay';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -52,7 +57,6 @@ export default function App() {
   const lockEdge = useSceneStore((s) => s.ui.lockEdge ?? false);
   const setLockEdge = useSceneStore((s) => s.setLockEdge);
   const groupResizing = useSceneStore((s) => s.ui.groupResizing);
-  const groupBBox = useSceneStore((s) => s.ui.groupBBox);
   const startGroupResize = useSceneStore((s) => s.startGroupResize);
   const updateGroupResize = useSceneStore((s) => s.updateGroupResize);
   const endGroupResize = useSceneStore((s) => s.endGroupResize);
@@ -71,6 +75,42 @@ export default function App() {
   const groupResizeFactorRef = useRef<number>(1);
 
   const [importError, setImportError] = useState<string | null>(null);
+
+  // Compute selection bbox for group resize handles
+  // Uses revision to invalidate when geometry changes (drag/resize/nudge/rotate/undo/redo)
+  const selectionBBox = useMemo(() => {
+    const selectedIdsList = selectedIds ?? (selectedId ? [selectedId] : []);
+    if (selectedIdsList.length === 0) return null;
+
+    // Single piece: return its AABB
+    if (selectedIdsList.length === 1) {
+      const piece = scene.pieces[selectedIdsList[0]];
+      if (!piece) return null;
+      const aabb = pieceAABB(piece);
+      return { x: aabb.x, y: aabb.y, w: aabb.w, h: aabb.h };
+    }
+
+    // Multiple pieces: compute union AABB (group bbox)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of selectedIdsList) {
+      const piece = scene.pieces[id];
+      if (!piece) continue;
+      const aabb = pieceAABB(piece);
+      minX = Math.min(minX, aabb.x);
+      minY = Math.min(minY, aabb.y);
+      maxX = Math.max(maxX, aabb.x + aabb.w);
+      maxY = Math.max(maxY, aabb.y + aabb.h);
+    }
+    if (minX === Infinity) return null;
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }, [scene.pieces, scene.revision, selectedId, selectedIds]);
+
+  // Expose selectionBBox to UI store for SelectionHandles component
+  useEffect(() => {
+    useSceneStore.setState((state) => ({
+      ui: { ...state.ui, selectionBBox: selectionBBox ?? undefined },
+    }));
+  }, [selectionBBox]);
 
   // Smoke: init 600×600 + 1 layer + 1 material + 1 piece
   useEffect(() => {
@@ -600,44 +640,7 @@ export default function App() {
                   </g>
                 );
               })}
-              {/* Ghost piece pendant drag */}
-              {dragging && dragging.candidate && (() => {
-                const piece = scene.pieces[dragging.id];
-                if (!piece || piece.kind !== 'rect') return null;
-
-                // Ghost must show the piece AS IT WILL APPEAR after drop
-                // This means: using piece.position (converted from AABB candidate)
-                // with the piece's actual rotation and original size
-                const { x, y, valid } = dragging.candidate;
-                const { w, h } = piece.size; // Original size, not AABB
-
-                // Convert AABB position back to piece.position for rendering
-                const ghostPiecePos = aabbToPiecePosition(x, y, piece);
-
-                return (
-                  <g
-                    key="ghost"
-                    transform={`translate(${ghostPiecePos.x} ${ghostPiecePos.y}) rotate(${piece.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
-                    data-testid="ghost-piece"
-                    data-valid={valid ? 'true' : 'false'}
-                  >
-                    <rect
-                      x="0"
-                      y="0"
-                      width={w}
-                      height={h}
-                      rx="6"
-                      ry="6"
-                      fill={valid ? '#60a5fa' : '#ef4444'}
-                      fillOpacity="0.5"
-                      stroke={valid ? '#22d3ee' : '#ef4444'}
-                      strokeWidth="3"
-                      strokeDasharray="4 4"
-                      pointerEvents="none"
-                    />
-                  </g>
-                );
-              })()}
+              {/* Ghost piece pendant drag - now handled by GroupGhostOverlay */}
               {/* Snap guides */}
               {guides && guides.length > 0 && (
                 <g data-testid="snap-guides">
@@ -697,6 +700,10 @@ export default function App() {
                   />
                 );
               })()}
+              {/* Group ghost overlay - shows ghost for each selected piece during drag */}
+              <GroupGhostOverlay />
+              {/* Selection handles - rendered in same coordinate space as pieces */}
+              <SelectionHandles />
               {/* bordure scène */}
               <rect
                 x="0.5"
@@ -738,9 +745,9 @@ export default function App() {
               );
             })()}
             {/* Group resize handles for multi-selection */}
-            {selectedIds && selectedIds.length >= 2 && groupBBox && (
+            {selectedIds && selectedIds.length >= 2 && selectionBBox && (
               <ResizeHandlesOverlay
-                rect={groupBBox}
+                rect={selectionBBox}
                 svgElement={svgRef.current}
                 onStart={(handle, clientX, clientY) => handleGroupResizeStart(handle, clientX, clientY)}
                 onMove={handleGroupResizeMove}
@@ -754,6 +761,8 @@ export default function App() {
         </section>
       </div>
       <Toast />
+      <MicroGapTooltip />
+      <DebugNudgeGap />
     </main>
   );
 }

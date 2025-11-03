@@ -56,4 +56,5 @@ export type SceneDraft = {
   layers: Record<ID, Layer>;
   pieces: Record<ID, Piece>;
   layerOrder: ID[];  // ordre z croissant (cohérent avec Layer.z)
+  revision: number;  // Incrémenté à chaque mutation de géométrie (position/taille/rotation)
 };
