@@ -2729,9 +2729,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       // Cancel any pending RAF callback to prevent late updates
       cancelGroupResizeRaf();
 
+      // Clear all group resize UI state
       draft.ui.groupResizing = undefined;
       draft.ui.isTransientActive = false;
       draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+
+      // Clear ghost if it was for any of the selected pieces
+      if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+        draft.ui.ghost = undefined;
+      }
+
       bumpHandlesEpoch(draft);
       computeGroupBBox(draft);
     })),
@@ -2744,11 +2751,21 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const resizing = draft.ui.groupResizing;
       if (!resizing?.isResizing) return;
 
+      const selectedIds = draft.ui.selectedIds ?? [];
+
       // Restore from snapshot
       draft.scene = resizing.startSnapshot.scene;
+
+      // Clear all group resize UI state
       draft.ui.groupResizing = undefined;
       draft.ui.isTransientActive = false;
       draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+
+      // Clear ghost if it was for any of the selected pieces
+      if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+        draft.ui.ghost = undefined;
+      }
+
       bumpHandlesEpoch(draft);
       computeGroupBBox(draft);
     }));

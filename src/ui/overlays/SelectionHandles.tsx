@@ -97,8 +97,8 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
   const selKey = selIds.join(',');
   const key = `${ui.handlesEpoch}:${scene.revision}:${selKey}`;
 
-  // 2) masquer pendant toute opération transitoire
-  if (ui.groupResizing?.isResizing || ui.dragging) return null;
+  // 2) masquer pendant drag, mais afficher preview pendant group resize
+  if (ui.dragging) return null;
 
   // 3) bbox courante rotation-aware : priorité preview > groupe > pièce
   let bbox: BBox | null = null;
@@ -115,6 +115,40 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
   }
 
   if (!bbox) return null;
+
+  // During group resize: show dashed preview with scale indicator, no handles
+  if (ui.groupResizing?.isResizing && ui.groupResizing.preview) {
+    const scale = ui.groupResizing.preview.scale ?? 1;
+    const scaleText = `×${scale.toFixed(2)}`;
+    const centerX = bbox.x + bbox.w / 2;
+    const centerY = bbox.y + bbox.h / 2;
+
+    return (
+      <g data-testid="selection-handles-group-preview" data-layer="handles" key={key}>
+        <rect
+          x={bbox.x}
+          y={bbox.y}
+          width={bbox.w}
+          height={bbox.h}
+          fill="none"
+          stroke="#3b82f6"
+          strokeWidth={1}
+          strokeDasharray="4 2"
+        />
+        <text
+          x={centerX}
+          y={centerY}
+          fill="#3b82f6"
+          fontSize={12}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          pointerEvents="none"
+        >
+          {scaleText}
+        </text>
+      </g>
+    );
+  }
 
   // Multi-selection: render group bbox with handles
   if (selIds.length >= 2) {

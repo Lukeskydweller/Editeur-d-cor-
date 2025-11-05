@@ -217,6 +217,13 @@ function toCardinal(handle: ResizeHandle): 'N' | 'S' | 'E' | 'W' {
 }
 
 /**
+ * Check if handle is a corner (diagonal resize)
+ */
+function isCornerHandle(handle: ResizeHandle): boolean {
+  return handle === 'ne' || handle === 'nw' || handle === 'se' || handle === 'sw';
+}
+
+/**
  * Apply resize with rotation support
  * Uses local frame transforms when rotationDeg is provided
  */
@@ -245,15 +252,30 @@ export function applyHandleWithRotation(
   // Convert world delta to local delta
   const dl = worldDeltaToLocal(dx, dy, frame);
 
-  // Get cardinal direction
-  const cardinal = toCardinal(handle);
+  let w: number, h: number;
 
-  // Apply resize in local frame
-  let { w, h } = applyLocalResizeTransform(rect.w, rect.h, cardinal, dl);
+  // Corner handles: isotropic resize (preserve aspect ratio)
+  if (isCornerHandle(handle)) {
+    // Determine signs based on corner
+    const signX = handle.includes('e') ? 1 : -1;
+    const signY = handle.includes('s') ? 1 : -1;
 
-  // Apply minimum size
-  w = Math.max(w, minW);
-  h = Math.max(h, minH);
+    // Calculate scale factors from local deltas
+    const scaleX = (rect.w + signX * dl.lx) / rect.w;
+    const scaleY = (rect.h + signY * dl.ly) / rect.h;
+
+    // Use maximum scale to preserve aspect ratio (avoid crushing)
+    const scale = Math.max(scaleX, scaleY);
+
+    w = Math.max(rect.w * scale, minW);
+    h = Math.max(rect.h * scale, minH);
+  } else {
+    // Edge handles: anisotropic resize (single axis)
+    const cardinal = toCardinal(handle);
+    const resized = applyLocalResizeTransform(rect.w, rect.h, cardinal, dl);
+    w = Math.max(resized.w, minW);
+    h = Math.max(resized.h, minH);
+  }
 
   // Calculate new position
   let nx = rect.x;
@@ -261,6 +283,7 @@ export function applyHandleWithRotation(
 
   if (lockEdge) {
     // Lock opposite edge: adjust position to keep it fixed
+    const cardinal = toCardinal(handle);
     switch (cardinal) {
       case 'E':
         // Lock W edge: shift left by width delta
