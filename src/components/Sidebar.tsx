@@ -17,6 +17,8 @@ export function Sidebar() {
   const materials = useSceneStore((s) => s.scene.materials, shallow);
   const selectedId = useSceneStore((s) => s.ui.selectedId);
   const activeLayer = useSceneStore((s) => s.ui.activeLayer);
+  const layerVisibility = useSceneStore((s) => s.ui.layerVisibility, shallow);
+  const layerLocked = useSceneStore((s) => s.ui.layerLocked, shallow);
 
   const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
   const toggleJoined = useSceneStore((s) => s.toggleJoined);
@@ -24,6 +26,8 @@ export function Sidebar() {
   const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
   const addLayer = useSceneStore((s) => s.addLayer);
   const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
+  const toggleLayerVisibility = useSceneStore((s) => s.toggleLayerVisibility);
+  const toggleLayerLock = useSceneStore((s) => s.toggleLayerLock);
   const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
   const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
   const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
@@ -74,42 +78,85 @@ export function Sidebar() {
               const isAtBack = idx === 0;
               const isAtFront = idx === layerCounts.length - 1;
               const isActive = l.id === activeLayer;
+              const isVisible = layerVisibility[l.id] ?? true;
+              const isLocked = layerLocked[l.id] ?? false;
 
               return (
                 <li
                   key={l.id}
                   data-testid={`layer-row-${l.name}`}
-                  className={`flex items-center justify-between gap-2 p-2 rounded cursor-pointer transition-colors ${
+                  className={`flex items-center justify-between gap-2 p-2 rounded transition-colors ${
                     isActive
                       ? 'bg-cyan-600 ring-2 ring-cyan-400'
                       : 'bg-slate-700 hover:bg-slate-600'
                   }`}
-                  onClick={() => setActiveLayer(l.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setActiveLayer(l.id);
-                    }
-                  }}
                 >
-                  <div className="flex items-center gap-2 flex-1">
-                    {isActive && (
-                      <span
-                        data-testid={`active-layer-badge-${l.name}`}
-                        className="text-cyan-200 font-bold"
-                        aria-label="active layer indicator"
-                      >
-                        ●
-                      </span>
-                    )}
+                  {/* Left side: radio button + name + count */}
+                  <div
+                    className="flex items-center gap-2 flex-1 cursor-pointer"
+                    onClick={() => setActiveLayer(l.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setActiveLayer(l.id);
+                      }
+                    }}
+                  >
+                    {/* Radio button (●/○) */}
+                    <span
+                      data-testid={`active-layer-badge-${l.name}`}
+                      className={`text-lg ${isActive ? 'text-cyan-200' : 'text-gray-500'}`}
+                      aria-label={isActive ? 'active layer' : 'inactive layer'}
+                    >
+                      {isActive ? '●' : '○'}
+                    </span>
                     <span className={isActive ? 'font-semibold' : ''}>{l.name}</span>
                     <span className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}>
                       {l.count}
                     </span>
                   </div>
+
+                  {/* Right side: eye + lock + layer order buttons */}
                   <div className="flex items-center gap-1">
+                    {/* Eye icon (visibility toggle) */}
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLayerVisibility(l.id);
+                      }}
+                      aria-label={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      aria-pressed={isVisible}
+                      title={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      data-testid={`layer-eye-${l.name}`}
+                      tabIndex={0}
+                    >
+                      {isVisible ? '👁' : '🚫'}
+                    </Button>
+
+                    {/* Lock icon (lock toggle) */}
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleLayerLock(l.id);
+                      }}
+                      aria-label={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      aria-pressed={isLocked}
+                      title={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      data-testid={`layer-lock-${l.name}`}
+                      tabIndex={0}
+                    >
+                      {isLocked ? '🔒' : '🔓'}
+                    </Button>
+
+                    {/* Layer order buttons */}
                     <Button
                       size="icon"
                       variant="ghost"
