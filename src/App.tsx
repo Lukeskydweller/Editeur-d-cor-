@@ -23,7 +23,9 @@ export default function App() {
   const initSceneWithDefaults = useSceneStore((s) => s.initSceneWithDefaults);
   const selectedId = useSceneStore((s) => s.ui.selectedId);
   const selectedIds = useSceneStore((s) => s.ui.selectedIds);
+  const activeLayer = useSceneStore((s) => s.ui.activeLayer);
   const selectPiece = useSceneStore((s) => s.selectPiece);
+  const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
   const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
   const effects = useSceneStore((s) => s.ui.effects);
@@ -414,6 +416,14 @@ export default function App() {
     // Don't start drag if resizing
     if (resizing) return;
 
+    // Layer isolation: check if piece is in active layer
+    const piece = scene.pieces[pieceId];
+    if (piece && activeLayer && piece.layerId !== activeLayer) {
+      // Piece is in different layer - switch to that layer instead of dragging
+      setActiveLayer(piece.layerId);
+      return;
+    }
+
     // Shift-click → toggle selection
     if (e.shiftKey) {
       toggleSelect(pieceId);
@@ -735,44 +745,61 @@ export default function App() {
               <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="#0f172a" />
               {/* grille sous les pièces */}
               <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="url(#grid10mm)" />
-              {/* pièces rect */}
-              {Object.values(scene.pieces).map((p) => {
-                if (p.kind !== 'rect') return null;
-                const { x, y } = p.position;
-                const { w, h } = p.size;
-                const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
-                const isSelected = actualSelectedIds.includes(p.id);
-                const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
-                const isFocused = effects?.focusId === p.id;
-                const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
+              {/* pièces rect - grouped by layers for painter's order and interaction isolation */}
+              {scene.layerOrder.map((layerId) => {
+                const layer = scene.layers[layerId];
+                if (!layer) return null;
 
-                // Check if this is a ghost piece
-                const isGhost = ghost?.pieceId === p.id;
-                const ghostHasBlock = isGhost && ghost.problems.some(prob => prob.severity === 'BLOCK');
-                const ghostHasWarn = isGhost && ghost.problems.some(prob => prob.severity === 'WARN') && !ghostHasBlock;
+                const isActive = layerId === activeLayer;
 
                 return (
                   <g
-                    key={p.id}
-                    transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
-                    data-testid={isSelected ? 'piece-selected' : undefined}
-                    data-invalid={isFlashingInvalid ? 'true' : undefined}
-                    data-ghost={isGhost ? 'true' : undefined}
+                    key={layerId}
+                    data-layer={layer.name}
+                    style={{ pointerEvents: isActive ? 'all' : 'none', opacity: isActive ? 1 : 0.5 }}
                   >
-                    <rect
-                      x="0"
-                      y="0"
-                      width={w}
-                      height={h}
-                      rx="6"
-                      ry="6"
-                      fill={isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'} /* rouge/orange si ghost, bleu sinon */
-                      stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : isGhost ? (ghostHasBlock ? '#dc2626' : '#f59e0b') : '#1e3a8a'}
-                      strokeWidth={isGhost ? '4' : isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
-                      onPointerDown={(e) => handlePointerDown(e, p.id)}
-                      style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
-                      className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
-                    />
+                    {layer.pieces.map((pieceId) => {
+                      const p = scene.pieces[pieceId];
+                      if (!p || p.kind !== 'rect') return null;
+
+                      const { x, y } = p.position;
+                      const { w, h } = p.size;
+                      const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
+                      const isSelected = actualSelectedIds.includes(p.id);
+                      const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
+                      const isFocused = effects?.focusId === p.id;
+                      const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
+
+                      // Check if this is a ghost piece
+                      const isGhost = ghost?.pieceId === p.id;
+                      const ghostHasBlock = isGhost && ghost.problems.some(prob => prob.severity === 'BLOCK');
+                      const ghostHasWarn = isGhost && ghost.problems.some(prob => prob.severity === 'WARN') && !ghostHasBlock;
+
+                      return (
+                        <g
+                          key={p.id}
+                          transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
+                          data-testid={isSelected ? 'piece-selected' : undefined}
+                          data-invalid={isFlashingInvalid ? 'true' : undefined}
+                          data-ghost={isGhost ? 'true' : undefined}
+                        >
+                          <rect
+                            x="0"
+                            y="0"
+                            width={w}
+                            height={h}
+                            rx="6"
+                            ry="6"
+                            fill={isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'} /* rouge/orange si ghost, bleu sinon */
+                            stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : isGhost ? (ghostHasBlock ? '#dc2626' : '#f59e0b') : '#1e3a8a'}
+                            strokeWidth={isGhost ? '4' : isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
+                            onPointerDown={(e) => handlePointerDown(e, p.id)}
+                            style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
+                            className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
+                          />
+                        </g>
+                      );
+                    })}
                   </g>
                 );
               })}
