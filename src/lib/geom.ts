@@ -1,4 +1,20 @@
-import type { BBox, Piece, Milli } from '@/types/scene';
+import type { BBox, Piece, Milli, ID, SceneDraft } from '@/types/scene';
+
+/**
+ * Calcule une version courte concaténée de la géométrie des pièces.
+ * Utilisé pour forcer le re-render des overlays quand la géométrie change.
+ * @returns Une chaîne contenant id:x,y,w,h,rotation pour chaque pièce
+ */
+export function piecesVersion(scene: SceneDraft, ids: ID[]): string {
+  let s = '';
+  for (const id of ids) {
+    const p = scene.pieces[id];
+    if (!p) continue;
+    const b = pieceBBox(p);
+    s += `${id}:${b.x},${b.y},${b.w},${b.h},${p.rotationDeg ?? 0}|`;
+  }
+  return s;
+}
 
 /**
  * Calcule la bounding box (AABB) d'une pièce, rotation-aware.

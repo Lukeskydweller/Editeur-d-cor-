@@ -70,14 +70,17 @@ describe('Resize functionality', () => {
       const { initSceneWithDefaults, addRectAtCenter, setSelection } = useSceneStore.getState();
       initSceneWithDefaults(600, 600);
       addRectAtCenter(100, 50);
+      addRectAtCenter(80, 60); // Add second piece for multi-selection
 
       const pieceIds = Object.keys(useSceneStore.getState().scene.pieces);
       setSelection(pieceIds);
 
       render(<App />);
 
-      // Group handles should be visible for multi-selection
-      expect(screen.queryByLabelText('resize-handle-n')).not.toBeNull();
+      // Group handles should be visible for multi-selection (4 corners for isotropic resize)
+      // Use data-handle attribute instead of aria-label since group handles use different attributes
+      const groupHandles = document.querySelectorAll('[data-handle="group-corner"]');
+      expect(groupHandles.length).toBe(4);
     });
   });
 

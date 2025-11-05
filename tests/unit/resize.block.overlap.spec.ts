@@ -294,9 +294,9 @@ describe('Resize block overlap prevention', () => {
     it('works with 90° rotated pieces (local frame)', async () => {
       const store = useSceneStore.getState();
 
-      // Insert two pieces
-      const id1 = await store.insertRect({ w: 100, h: 60, x: 10, y: 10 });
-      const id2 = await store.insertRect({ w: 100, h: 60, x: 114, y: 10 });
+      // Insert two pieces (id1 positioned so 90° rotation stays in bounds)
+      const id1 = await store.insertRect({ w: 100, h: 60, x: 60, y: 60 });
+      const id2 = await store.insertRect({ w: 100, h: 60, x: 164, y: 60 });
 
       // Rotate first piece 90°
       store.selectPiece(id1!);
@@ -307,8 +307,8 @@ describe('Resize block overlap prevention', () => {
       store.selectPiece(id1!);
 
       // Resize in local frame (rotated)
-      store.startResize(id1!, 'e', { x: 70, y: 60 });
-      store.updateResize({ x: 80, y: 60 });
+      store.startResize(id1!, 'e', { x: 120, y: 110 });
+      store.updateResize({ x: 130, y: 110 });
 
       await new Promise(resolve => setTimeout(resolve, 200));
 

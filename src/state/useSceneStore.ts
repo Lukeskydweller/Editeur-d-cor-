@@ -31,6 +31,40 @@ function notifyAutoSpatial() {
   if (evalFn) evalFn();
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// RAF scheduler for smooth group resize updates (throttle pointermove)
+// ─────────────────────────────────────────────────────────────────────────
+
+type RafJob = {
+  pending?: boolean;
+  rafId?: number;
+  lastArgs?: { pointer: {x: Milli; y: Milli}; altKey: boolean }
+};
+const rafGroupResize: RafJob = {};
+
+function scheduleGroupResize(
+  fn: (args: {pointer: {x: Milli; y: Milli}; altKey: boolean}) => void,
+  args: {pointer: {x: Milli; y: Milli}; altKey: boolean}
+) {
+  rafGroupResize.lastArgs = args;
+  if (rafGroupResize.pending) return;
+  rafGroupResize.pending = true;
+  rafGroupResize.rafId = requestAnimationFrame(() => {
+    rafGroupResize.pending = false;
+    rafGroupResize.rafId = undefined;
+    if (rafGroupResize.lastArgs) fn(rafGroupResize.lastArgs);
+  });
+}
+
+function cancelGroupResizeRaf() {
+  if (rafGroupResize.rafId !== undefined) {
+    cancelAnimationFrame(rafGroupResize.rafId);
+    rafGroupResize.rafId = undefined;
+  }
+  rafGroupResize.pending = false;
+  rafGroupResize.lastArgs = undefined;
+}
+
 function genId(prefix = 'id'): ID {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -58,6 +92,262 @@ function add90(d: Deg): Deg {
 }
 function sub90(d: Deg): Deg {
   return normDeg((d + 270) % 360);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers: rotation rigide de groupe autour d'un pivot commun
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fait tourner un point autour d'un pivot pour des angles multiples de 90°.
+ * Utilisé pour la rotation rigide de groupe (centres des pièces tournent autour du pivot).
+ */
+function rotatePoint90Deg(
+  p: { x: Milli; y: Milli },
+  pivot: { x: Milli; y: Milli },
+  deltaDeg: 0 | 90 | -90 | 180
+): { x: Milli; y: Milli } {
+  const dx = (p.x - pivot.x) as Milli;
+  const dy = (p.y - pivot.y) as Milli;
+
+  switch (deltaDeg) {
+    case 0:
+      return { x: p.x, y: p.y };
+    case 180:
+      return { x: (pivot.x - dx) as Milli, y: (pivot.y - dy) as Milli };
+    case 90:
+      return { x: (pivot.x - dy) as Milli, y: (pivot.y + dx) as Milli };
+    case -90:
+      return { x: (pivot.x + dy) as Milli, y: (pivot.y - dx) as Milli };
+  }
+}
+
+/**
+ * Calcule le centre visuel d'une pièce (centre de son AABB rotation-aware).
+ */
+function pieceCenter(p: Piece): { x: Milli; y: Milli } {
+  const bbox = pieceBBox(p);
+  return {
+    x: (bbox.x + bbox.w / 2) as Milli,
+    y: (bbox.y + bbox.h / 2) as Milli,
+  };
+}
+
+/**
+ * Calcule le pivot (centre de la bbox union) pour un groupe de pièces.
+ */
+function groupPivot(scene: SceneDraft, ids: ID[]): { x: Milli; y: Milli } {
+  let minX = Infinity,
+    minY = Infinity,
+    maxX = -Infinity,
+    maxY = -Infinity;
+
+  for (const id of ids) {
+    const p = scene.pieces[id];
+    if (!p) continue;
+    const b = pieceBBox(p);
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.w);
+    maxY = Math.max(maxY, b.y + b.h);
+  }
+
+  return {
+    x: ((minX + maxX) / 2) as Milli,
+    y: ((minY + maxY) / 2) as Milli,
+  };
+}
+
+/**
+ * Construit une scène candidate avec rotation rigide de groupe.
+ * Chaque pièce voit son centre tourner autour du pivot, et sa rotation individuelle incrémentée.
+ * Les dimensions nominales (size.w/h) restent inchangées.
+ */
+function buildRigidRotationCandidate(
+  scene: SceneDraft,
+  ids: ID[],
+  opts: { deltaDeg?: 90 | -90; targetDeg?: Deg }
+): SceneDraft {
+  const pivot = groupPivot(scene, ids);
+  const next: SceneDraft = { ...scene, pieces: { ...scene.pieces } };
+
+  for (const id of ids) {
+    const p = next.pieces[id];
+    if (!p) continue;
+
+    const curDeg = (p.rotationDeg ?? 0) as Deg;
+    const nxtDeg =
+      opts.targetDeg != null
+        ? opts.targetDeg
+        : opts.deltaDeg === 90
+        ? add90(curDeg)
+        : sub90(curDeg);
+
+    // Calculer l'angle de rotation réel pour rotatePoint90Deg
+    let actualDelta: 0 | 90 | -90 | 180;
+    if (opts.targetDeg != null) {
+      const raw = ((nxtDeg - curDeg + 360) % 360);
+      actualDelta = raw === 270 ? -90 : raw as 0 | 90 | -90 | 180;
+    } else {
+      actualDelta = opts.deltaDeg! as 0 | 90 | -90 | 180;
+    }
+
+    // Centre actuel (AABB-aware)
+    const curCenter = pieceCenter(p);
+
+    // Nouveau centre après rotation autour du pivot
+    const rotatedCenter = rotatePoint90Deg(curCenter, pivot, actualDelta);
+
+    // Dimensions intrinsèques (invariantes par rotation)
+    const { w: w0, h: h0 } = p.size;
+
+    // Extents AABB finaux selon nxtDeg (angles multiples de 90°)
+    const r = ((nxtDeg ?? 0) % 360 + 360) % 360;
+    const AABBwFinal = (r === 90 || r === 270 ? h0 : w0) as Milli;
+    const AABBhFinal = (r === 90 || r === 270 ? w0 : h0) as Milli;
+
+    // Top-left de l'AABB finale = centre rotated - (AABB_final / 2)
+    const aabbTopLeft = {
+      x: (rotatedCenter.x - AABBwFinal / 2) as Milli,
+      y: (rotatedCenter.y - AABBhFinal / 2) as Milli,
+    };
+
+    // Créer une pièce temporaire avec la nouvelle rotation pour utiliser aabbToPiecePosition
+    const tempPiece: Piece = { ...p, rotationDeg: nxtDeg };
+    const newPosition = aabbToPiecePosition(aabbTopLeft.x, aabbTopLeft.y, tempPiece);
+
+    // Ne modifier que position et rotationDeg (size reste inchangé)
+    next.pieces[id] = {
+      ...p,
+      rotationDeg: nxtDeg,
+      position: { x: newPosition.x as Milli, y: newPosition.y as Milli },
+    };
+  }
+
+  return next;
+}
+
+/**
+ * Calcule les extents du groupe (L, R, T, B) depuis le pivot jusqu'aux bords de la bbox union.
+ * Retourne les distances radiales du pivot aux extrêmes gauche/droite/haut/bas du groupe.
+ * Utile pour calculer les facteurs de scale max qui gardent le groupe dans la scène.
+ */
+function groupExtentsAroundPivot(
+  scene: SceneDraft,
+  ids: ID[],
+  pivot: { x: Milli; y: Milli }
+): { L: Milli; R: Milli; T: Milli; B: Milli } {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const id of ids) {
+    const p = scene.pieces[id];
+    if (!p) continue;
+
+    // Calculer AABB de la pièce
+    const center = pieceCenter(p);
+    const ext = aabbExtentsFromIntrinsic(p.size, (p.rotationDeg ?? 0) as Deg);
+    const aabbLeft = center.x - ext.w / 2;
+    const aabbRight = center.x + ext.w / 2;
+    const aabbTop = center.y - ext.h / 2;
+    const aabbBottom = center.y + ext.h / 2;
+
+    minX = Math.min(minX, aabbLeft);
+    maxX = Math.max(maxX, aabbRight);
+    minY = Math.min(minY, aabbTop);
+    maxY = Math.max(maxY, aabbBottom);
+  }
+
+  // Distances du pivot aux bords
+  const L = (pivot.x - minX) as Milli; // distance vers la gauche
+  const R = (maxX - pivot.x) as Milli; // distance vers la droite
+  const T = (pivot.y - minY) as Milli; // distance vers le haut
+  const B = (maxY - pivot.y) as Milli; // distance vers le bas
+
+  return { L, R, T, B };
+}
+
+/**
+ * Distance euclidienne entre deux points.
+ */
+function distance(a: { x: Milli; y: Milli }, b: { x: Milli; y: Milli }): Milli {
+  return Math.hypot(a.x - b.x, a.y - b.y) as Milli;
+}
+
+/**
+ * Calcule les extents AABB d'une pièce en fonction de son angle de rotation.
+ * Pour 90°/270°, les dimensions w/h sont swappées.
+ */
+function aabbExtentsFromIntrinsic(
+  size: { w: Milli; h: Milli },
+  deg: Deg
+): { w: Milli; h: Milli } {
+  const r = ((deg % 360) + 360) % 360;
+  return r === 90 || r === 270
+    ? { w: size.h as Milli, h: size.w as Milli }
+    : { w: size.w as Milli, h: size.h as Milli };
+}
+
+/**
+ * Construit une scène candidate avec scaling isotrope de groupe autour d'un pivot.
+ * Chaque pièce voit:
+ * - son centre se déplacer selon une homothétie de centre `pivot` et facteur `scale`
+ * - ses dimensions intrinsèques (size.w/h) multipliées par `scale`
+ * - sa rotation (rotationDeg) inchangée
+ * - sa position recalculée pour que son AABB corresponde au nouveau centre et à la nouvelle taille
+ *
+ * Note: Le pivot est le centre de la bbox union (cohérent avec rotation rigide),
+ * pas la moyenne des centres des pièces.
+ */
+function buildGroupScaleCandidate(
+  scene: SceneDraft,
+  ids: ID[],
+  pivot: { x: Milli; y: Milli },
+  scale: number
+): SceneDraft {
+  const next: SceneDraft = { ...scene, pieces: { ...scene.pieces } };
+
+  for (const id of ids) {
+    const p = next.pieces[id];
+    if (!p) continue;
+
+    // Centre actuel (AABB-aware)
+    const curCenter = pieceCenter(p);
+
+    // Nouveau centre après scaling about pivot: center' = pivot + scale * (center - pivot)
+    const newCenter = {
+      x: (pivot.x + (curCenter.x - pivot.x) * scale) as Milli,
+      y: (pivot.y + (curCenter.y - pivot.y) * scale) as Milli,
+    };
+
+    // Dimensions intrinsèques scalées
+    const w1 = (p.size.w * scale) as Milli;
+    const h1 = (p.size.h * scale) as Milli;
+
+    // AABB finale selon l'angle courant (rotation inchangée)
+    const ext = aabbExtentsFromIntrinsic({ w: w1, h: h1 }, (p.rotationDeg ?? 0) as Deg);
+
+    // Top-left de l'AABB finale = centre - (extents / 2)
+    const aabbTopLeft = {
+      x: (newCenter.x - ext.w / 2) as Milli,
+      y: (newCenter.y - ext.h / 2) as Milli,
+    };
+
+    // Convertir AABB → piece.position en tenant compte de la rotation
+    const tempPiece: Piece = { ...p, size: { w: w1, h: h1 } };
+    const newPosition = aabbToPiecePosition(aabbTopLeft.x, aabbTopLeft.y, tempPiece);
+
+    // Ne modifier que size et position (rotationDeg reste inchangé)
+    next.pieces[id] = {
+      ...p,
+      size: { w: w1, h: h1 },
+      position: { x: newPosition.x as Milli, y: newPosition.y as Milli },
+    };
+  }
+
+  return next;
 }
 
 // Helper to convert resize handle to moved direction
@@ -120,6 +410,14 @@ function computeGroupBBox(draft: SceneState) {
 }
 
 /**
+ * Bump handles epoch to force remount of overlays/handles
+ * Call this at the end of any transient operation or selection change
+ */
+function bumpHandlesEpoch(draft: SceneState) {
+  draft.ui.handlesEpoch = (draft.ui.handlesEpoch ?? 0) + 1;
+}
+
+/**
  * Clears transient UI state (drag/resize previews, guides, marquee)
  * while preserving selection state (selectedId/selectedIds/primaryId)
  */
@@ -177,13 +475,18 @@ type SceneState = {
       baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
     };
     groupResizing?: {
-      handle: ResizeHandle;
-      originBBox: { x: Milli; y: Milli; w: Milli; h: Milli };
-      startPointerMm: { x: Milli; y: Milli };
-      pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }>;
-      snapshot: SceneStateSnapshot;
-      baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
-      memberIds: Set<ID>;
+      isResizing: boolean;
+      pivot: { x: Milli; y: Milli };
+      startSnapshot: SceneStateSnapshot;
+      startPointer: { x: Milli; y: Milli };
+      startRadius: Milli;
+      lastScale?: number;
+      preview?: {
+        scale: number;
+        bbox: { x: Milli; y: Milli; w: Milli; h: Milli };
+        selectedIds: ID[];
+        groupDiagMm: number; // Diagonal for dynamic precision
+      };
     };
     groupBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
     lockEdge?: boolean;
@@ -209,6 +512,8 @@ type SceneState = {
     // Transient UI state during drag/resize (before commit)
     isTransientActive: boolean;
     transientBBox?: { x: Milli; y: Milli; w: Milli; h: Milli; rotationDeg?: Deg };
+    transientOpsRev?: number; // Counter incremented on begin/end/cancel to force remount of overlays
+    handlesEpoch: number; // Force remount of handles/overlays on selection/operation change
 
     // Transient delta for group ghost overlay during drag
     transientDelta?: { dx: Milli; dy: Milli };
@@ -267,8 +572,10 @@ type SceneActions = {
   updateResize: (pointerMm: { x: Milli; y: Milli }) => void;
   endResize: (commit: boolean) => void;
   startGroupResize: (handle: ResizeHandle, startPointerMm?: { x: Milli; y: Milli }) => void;
-  updateGroupResize: (pointerMm: { x: Milli; y: Milli }) => void;
+  updateGroupResize: (pointerMm: { x: Milli; y: Milli }, altKey?: boolean) => void;
+  _updateGroupResizeRafSafe: (args: {pointer: {x: Milli; y: Milli}; altKey: boolean}) => void;
   endGroupResize: (commit: boolean) => void;
+  cancelGroupResize: () => void;
   setLockEdge: (on: boolean) => void;
   focusPiece: (id: ID) => void;
   flashOutline: (id: ID) => void;
@@ -291,6 +598,40 @@ function takeSnapshot(s: SceneState): SceneStateSnapshot {
       primaryId: s.ui.primaryId,
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helper: pré-validation rotation
+// ─────────────────────────────────────────────────────────────────────────
+// Construit une scène candidate avec les rotations appliquées, puis valide
+// overlap (AABB rotation-aware) + inside scene. Retourne true si valide.
+// Utilisé par rotateSelected et setSelectedRotation pour empêcher overlaps.
+function rotationWouldBeValid(
+  sceneDraft: SceneDraft,
+  candidateIds: ID[],
+  nextDegById: Record<ID, Deg>
+): boolean {
+  // Construire une scène candidate pour validation (deep copy pour sécurité)
+  const sceneCandidate: SceneDraft = JSON.parse(JSON.stringify(sceneDraft));
+
+  // Appliquer la rotation candidate aux pièces concernées
+  for (const id of candidateIds) {
+    const p = sceneCandidate.pieces[id];
+    if (!p) continue;
+    const nxt = nextDegById[id];
+    if (nxt === undefined) continue;
+    sceneCandidate.pieces[id].rotationDeg = nxt;
+  }
+
+  // 1) Valider collisions (ignore auto-collisions internes au groupe)
+  const overlap = validateNoOverlapForCandidateDraft(sceneCandidate, candidateIds);
+  if (!overlap.ok) return false;
+
+  // 2) Valider bornes de scène (AABB rotation-aware via pieceBBox)
+  const inside = validateInsideScene(sceneCandidate);
+  if (!inside.ok) return false;
+
+  return true;
 }
 
 // Helper: restore snapshot
@@ -357,6 +698,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     snap10mm: true,
     guides: undefined,
     isTransientActive: false,
+    handlesEpoch: 0,
     history: {
       past: [],
       future: [],
@@ -490,6 +832,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = id ? [id] : undefined;
       draft.ui.primaryId = id;
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   selectOnly: (id) =>
@@ -498,6 +841,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = [id];
       draft.ui.primaryId = id;
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   toggleSelect: (id) =>
@@ -514,6 +858,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.primaryId = id;
       }
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   clearSelection: () =>
@@ -522,6 +867,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedIds = undefined;
       draft.ui.primaryId = undefined;
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   selectAll: () =>
@@ -531,6 +877,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = allIds[0];
       draft.ui.primaryId = allIds[0];
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   setSelection: (ids) =>
@@ -540,6 +887,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.selectedId = validIds[0];
       draft.ui.primaryId = validIds[0];
       computeGroupBBox(draft);
+      bumpHandlesEpoch(draft);
     })),
 
   startMarquee: (x, y) =>
@@ -750,6 +1098,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         groupOffsets,
         affectsSelection,
       };
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
     })),
 
   updateDrag: (dx, dy) =>
@@ -1101,6 +1450,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.isTransientActive = false;
       draft.ui.transientBBox = undefined;
       draft.ui.transientDelta = undefined;
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+      bumpHandlesEpoch(draft);
 
       // If ghost is active, validate after drag
       const hasGhost = draft.ui.ghost !== undefined;
@@ -1127,6 +1478,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.guides = undefined;
       draft.ui.isTransientActive = false;
       draft.ui.transientBBox = undefined;
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+      bumpHandlesEpoch(draft);
     })),
 
   addRectAtCenter: (w, h) =>
@@ -1272,19 +1625,54 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
 
-      const snap = takeSnapshot(draft);
+      // Groupe (>1 pièce) → rotation rigide autour du pivot commun
+      if (selectedIds.length > 1) {
+        const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
+          deltaDeg: deltaDeg as 90 | -90,
+        });
+        const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
+        const inside = validateInsideScene(candidate);
 
-      for (const selectedId of selectedIds) {
-        const piece = draft.scene.pieces[selectedId];
-        if (!piece) continue;
-        const currentDeg = (piece.rotationDeg ?? 0) as Deg;
-        piece.rotationDeg = deltaDeg === 90 ? add90(currentDeg) : sub90(currentDeg);
+        if (!overlap.ok || !inside.ok) {
+          draft.ui.flashInvalidAt = Date.now();
+          return; // NO-OP
+        }
+
+        const snap = takeSnapshot(draft);
+        draft.scene = candidate;
+        clearTransientUI(draft.ui);
+        draft.scene.revision++;
+        bumpHandlesEpoch(draft);
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+        return;
       }
 
-      // Clear transient UI state after rotation
-      clearTransientUI(draft.ui);
+      // Solo → rotation simple (pré-validation déjà en place)
+      const nextDegById: Record<ID, Deg> = {};
+      for (const id of selectedIds) {
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+        const cur = (piece.rotationDeg ?? 0) as Deg;
+        nextDegById[id] = (deltaDeg === 90 ? add90(cur) : sub90(cur)) as Deg;
+      }
 
+      const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
+      if (!ok) {
+        draft.ui.flashInvalidAt = Date.now();
+        return; // NO-OP
+      }
+
+      const snap = takeSnapshot(draft);
+      for (const id of selectedIds) {
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+        piece.rotationDeg = nextDegById[id]!;
+      }
+
+      clearTransientUI(draft.ui);
       draft.scene.revision++;
+      bumpHandlesEpoch(draft);
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
     })),
@@ -1294,18 +1682,55 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length === 0) return;
 
-      const snap = takeSnapshot(draft);
+      // Groupe (>1 pièce) → rotation rigide autour du pivot commun
+      if (selectedIds.length > 1) {
+        const target = normDeg(deg) as Deg;
+        const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
+          targetDeg: target,
+        });
+        const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
+        const inside = validateInsideScene(candidate);
 
-      for (const selectedId of selectedIds) {
-        const piece = draft.scene.pieces[selectedId];
-        if (!piece) continue;
-        piece.rotationDeg = normDeg(deg);
+        if (!overlap.ok || !inside.ok) {
+          draft.ui.flashInvalidAt = Date.now();
+          return; // NO-OP
+        }
+
+        const snap = takeSnapshot(draft);
+        draft.scene = candidate;
+        clearTransientUI(draft.ui);
+        draft.scene.revision++;
+        bumpHandlesEpoch(draft);
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+        return;
       }
 
-      // Clear transient UI state after rotation
-      clearTransientUI(draft.ui);
+      // Solo → rotation simple (pré-validation déjà en place)
+      const target = normDeg(deg) as Deg;
+      const nextDegById: Record<ID, Deg> = {};
+      for (const id of selectedIds) {
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+        nextDegById[id] = target;
+      }
 
+      const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
+      if (!ok) {
+        draft.ui.flashInvalidAt = Date.now();
+        return; // NO-OP
+      }
+
+      const snap = takeSnapshot(draft);
+      for (const id of selectedIds) {
+        const piece = draft.scene.pieces[id];
+        if (!piece) continue;
+        piece.rotationDeg = target;
+      }
+
+      clearTransientUI(draft.ui);
       draft.scene.revision++;
+      bumpHandlesEpoch(draft);
       pushHistory(draft, snap);
       autosave(takeSnapshot(draft));
     })),
@@ -1958,83 +2383,124 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.effects.flashUntil = Date.now() + 500;
     })),
 
-  startGroupResize: (handle, startPointerMm) => {
-    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
-    return;
-  },
-
-  // Legacy implementation disabled
-  _startGroupResize_disabled: (handle, startPointerMm) =>
+  startGroupResize: (handle, startPointerMm) =>
     set(produce((draft: SceneState) => {
       const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
       if (selectedIds.length < 2) return;
 
-      computeGroupBBox(draft);
-      if (!draft.ui.groupBBox) return;
+      // Calcul du pivot (centre de la bbox union)
+      const pivot = groupPivot(draft.scene, selectedIds);
 
-      const snapshot = takeSnapshot(draft);
-      const pieceOrigins: Record<ID, { x: Milli; y: Milli; w: Milli; h: Milli }> = {};
-      const memberIds = new Set<ID>(selectedIds);
+      // Snapshot pour rollback possible
+      const startSnapshot = takeSnapshot(draft);
 
-      for (const id of selectedIds) {
-        const p = draft.scene.pieces[id];
-        if (!p) continue;
-        pieceOrigins[id] = {
-          x: p.position.x,
-          y: p.position.y,
-          w: p.size.w,
-          h: p.size.h,
-        };
-      }
-
-      // Calculate baseline gaps for all external neighbors (not in group)
-      const baseline: Record<string, { axis: 'X' | 'Y'; gap: number }> = {};
-
-      // For each piece in the group, find its neighbors outside the group
-      for (const id of selectedIds) {
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
-
-        const pieceAABB = pieceBBox(piece);
-
-        // Find all pieces on same layer that are NOT in the group
-        const externalNeighbors = Object.values(draft.scene.pieces).filter(
-          p => p.layerId === piece.layerId && !memberIds.has(p.id)
-        );
-
-        for (const neighbor of externalNeighbors) {
-          const neighborAABB = pieceBBox(neighbor);
-          const gap = aabbGapLocal(pieceAABB, neighborAABB);
-          const axis = dominantSpacingAxisLocal(pieceAABB, neighborAABB);
-
-          // Store baseline gap (use minimum gap if multiple group members touch same neighbor)
-          const existing = baseline[neighbor.id];
-          if (!existing || gap < existing.gap) {
-            baseline[neighbor.id] = { axis, gap };
-          }
-        }
-      }
-
+      // Point de départ du curseur (ou centre du groupe par défaut)
       const defaultStart = {
-        x: draft.ui.groupBBox.x + draft.ui.groupBBox.w / 2,
-        y: draft.ui.groupBBox.y + draft.ui.groupBBox.h / 2,
+        x: pivot.x,
+        y: pivot.y,
+      };
+      const startPointer = startPointerMm || defaultStart;
+
+      // Rayon initial (distance pivot → curseur)
+      const startRadius = distance(pivot, startPointer);
+
+      // Calculer bbox initiale et diagonale pour precision dynamique
+      const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
+      const groupW = L + R;
+      const groupH = T + B;
+      const groupDiagMm = Math.hypot(groupW, groupH);
+      const bbox: { x: Milli; y: Milli; w: Milli; h: Milli } = {
+        x: (pivot.x - L) as Milli,
+        y: (pivot.y - T) as Milli,
+        w: groupW as Milli,
+        h: groupH as Milli,
       };
 
       draft.ui.groupResizing = {
-        handle,
-        originBBox: { ...draft.ui.groupBBox },
-        startPointerMm: startPointerMm || defaultStart,
-        pieceOrigins,
-        snapshot,
-        baseline,
-        memberIds,
+        isResizing: true,
+        pivot,
+        startSnapshot,
+        startPointer,
+        startRadius,
+        lastScale: 1,
+        preview: {
+          scale: 1,
+          bbox,
+          selectedIds,
+          groupDiagMm,
+        },
       };
+      draft.ui.isTransientActive = true;
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
     })),
 
-  updateGroupResize: (pointerMm) => {
-    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
-    return;
+  updateGroupResize: (pointerMm, altKey = false) => {
+    // Schedule update via RAF to throttle pointermove events (1 update/frame)
+    scheduleGroupResize(
+      (args) => useSceneStore.getState()._updateGroupResizeRafSafe(args),
+      { pointer: pointerMm, altKey }
+    );
   },
+
+  // RAF-safe internal update (called once per frame, mutates only preview)
+  _updateGroupResizeRafSafe: ({pointer, altKey}: {pointer: {x: Milli; y: Milli}; altKey: boolean}) =>
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.groupResizing;
+      if (!resizing?.isResizing || !resizing.preview) return;
+
+      const selectedIds = resizing.preview.selectedIds;
+      if (selectedIds.length < 2) return;
+
+      const { pivot, startRadius, preview } = resizing;
+
+      // Calcul du facteur de scale basé sur la distance radiale
+      const currentRadius = distance(pivot, pointer);
+      const sRaw = currentRadius / Math.max(1 as Milli, startRadius);
+
+      // Dynamic precision based on group size
+      // base = 0.25% of diagonal (min 0.5mm), Alt = 4× finer
+      const groupRadiusMm = startRadius;
+      const base = Math.max(0.5, 0.0025 * preview.groupDiagMm);
+      const precisionMm = altKey ? base * 0.25 : base;
+      const precisionScale = precisionMm / groupRadiusMm;
+      const sSmooth = Math.round(sRaw / precisionScale) * precisionScale;
+
+      // Analytical clamp: calculate max scale to keep group inside scene bounds
+      const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
+      const sceneW = draft.scene.size.w;
+      const sceneH = draft.scene.size.h;
+
+      // Calculate max scale factors for each boundary
+      const sMaxLeft = L > 0 ? pivot.x / L : Infinity;
+      const sMaxRight = R > 0 ? (sceneW - pivot.x) / R : Infinity;
+      const sMaxTop = T > 0 ? pivot.y / T : Infinity;
+      const sMaxBottom = B > 0 ? (sceneH - pivot.y) / B : Infinity;
+      const sMaxScene = Math.min(sMaxLeft, sMaxRight, sMaxTop, sMaxBottom);
+
+      // Calculate min scale from piece min sizes (5mm)
+      const MIN_SIZE_MM = 5 as Milli;
+      let sMinPieces = 0;
+      for (const id of selectedIds) {
+        const p = draft.scene.pieces[id];
+        if (!p) continue;
+        const minDim = Math.min(p.size.w, p.size.h);
+        const sMin = MIN_SIZE_MM / minDim;
+        sMinPieces = Math.max(sMinPieces, sMin);
+      }
+
+      // Apply all clamps: clamp to [sMinPieces, sMaxScene]
+      const scale = Math.max(sMinPieces, Math.min(sMaxScene, sSmooth));
+
+      // Update ONLY the preview (no scene mutation during drag)
+      resizing.preview.scale = scale;
+      resizing.preview.bbox = {
+        x: (pivot.x - L * scale) as Milli,
+        y: (pivot.y - T * scale) as Milli,
+        w: ((L + R) * scale) as Milli,
+        h: ((T + B) * scale) as Milli,
+      };
+      resizing.lastScale = scale;
+    })),
 
   // Legacy implementation disabled
   _updateGroupResize_disabled: (pointerMm) => {
@@ -2204,92 +2670,89 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.ui.groupBBox = groupBBox;
     })),
 
-  endGroupResize: (commit) => {
-    // Désactivé pour multi-sélection: pas de resize de groupe (Option A)
-    return;
-  },
-
-  // Legacy implementation disabled
-  _endGroupResize_disabled: (commit) =>
+  endGroupResize: (commit) =>
     set(produce((draft: SceneState) => {
       const resizing = draft.ui.groupResizing;
-      if (!resizing) return;
+      if (!resizing?.isResizing) return;
 
-      if (commit) {
-        // Check if dimensions actually changed
-        const changed = Object.keys(resizing.pieceOrigins).some(id => {
-          const p = draft.scene.pieces[id];
-          const orig = resizing.pieceOrigins[id];
-          if (!p || !orig) return false;
-          return p.position.x !== orig.x || p.position.y !== orig.y ||
-                 p.size.w !== orig.w || p.size.h !== orig.h;
-        });
+      const selectedIds = draft.ui.selectedIds ?? [];
+      if (selectedIds.length < 2) {
+        draft.ui.groupResizing = undefined;
+        draft.ui.isTransientActive = false;
+        return;
+      }
 
-        if (changed) {
-          // Check if ghost has BLOCK problems
-          const selectedIds = draft.ui.selectedIds ?? [];
-          const hasGhostBlock = draft.ui.ghost?.problems?.some(p => p.level === 'BLOCK');
-
-          if (hasGhostBlock) {
-            // Rollback to origins
-            for (const [id, orig] of Object.entries(resizing.pieceOrigins)) {
-              const p = draft.scene.pieces[id];
-              if (!p) continue;
-              p.position.x = orig.x;
-              p.position.y = orig.y;
-              p.size.w = orig.w;
-              p.size.h = orig.h;
-            }
-            computeGroupBBox(draft);
-
-            // Show toast
-            draft.ui.toast = {
-              message: 'Resize groupe bloqué : chevauchement ou écart < 1,0 mm',
-              until: Date.now() + 2500,
-            };
-
-            // Clear ghost
-            if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-              draft.ui.ghost = undefined;
-            }
-
-            incResizeBlockCommitBlocked();
-          } else {
-            // Commit successfully
-            draft.scene.revision++;
-            pushHistory(draft, resizing.snapshot);
-            autosave(takeSnapshot(draft));
-
-            // Clear ghost
-            if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-              draft.ui.ghost = undefined;
-            }
-
-            incResizeBlockCommitSuccess();
-          }
-        }
-      } else {
-        // Rollback to origins
-        for (const [id, orig] of Object.entries(resizing.pieceOrigins)) {
-          const p = draft.scene.pieces[id];
-          if (!p) continue;
-          p.position.x = orig.x;
-          p.position.y = orig.y;
-          p.size.w = orig.w;
-          p.size.h = orig.h;
-        }
+      if (!commit) {
+        // Cancel: restore from snapshot
+        draft.scene = resizing.startSnapshot.scene;
+        draft.ui.groupResizing = undefined;
+        draft.ui.isTransientActive = false;
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
         computeGroupBBox(draft);
+        return;
+      }
 
-        // Clear ghost on cancel
-        const selectedIds = draft.ui.selectedIds ?? [];
-        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-          draft.ui.ghost = undefined;
+      // Commit: recalculer avec le dernier scale pour refaire validation finale
+      const { pivot, lastScale } = resizing;
+      const scale = lastScale ?? 1;
+
+      const candidate = buildGroupScaleCandidate(draft.scene, selectedIds, pivot, scale);
+
+      // Validation finale (même logique que updateGroupResize)
+      const MIN_SIZE_MM = 5 as Milli;
+      let hasMinSizeViolation = false;
+      for (const id of selectedIds) {
+        const p = candidate.pieces[id];
+        if (!p) continue;
+        if (p.size.w < MIN_SIZE_MM || p.size.h < MIN_SIZE_MM) {
+          hasMinSizeViolation = true;
+          break;
         }
       }
 
+      const insideOk = validateInsideScene(candidate, selectedIds);
+      const overlapOk = validateNoOverlapForCandidateDraft(candidate, selectedIds).ok;
+      const isValid = !hasMinSizeViolation && insideOk && overlapOk;
+
+      if (!isValid) {
+        // Rollback + flash
+        draft.scene = resizing.startSnapshot.scene;
+        draft.ui.flashInvalidAt = Date.now();
+      } else {
+        // Commit OK
+        draft.scene = candidate;
+        draft.scene.revision++;
+        pushHistory(draft, resizing.startSnapshot);
+        autosave(takeSnapshot(draft));
+      }
+
+      // Cancel any pending RAF callback to prevent late updates
+      cancelGroupResizeRaf();
+
       draft.ui.groupResizing = undefined;
-      draft.ui.guides = undefined;
+      draft.ui.isTransientActive = false;
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+      bumpHandlesEpoch(draft);
+      computeGroupBBox(draft);
     })),
+
+  cancelGroupResize: () => {
+    // Cancel any pending RAF callback immediately
+    cancelGroupResizeRaf();
+
+    set(produce((draft: SceneState) => {
+      const resizing = draft.ui.groupResizing;
+      if (!resizing?.isResizing) return;
+
+      // Restore from snapshot
+      draft.scene = resizing.startSnapshot.scene;
+      draft.ui.groupResizing = undefined;
+      draft.ui.isTransientActive = false;
+      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+      bumpHandlesEpoch(draft);
+      computeGroupBBox(draft);
+    }));
+  },
 
   /**
    * Helper: find a free spot for a piece by testing positions in a spiral pattern.

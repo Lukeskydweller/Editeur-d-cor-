@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore } from '@/state/useSceneStore';
@@ -119,6 +119,106 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
+  // E2E API: expose window.__e2e if ?e2e=1 flag is set
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('e2e') !== '1') return;
+
+    type SeedPiece = { id?: string; x: number; y: number; w: number; h: number; deg?: 0 | 90 | 180 | 270 };
+
+    (window as any).__e2e = {
+      seedPieces: (pieces: SeedPiece[]) => {
+        const store = useSceneStore.getState();
+
+        // Create clean scene with stable piece IDs
+        const newPieces: Record<string, any> = {};
+        const layerId = Object.keys(store.scene.layers)[0];
+
+        pieces.forEach((p, idx) => {
+          const id = p.id || `piece-${idx}`;
+          newPieces[id] = {
+            id,
+            layerId,
+            materialId: Object.keys(store.scene.materials)[0],
+            position: { x: p.x, y: p.y },
+            rotationDeg: p.deg ?? 0,
+            scale: { x: 1, y: 1 },
+            kind: 'rect' as const,
+            size: { w: p.w, h: p.h },
+          };
+        });
+
+        useSceneStore.setState((state) => ({
+          scene: {
+            ...state.scene,
+            pieces: newPieces,
+            revision: (state.scene.revision ?? 0) + 1,
+          },
+          ui: {
+            ...state.ui,
+            selectedId: undefined,
+            selectedIds: undefined,
+          },
+        }));
+      },
+
+      getSceneSnapshot: () => {
+        const state = useSceneStore.getState();
+        // Add computed _aabb for each piece for test convenience
+        const piecesWithAABB: Record<string, any> = {};
+        Object.entries(state.scene.pieces).forEach(([id, piece]) => {
+          const bbox = pieceBBox(piece);
+          piecesWithAABB[id] = { ...piece, _aabb: bbox };
+        });
+
+        return {
+          scene: {
+            ...state.scene,
+            pieces: piecesWithAABB,
+          },
+          ui: state.ui,
+        };
+      },
+
+      selectAll: () => {
+        const store = useSceneStore.getState();
+        const allIds = Object.keys(store.scene.pieces);
+        useSceneStore.setState((state) => ({
+          ui: {
+            ...state.ui,
+            selectedId: undefined,
+            selectedIds: allIds,
+          },
+        }));
+      },
+
+      select: (ids: string[]) => {
+        useSceneStore.setState((state) => ({
+          ui: {
+            ...state.ui,
+            selectedId: ids.length === 1 ? ids[0] : undefined,
+            selectedIds: ids.length > 1 ? ids : undefined,
+          },
+        }));
+      },
+
+      rotateDelta: (deg: 90 | -90) => {
+        const store = useSceneStore.getState();
+        store.rotateSelected(deg);
+      },
+
+      rotateAbs: (deg: 0 | 90 | 180 | 270) => {
+        const store = useSceneStore.getState();
+        store.setSelectedRotation(deg);
+      },
+    };
+
+    // Cleanup on unmount
+    return () => {
+      delete (window as any).__e2e;
+    };
+  }, []);
+
   // Gestion du nudge clavier + Delete + Rotation + Duplication + Escape + Ctrl+A + Undo/Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -230,6 +330,29 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo, resizing, endResize, snap10mm]);
 
+  // Global listeners to end/cancel operations on window blur or pointerup outside canvas
+  React.useEffect(() => {
+    const onWindowUp = () => {
+      const s = useSceneStore.getState();
+      if (s.ui.groupResizing?.isResizing) s.endGroupResize(true);
+      if (s.ui.dragging) s.endDrag();
+    };
+
+    const onWindowBlur = () => {
+      const s = useSceneStore.getState();
+      if (s.ui.groupResizing?.isResizing) s.endGroupResize(true);
+      if (s.ui.dragging) s.endDrag();
+    };
+
+    window.addEventListener('pointerup', onWindowUp);
+    window.addEventListener('blur', onWindowBlur);
+
+    return () => {
+      window.removeEventListener('pointerup', onWindowUp);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, []);
+
   // Export JSON
   const handleExport = () => {
     const data = toSceneFileV1();
@@ -335,6 +458,8 @@ export default function App() {
       const svgY = (e.clientY - rect.top) * resizeFactorRef.current;
 
       updateResize({ x: svgX, y: svgY });
+    } else if (groupResizing && groupResizeStartRef.current) {
+      handleGroupResizeMove(e.clientX, e.clientY, e.altKey);
     } else if (marquee && marqueeStartRef.current) {
       const rect = svgRef.current?.getBoundingClientRect();
       if (!rect) return;
@@ -354,6 +479,10 @@ export default function App() {
       endResize(true);
       resizeStartRef.current = null;
       resizeFactorRef.current = 1;
+    } else if (groupResizing) {
+      endGroupResize(true);
+      groupResizeStartRef.current = null;
+      groupResizeFactorRef.current = 1;
     } else if (marquee) {
       endMarquee();
       marqueeStartRef.current = null;
@@ -370,6 +499,10 @@ export default function App() {
       endResize(false);
       resizeStartRef.current = null;
       resizeFactorRef.current = 1;
+    } else if (groupResizing) {
+      endGroupResize(false);
+      groupResizeStartRef.current = null;
+      groupResizeFactorRef.current = 1;
     } else if (marquee) {
       endMarquee();
       marqueeStartRef.current = null;
@@ -429,7 +562,7 @@ export default function App() {
     updateGroupResize({ x: svgX, y: svgY });
   };
 
-  const handleGroupResizeMove = (clientX: number, clientY: number) => {
+  const handleGroupResizeMove = (clientX: number, clientY: number, altKey = false) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect || !groupResizeStartRef.current) return;
 
@@ -437,7 +570,7 @@ export default function App() {
     const svgX = (clientX - rect.left) * factor;
     const svgY = (clientY - rect.top) * factor;
 
-    updateGroupResize({ x: svgX, y: svgY });
+    updateGroupResize({ x: svgX, y: svgY }, altKey);
   };
 
   const handleGroupResizeEnd = () => {
@@ -474,24 +607,24 @@ export default function App() {
               <div className="flex items-center gap-4 flex-wrap">
                 <div className="flex gap-2">
                   <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
-                  <Button onClick={duplicateSelected} disabled={!selectedId}>
+                  <Button onClick={duplicateSelected} disabled={!selectedId && !selectedIds?.length}>
                     Dupliquer
                   </Button>
-                  <Button onClick={deleteSelected} disabled={!selectedId} variant="destructive">
+                  <Button onClick={deleteSelected} disabled={!selectedId && !selectedIds?.length} variant="destructive">
                     Supprimer
                   </Button>
                 </div>
                 <div className="flex gap-2">
-                  <Button onClick={() => rotateSelected(-90)} disabled={!selectedId} size="sm">
+                  <Button onClick={() => rotateSelected(-90)} disabled={!selectedId && !selectedIds?.length} size="sm">
                     Rotate −90°
                   </Button>
-                  <Button onClick={() => rotateSelected(90)} disabled={!selectedId} size="sm">
+                  <Button onClick={() => rotateSelected(90)} disabled={!selectedId && !selectedIds?.length} size="sm">
                     Rotate +90°
                   </Button>
-                  <Button onClick={() => setSelectedRotation(0)} disabled={!selectedId} size="sm" variant="outline">
+                  <Button onClick={() => setSelectedRotation(0)} disabled={!selectedId && !selectedIds?.length} size="sm" variant="outline">
                     Rotation 0°
                   </Button>
-                  <Button onClick={() => setSelectedRotation(90)} disabled={!selectedId} size="sm" variant="outline">
+                  <Button onClick={() => setSelectedRotation(90)} disabled={!selectedId && !selectedIds?.length} size="sm" variant="outline">
                     Rotation 90°
                   </Button>
                 </div>
@@ -703,7 +836,7 @@ export default function App() {
               {/* Group ghost overlay - shows ghost for each selected piece during drag */}
               <GroupGhostOverlay />
               {/* Selection handles - rendered in same coordinate space as pieces */}
-              <SelectionHandles />
+              <SelectionHandles onGroupResizeStart={handleGroupResizeStart} />
               {/* bordure scène */}
               <rect
                 x="0.5"
@@ -744,17 +877,7 @@ export default function App() {
                 />
               );
             })()}
-            {/* Group resize handles for multi-selection */}
-            {selectedIds && selectedIds.length >= 2 && selectionBBox && (
-              <ResizeHandlesOverlay
-                rect={selectionBBox}
-                svgElement={svgRef.current}
-                onStart={(handle, clientX, clientY) => handleGroupResizeStart(handle, clientX, clientY)}
-                onMove={handleGroupResizeMove}
-                onEnd={handleGroupResizeEnd}
-                isResizing={!!groupResizing}
-              />
-            )}
+            {/* Group resize handles: handled by SelectionHandles inside SVG (no separate overlay) */}
               </div>
             </CardContent>
           </Card>
