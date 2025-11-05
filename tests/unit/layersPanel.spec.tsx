@@ -54,12 +54,15 @@ describe('Layers Panel UI', () => {
 
     const { rerender } = render(<Sidebar />);
 
-    // C1 should have active badge initially
+    // C1 should have filled badge (●) initially
     const c1Badge = screen.getByTestId('active-layer-badge-C1');
     expect(c1Badge).toBeDefined();
+    expect(c1Badge.textContent).toBe('●');
 
-    // C2 should not have active badge
-    expect(() => screen.getByTestId('active-layer-badge-C2')).toThrow();
+    // C2 should have empty badge (○)
+    const c2Badge = screen.getByTestId('active-layer-badge-C2');
+    expect(c2Badge).toBeDefined();
+    expect(c2Badge.textContent).toBe('○');
 
     // Click C2
     const c2Row = screen.getByTestId('layer-row-C2');
@@ -68,9 +71,13 @@ describe('Layers Panel UI', () => {
     // Re-render to see updated badges
     rerender(<Sidebar />);
 
-    // Now C2 should have active badge
-    const c2Badge = screen.getByTestId('active-layer-badge-C2');
-    expect(c2Badge).toBeDefined();
+    // Now C2 should have filled badge (●)
+    const c2BadgeAfter = screen.getByTestId('active-layer-badge-C2');
+    expect(c2BadgeAfter.textContent).toBe('●');
+
+    // And C1 should have empty badge (○)
+    const c1BadgeAfter = screen.getByTestId('active-layer-badge-C1');
+    expect(c1BadgeAfter.textContent).toBe('○');
   });
 
   test('layer row has correct visual styling for active state', () => {
