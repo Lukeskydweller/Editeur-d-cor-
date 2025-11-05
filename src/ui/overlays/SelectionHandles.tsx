@@ -116,38 +116,9 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
 
   if (!bbox) return null;
 
-  // During group resize: show dashed preview with scale indicator, no handles
-  if (ui.groupResizing?.isResizing && ui.groupResizing.preview) {
-    const scale = ui.groupResizing.preview.scale ?? 1;
-    const scaleText = `×${scale.toFixed(2)}`;
-    const centerX = bbox.x + bbox.w / 2;
-    const centerY = bbox.y + bbox.h / 2;
-
-    return (
-      <g data-testid="selection-handles-group-preview" data-layer="handles" key={key}>
-        <rect
-          x={bbox.x}
-          y={bbox.y}
-          width={bbox.w}
-          height={bbox.h}
-          fill="none"
-          stroke="#3b82f6"
-          strokeWidth={1}
-          strokeDasharray="4 2"
-        />
-        <text
-          x={centerX}
-          y={centerY}
-          fill="#3b82f6"
-          fontSize={12}
-          textAnchor="middle"
-          dominantBaseline="middle"
-          pointerEvents="none"
-        >
-          {scaleText}
-        </text>
-      </g>
-    );
+  // During group resize: hide handles (preview is shown by GroupResizePreview component)
+  if (ui.groupResizing?.isResizing) {
+    return null;
   }
 
   // Multi-selection: render group bbox with handles

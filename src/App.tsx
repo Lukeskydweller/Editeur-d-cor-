@@ -15,6 +15,7 @@ import DebugNudgeGap from '@/ui/debug/DebugNudgeGap';
 import { pieceAABB } from '@/lib/geom/aabb';
 import SelectionHandles from '@/ui/overlays/SelectionHandles';
 import GroupGhostOverlay from '@/ui/overlays/GroupGhostOverlay';
+import GroupResizePreview from '@/ui/overlays/GroupResizePreview';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -835,6 +836,8 @@ export default function App() {
               })()}
               {/* Group ghost overlay - shows ghost for each selected piece during drag */}
               <GroupGhostOverlay />
+              {/* Group resize preview - live visual feedback during group resize */}
+              <GroupResizePreview />
               {/* Selection handles - rendered in same coordinate space as pieces */}
               <SelectionHandles onGroupResizeStart={handleGroupResizeStart} />
               {/* bordure scène */}

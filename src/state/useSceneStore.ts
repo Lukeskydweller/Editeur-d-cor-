@@ -486,6 +486,10 @@ type SceneState = {
         bbox: { x: Milli; y: Milli; w: Milli; h: Milli };
         selectedIds: ID[];
         groupDiagMm: number; // Diagonal for dynamic precision
+        previewPieces?: Array<{
+          id: ID;
+          matrix: { a: number; b: number; c: number; d: number; e: number; f: number };
+        }>;
       };
     };
     groupBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
@@ -2500,6 +2504,33 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         h: ((T + B) * scale) as Milli,
       };
       resizing.lastScale = scale;
+
+      // Compute preview matrices for each piece (live visual transform)
+      // Matrix represents: translate(pivot) * scale(s) * translate(-pivot)
+      // This gives the visual transform without mutating scene.pieces
+      const previewPieces: Array<{
+        id: ID;
+        matrix: { a: number; b: number; c: number; d: number; e: number; f: number };
+      }> = [];
+
+      for (const id of selectedIds) {
+        const p = draft.scene.pieces[id];
+        if (!p) continue;
+
+        // Simple isotropic scale about pivot
+        // matrix = T(pivot) * S(scale) * T(-pivot)
+        const a = scale;
+        const d = scale;
+        const e = pivot.x * (1 - scale);
+        const f = pivot.y * (1 - scale);
+
+        previewPieces.push({
+          id,
+          matrix: { a, b: 0, c: 0, d, e, f },
+        });
+      }
+
+      resizing.preview.previewPieces = previewPieces;
     })),
 
   // Legacy implementation disabled
