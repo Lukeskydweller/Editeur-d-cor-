@@ -722,6 +722,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       future: [],
       limit: 100,
     },
+    layerVisibility: {},
+    layerLocked: {},
   },
 
   // Actions
