@@ -2,6 +2,8 @@ import React from 'react';
 import { useSceneStore } from '@/state/useSceneStore';
 import type { ID, Milli, SceneDraft } from '@/types/scene';
 import { pieceBBox } from '@/lib/geom';
+import { shallow } from 'zustand/shallow';
+import { EMPTY_ARR } from '@/state/constants';
 
 interface BBox {
   x: Milli;
@@ -89,25 +91,39 @@ interface SelectionHandlesProps {
 }
 
 export default function SelectionHandles({ onGroupResizeStart }: SelectionHandlesProps = {}) {
-  const ui = useSceneStore((s) => s.ui);
-  const scene = useSceneStore((s) => s.scene);
+  // Precise selectors - avoid subscribing to full ui/scene objects
+  const selectedId = useSceneStore((s) => s.ui.selectedId);
+  const selectedIds = useSceneStore((s) => s.ui.selectedIds, shallow);
+  const handlesEpoch = useSceneStore((s) => s.ui.handlesEpoch);
+  const sceneRevision = useSceneStore((s) => s.scene.revision);
+  const isDragging = useSceneStore((s) => !!s.ui.dragging);
+  const groupIsResizing = useSceneStore((s) => !!s.ui.groupResizing?.isResizing);
+  const groupPreviewBbox = useSceneStore((s) => s.ui.groupResizing?.preview?.bbox, shallow);
 
   // 1) clé de remount : si l'une des composantes change → remount propre
-  const selIds = ui.selectedIds ?? (ui.selectedId ? [ui.selectedId] : []);
+  const selIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
   const selKey = selIds.join(',');
-  const key = `${ui.handlesEpoch}:${scene.revision}:${selKey}`;
+  const key = `${handlesEpoch}:${sceneRevision}:${selKey}`;
 
-  // 2) masquer pendant drag, mais afficher preview pendant group resize
-  if (ui.dragging) return null;
+  // 2) masquer pendant drag
+  if (isDragging) return null;
+
+  // During group resize: hide handles (preview is shown by GroupResizePreview component)
+  if (groupIsResizing) {
+    return null;
+  }
 
   // 3) bbox courante rotation-aware : priorité preview > groupe > pièce
+  // Get scene pieces only when needed (not via subscription)
+  const pieces = useSceneStore.getState().scene.pieces;
+
   let bbox: BBox | null = null;
-  if (ui.groupResizing?.preview?.bbox) {
-    bbox = ui.groupResizing.preview.bbox;
+  if (groupPreviewBbox) {
+    bbox = groupPreviewBbox;
   } else if (selIds.length >= 2) {
-    bbox = computeGroupBBoxRotationAware(scene, selIds);
+    bbox = computeGroupBBoxRotationAware({ pieces } as SceneDraft, selIds);
   } else if (selIds.length === 1) {
-    const p = scene.pieces[selIds[0]];
+    const p = pieces[selIds[0]];
     if (p) {
       const b = pieceBBox(p);
       bbox = { x: b.x, y: b.y, w: b.w, h: b.h };
@@ -115,11 +131,6 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
   }
 
   if (!bbox) return null;
-
-  // During group resize: hide handles (preview is shown by GroupResizePreview component)
-  if (ui.groupResizing?.isResizing) {
-    return null;
-  }
 
   // Multi-selection: render group bbox with handles
   if (selIds.length >= 2) {

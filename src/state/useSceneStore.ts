@@ -24,6 +24,7 @@ import { projectDraftToV1 } from '@/sync/projector';
 import { incResizeBlockPreview, incResizeBlockCommitBlocked, incResizeBlockCommitSuccess } from '@/lib/metrics';
 import { collisionsForCandidate, spacingForCandidate, validateNoOverlapForCandidate, type ResizeContext } from '@/core/geo/validateAll';
 import { getRotatedAABB } from '@/core/geo/geometry';
+import { EPS_UI_MM, EMPTY_ARR } from '@/state/constants';
 
 // Helper to notify auto-spatial module after structural mutations
 function notifyAutoSpatial() {
@@ -473,6 +474,7 @@ type SceneState = {
       rotationDeg: Deg;
       snapshot: SceneStateSnapshot;
       baseline?: Record<string, { axis: 'X' | 'Y'; gap: number }>;
+      _lastResizeValidateMm?: { x: Milli; y: Milli };
     };
     groupResizing?: {
       isResizing: boolean;
@@ -523,6 +525,9 @@ type SceneState = {
     transientDelta?: { dx: Milli; dy: Milli };
     // Selection bbox (solo/group) for handles rendering
     selectionBBox?: { x: Milli; y: Milli; w: Milli; h: Milli };
+
+    // Active layer for editing (only pieces in this layer are interactive)
+    activeLayer?: ID;
   };
 };
 
@@ -532,6 +537,7 @@ type SceneActions = {
   setMaterialOrientation: (materialId: ID, orientationDeg: Deg) => void;
 
   addLayer: (name: string) => ID;
+  setActiveLayer: (layerId: ID) => void;
   addRectPiece: (layerId: ID, materialId: ID, w: Milli, h: Milli, x: Milli, y: Milli, rotationDeg?: Deg) => ID;
   movePiece: (pieceId: ID, x: Milli, y: Milli) => void;
   rotatePiece: (pieceId: ID, rotationDeg: Deg) => void;
@@ -722,6 +728,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         pieces: {},
         layerOrder: [],
       };
+      draft.ui.activeLayer = undefined; // Reset active layer
     })),
 
   addMaterial: (m) =>
@@ -749,6 +756,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.scene.layers[id] = layer;
       draft.scene.layerOrder.push(id);
     })) as unknown as ID,
+
+  setActiveLayer: (layerId) =>
+    set(produce((draft: SceneState) => {
+      if (draft.scene.layers[layerId]) {
+        draft.ui.activeLayer = layerId;
+      }
+    })),
 
   addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) => {
     const result = set(produce((draft: SceneState) => {
@@ -824,6 +838,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
       draft.scene.layers[layerId] = { id: layerId, name: 'C1', z: 0, pieces: [pieceId] };
       draft.scene.layerOrder.push(layerId);
+      draft.ui.activeLayer = layerId; // Set C1 as default active layer
       draft.scene.materials[materialId] = { id: materialId, name: 'Paper White 200gsm', oriented: false };
       draft.scene.pieces[pieceId] = {
         id: pieceId, layerId, materialId, position: { x: 40, y: 40 }, rotationDeg: 0, scale: { x: 1, y: 1 }, kind: 'rect', size: { w: 120, h: 80 },
@@ -2200,12 +2215,24 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         rotationDeg: piece.rotationDeg ?? 0,
       };
 
-      // Validate resize preview asynchronously (don't block UI)
-      Promise.resolve().then(async () => {
-        const currentState = useSceneStore.getState();
+      // EPS throttle: only validate if cursor moved ≥ EPS_UI_MM since last validation
+      // First update (no last validation) always validates
+      const lastValidateMm = resizing._lastResizeValidateMm;
+      const shouldValidate = !lastValidateMm || distance(pointerMm, lastValidateMm) >= EPS_UI_MM;
 
-        // Only validate if still resizing the same piece
-        if (currentState.ui.resizing?.pieceId !== resizingPieceId) return;
+      if (shouldValidate) {
+        // Update last validation position
+        draft.ui.resizing!._lastResizeValidateMm = { x: pointerMm.x, y: pointerMm.y };
+      }
+
+      // Validate resize preview asynchronously (don't block UI)
+      // Skip validation if cursor movement below EPS threshold
+      if (shouldValidate) {
+        Promise.resolve().then(async () => {
+          const currentState = useSceneStore.getState();
+
+          // Only validate if still resizing the same piece
+          if (currentState.ui.resizing?.pieceId !== resizingPieceId) return;
 
         // Project current scene to V1 for validation
         const sceneV1 = projectDraftToV1({ scene: currentState.scene });
@@ -2264,7 +2291,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             }
           })
         );
-      });
+        });
+      }
     })),
 
   endResize: (commit) =>
@@ -2539,7 +2567,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const resizing = draft.ui.groupResizing;
       if (!resizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? [];
+      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
       if (selectedIds.length < 2) return;
 
       const { originBBox, startPointerMm, handle, pieceOrigins } = resizing;
@@ -2612,7 +2640,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (!currentState.ui.groupResizing) return;
 
       const resizing = currentState.ui.groupResizing;
-      const selectedIds = currentState.ui.selectedIds ?? [];
+      const selectedIds = currentState.ui.selectedIds ?? (EMPTY_ARR as ID[]);
 
       // Project current scene to V1 for validation
       const sceneV1 = projectDraftToV1({ scene: currentState.scene });
@@ -2676,7 +2704,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(produce((draft: SceneState) => {
       if (!draft.ui.groupResizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? [];
+      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
       if (selectedIds.length < 2) return;
 
       if (problems && problems.length > 0) {
@@ -2706,7 +2734,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const resizing = draft.ui.groupResizing;
       if (!resizing?.isResizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? [];
+      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
       if (selectedIds.length < 2) {
         draft.ui.groupResizing = undefined;
         draft.ui.isTransientActive = false;
@@ -2782,7 +2810,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const resizing = draft.ui.groupResizing;
       if (!resizing?.isResizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? [];
+      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
 
       // Restore from snapshot
       draft.scene = resizing.startSnapshot.scene;

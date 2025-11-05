@@ -1,24 +1,28 @@
 import React from 'react';
 import { useSceneStore } from '@/state/useSceneStore';
-import type { ID } from '@/types/scene';
+import { EMPTY_ARR } from '@/state/constants';
+import type { ID, Milli } from '@/types/scene';
+import { shallow } from 'zustand/shallow';
 
 /**
  * Live preview overlay for group resize operations
  * Renders transformed pieces using SVG transform matrices
  * No scene mutations - pure visual preview
+ *
+ * CRITICAL: Uses precise selectors to avoid re-renders during non-group operations
  */
 export default function GroupResizePreview() {
-  // Use precise selectors to avoid unnecessary re-renders
-  const preview = useSceneStore((s) => s.ui.groupResizing?.preview);
-  const isResizing = useSceneStore((s) => s.ui.groupResizing?.isResizing ?? false);
-  const pieces = useSceneStore((s) => s.scene.pieces);
+  // Precise selectors - no subscription to full scene/ui objects
+  const preview = useSceneStore((s) => s.ui.groupResizing?.preview, shallow);
 
-  // Only render during active group resize with preview pieces
-  if (!isResizing || !preview?.previewPieces) {
+  if (!preview?.previewPieces || preview.previewPieces.length === 0) {
     return null;
   }
 
   const { previewPieces, scale, bbox } = preview;
+
+  // Get pieces directly from store only when rendering (not via hook subscription)
+  const pieces = useSceneStore.getState().scene.pieces;
 
   return (
     <g data-testid="group-resize-preview-overlay" data-layer="preview" pointerEvents="none">

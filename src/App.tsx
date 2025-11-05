@@ -16,6 +16,7 @@ import { pieceAABB } from '@/lib/geom/aabb';
 import SelectionHandles from '@/ui/overlays/SelectionHandles';
 import GroupGhostOverlay from '@/ui/overlays/GroupGhostOverlay';
 import GroupResizePreview from '@/ui/overlays/GroupResizePreview';
+import { EMPTY_ARR } from '@/state/constants';
 
 export default function App() {
   const scene = useSceneStore((s) => s.scene);
@@ -28,6 +29,7 @@ export default function App() {
   const effects = useSceneStore((s) => s.ui.effects);
 
   const dragging = useSceneStore((s) => s.ui.dragging);
+  const groupIsResizing = useSceneStore((s) => !!s.ui.groupResizing?.isResizing);
   const beginDrag = useSceneStore((s) => s.beginDrag);
   const updateDrag = useSceneStore((s) => s.updateDrag);
   const endDrag = useSceneStore((s) => s.endDrag);
@@ -80,7 +82,7 @@ export default function App() {
   // Compute selection bbox for group resize handles
   // Uses revision to invalidate when geometry changes (drag/resize/nudge/rotate/undo/redo)
   const selectionBBox = useMemo(() => {
-    const selectedIdsList = selectedIds ?? (selectedId ? [selectedId] : []);
+    const selectedIdsList = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
     if (selectedIdsList.length === 0) return null;
 
     // Single piece: return its AABB
@@ -738,7 +740,7 @@ export default function App() {
                 if (p.kind !== 'rect') return null;
                 const { x, y } = p.position;
                 const { w, h } = p.size;
-                const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : []);
+                const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
                 const isSelected = actualSelectedIds.includes(p.id);
                 const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
                 const isFocused = effects?.focusId === p.id;
@@ -836,8 +838,8 @@ export default function App() {
               })()}
               {/* Group ghost overlay - shows ghost for each selected piece during drag */}
               <GroupGhostOverlay />
-              {/* Group resize preview - live visual feedback during group resize */}
-              <GroupResizePreview />
+              {/* Group resize preview - ONLY mounted during active group resize */}
+              {groupIsResizing && <GroupResizePreview />}
               {/* Selection handles - rendered in same coordinate space as pieces */}
               <SelectionHandles onGroupResizeStart={handleGroupResizeStart} />
               {/* bordure scène */}
