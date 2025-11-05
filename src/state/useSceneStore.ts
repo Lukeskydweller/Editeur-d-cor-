@@ -748,23 +748,28 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       }
     })),
 
-  addLayer: (name) =>
-    set(produce((draft: SceneState) => {
-      // MAX_LAYERS guard
-      if (draft.scene.layerOrder.length >= MAX_LAYERS) {
+  addLayer: (name) => {
+    // MAX_LAYERS guard - check before mutation
+    const currentState = useSceneStore.getState();
+    if (currentState.scene.layerOrder.length >= MAX_LAYERS) {
+      set(produce((draft: SceneState) => {
         draft.ui.toast = {
           message: `Maximum de ${MAX_LAYERS} couches atteint. Impossible d'ajouter une nouvelle couche.`,
           until: Date.now() + 3000,
         };
-        return;
-      }
+      }));
+      return '' as ID; // Return empty ID when blocked
+    }
 
-      const id = genId('layer');
+    const id = genId('layer');
+    set(produce((draft: SceneState) => {
       const z = draft.scene.layerOrder.length;
       const layer: Layer = { id, name, z, pieces: [] };
       draft.scene.layers[id] = layer;
       draft.scene.layerOrder.push(id);
-    })) as unknown as ID,
+    }));
+    return id;
+  },
 
   setActiveLayer: (layerId) =>
     set(produce((draft: SceneState) => {
@@ -774,8 +779,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     })),
 
   addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) => {
-    const result = set(produce((draft: SceneState) => {
-      const id = genId('piece');
+    const id = genId('piece');
+    set(produce((draft: SceneState) => {
       const piece: Piece = {
         id,
         layerId,
@@ -793,8 +798,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       if (window.__flags?.USE_GLOBAL_SPATIAL) {
         syncPieceToIndex(id, { x, y, w, h });
       }
-    })) as unknown as ID;
-    return result;
+    }));
+    return id;
   },
 
   movePiece: (pieceId, x, y) =>
