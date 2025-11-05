@@ -6,33 +6,41 @@ import ProblemsPanel from '@/components/ProblemsPanel';
 import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
+import { shallow } from 'zustand/shallow';
 
 export function Sidebar() {
-  const scene = useSceneStore((s) => s.scene);
+  // OPTIMIZED: Precise selectors to avoid re-renders
+  const layerOrder = useSceneStore((s) => s.scene.layerOrder, shallow);
+  const layers = useSceneStore((s) => s.scene.layers, shallow);
+  const pieces = useSceneStore((s) => s.scene.pieces, shallow);
+  const materials = useSceneStore((s) => s.scene.materials, shallow);
   const selectedId = useSceneStore((s) => s.ui.selectedId);
+  const activeLayer = useSceneStore((s) => s.ui.activeLayer);
+
   const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
   const toggleJoined = useSceneStore((s) => s.toggleJoined);
   const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
   const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
   const addLayer = useSceneStore((s) => s.addLayer);
+  const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
   const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
   const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
   const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
   const moveLayerToBack = useSceneStore((s) => s.moveLayerToBack);
 
   // Comptages
-  const layerCounts = scene.layerOrder.map((lid) => ({
+  const layerCounts = layerOrder.map((lid) => ({
     id: lid,
-    name: scene.layers[lid]?.name ?? lid,
-    count: (scene.layers[lid]?.pieces ?? []).length,
+    name: layers[lid]?.name ?? lid,
+    count: (layers[lid]?.pieces ?? []).length,
   }));
 
-  const materialCounts = Object.values(scene.materials).map((m) => {
-    const count = Object.values(scene.pieces).filter((p) => p.materialId === m.id).length;
+  const materialCounts = Object.values(materials).map((m) => {
+    const count = Object.values(pieces).filter((p) => p.materialId === m.id).length;
     return { id: m.id, name: m.name, count, material: m };
   });
 
-  const selectedPiece = selectedId ? scene.pieces[selectedId] : undefined;
+  const selectedPiece = selectedId ? pieces[selectedId] : undefined;
 
   return (
     <aside role="complementary" className="w-full md:w-72 flex flex-col gap-4">
@@ -50,23 +58,53 @@ export function Sidebar() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => addLayer(`C${scene.layerOrder.length + 1}`)}
+            onClick={() => addLayer(`C${layerOrder.length + 1}`)}
             aria-label="add-layer"
+            data-testid="layer-add-button"
           >
             + Layer
           </Button>
         </CardHeader>
-        <CardContent>
+        <CardContent data-testid="layers-panel">
           <ul className="space-y-2" aria-label="layers-list">
             {layerCounts.map((l, idx) => {
               const isAtBack = idx === 0;
               const isAtFront = idx === layerCounts.length - 1;
+              const isActive = l.id === activeLayer;
 
               return (
-                <li key={l.id} className="flex items-center justify-between gap-2">
+                <li
+                  key={l.id}
+                  data-testid={`layer-row-${l.name}`}
+                  className={`flex items-center justify-between gap-2 p-2 rounded cursor-pointer transition-colors ${
+                    isActive
+                      ? 'bg-cyan-600 ring-2 ring-cyan-400'
+                      : 'bg-slate-700 hover:bg-slate-600'
+                  }`}
+                  onClick={() => setActiveLayer(l.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setActiveLayer(l.id);
+                    }
+                  }}
+                >
                   <div className="flex items-center gap-2 flex-1">
-                    <span>{l.name}</span>
-                    <span className="text-muted-foreground text-sm">{l.count}</span>
+                    {isActive && (
+                      <span
+                        data-testid={`active-layer-badge-${l.name}`}
+                        className="text-cyan-200 font-bold"
+                        aria-label="active layer indicator"
+                      >
+                        ●
+                      </span>
+                    )}
+                    <span className={isActive ? 'font-semibold' : ''}>{l.name}</span>
+                    <span className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}>
+                      {l.count}
+                    </span>
                   </div>
                   <div className="flex items-center gap-1">
                     <Button
@@ -74,7 +112,10 @@ export function Sidebar() {
                       variant="ghost"
                       className="h-6 w-6"
                       disabled={isAtBack}
-                      onClick={() => moveLayerToBack(l.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        moveLayerToBack(l.id);
+                      }}
                       aria-label="send-layer-to-back"
                       title="Send to back"
                       tabIndex={0}
@@ -86,7 +127,10 @@ export function Sidebar() {
                       variant="ghost"
                       className="h-6 w-6"
                       disabled={isAtBack}
-                      onClick={() => moveLayerBackward(l.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        moveLayerBackward(l.id);
+                      }}
                       aria-label="send-layer-backward"
                       title="Send backward"
                       tabIndex={0}
@@ -98,7 +142,10 @@ export function Sidebar() {
                       variant="ghost"
                       className="h-6 w-6"
                       disabled={isAtFront}
-                      onClick={() => moveLayerForward(l.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        moveLayerForward(l.id);
+                      }}
                       aria-label="send-layer-forward"
                       title="Send forward"
                       tabIndex={0}
@@ -110,7 +157,10 @@ export function Sidebar() {
                       variant="ghost"
                       className="h-6 w-6"
                       disabled={isAtFront}
-                      onClick={() => moveLayerToFront(l.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        moveLayerToFront(l.id);
+                      }}
                       aria-label="send-layer-to-front"
                       title="Send to front"
                       tabIndex={0}
@@ -177,7 +227,7 @@ export function Sidebar() {
                   value={selectedPiece.materialId}
                   onChange={(e) => setPieceMaterial(selectedPiece.id, e.target.value)}
                 >
-                  {Object.values(scene.materials).map((m) => (
+                  {Object.values(materials).map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name}
                     </option>
