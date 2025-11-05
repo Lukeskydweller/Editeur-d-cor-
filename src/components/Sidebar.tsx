@@ -7,6 +7,7 @@ import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
 import { shallow } from 'zustand/shallow';
+import { MAX_LAYERS } from '@/constants/validation';
 
 export function Sidebar() {
   // OPTIMIZED: Precise selectors to avoid re-renders
@@ -59,8 +60,10 @@ export function Sidebar() {
             size="sm"
             variant="outline"
             onClick={() => addLayer(`C${layerOrder.length + 1}`)}
+            disabled={layerOrder.length >= MAX_LAYERS}
             aria-label="add-layer"
             data-testid="layer-add-button"
+            title={layerOrder.length >= MAX_LAYERS ? `Maximum de ${MAX_LAYERS} couches atteint` : undefined}
           >
             + Layer
           </Button>

@@ -2,6 +2,9 @@
  * Constantes de validation pour l'espacement et le collage
  */
 
+// Maximum number of layers allowed in the scene
+export const MAX_LAYERS = 3;
+
 // Seuil minimal d'espacement et de collage automatique (mm)
 export const MIN_GAP_MM = 1.0;
 

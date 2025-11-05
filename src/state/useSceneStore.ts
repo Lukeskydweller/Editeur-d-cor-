@@ -3,7 +3,7 @@ import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
 import { validateNoOverlap, validateNoOverlapForCandidate as validateNoOverlapForCandidateDraft, validateInsideScene } from '@/lib/sceneRules';
 import { snapToPieces, snapGroupToPieces, snapEdgeCollage, computeMinGap, finalizeCollageGuard, normalizeGapToThreshold, MM_TO_PX, type SnapGuide } from '@/lib/ui/snap';
-import { MIN_GAP_MM, SNAP_EDGE_THRESHOLD_MM, NORMALIZE_GAP_TARGET_MM, EPSILON_GAP_NORMALIZE_MM, ENABLE_GAP_NORMALIZATION } from '@/constants/validation';
+import { MIN_GAP_MM, SNAP_EDGE_THRESHOLD_MM, NORMALIZE_GAP_TARGET_MM, EPSILON_GAP_NORMALIZE_MM, ENABLE_GAP_NORMALIZATION, MAX_LAYERS } from '@/constants/validation';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import type { Problem } from '@/core/contracts/scene';
 import {
@@ -750,6 +750,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   addLayer: (name) =>
     set(produce((draft: SceneState) => {
+      // MAX_LAYERS guard
+      if (draft.scene.layerOrder.length >= MAX_LAYERS) {
+        draft.ui.toast = {
+          message: `Maximum de ${MAX_LAYERS} couches atteint. Impossible d'ajouter une nouvelle couche.`,
+          until: Date.now() + 3000,
+        };
+        return;
+      }
+
       const id = genId('layer');
       const z = draft.scene.layerOrder.length;
       const layer: Layer = { id, name, z, pieces: [] };
