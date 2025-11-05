@@ -69,6 +69,8 @@ export default function App() {
   const endGroupResize = useSceneStore((s) => s.endGroupResize);
   const ghost = useSceneStore((s) => s.ui.ghost);
   const cancelGhost = useSceneStore((s) => s.cancelGhost);
+  const toggleLayerVisibility = useSceneStore((s) => s.toggleLayerVisibility);
+  const toggleLayerLock = useSceneStore((s) => s.toggleLayerLock);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -316,6 +318,32 @@ export default function App() {
         return;
       }
 
+      // Layer shortcuts: Digit1/2/3 → switch to C1/C2/C3
+      if (['1', '2', '3'].includes(e.key) && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        const layerIndex = parseInt(e.key) - 1;
+        const currentState = useSceneStore.getState();
+        const targetLayerId = currentState.scene.layerOrder[layerIndex];
+        if (targetLayerId) {
+          setActiveLayer(targetLayerId);
+        }
+        return;
+      }
+
+      // V → toggle visibility of active layer
+      if (e.key === 'v' && !e.ctrlKey && !e.metaKey && activeLayer) {
+        e.preventDefault();
+        toggleLayerVisibility(activeLayer);
+        return;
+      }
+
+      // L → toggle lock of active layer
+      if (e.key === 'l' && !e.ctrlKey && !e.metaKey && activeLayer) {
+        e.preventDefault();
+        toggleLayerLock(activeLayer);
+        return;
+      }
+
       // Arrow keys
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
       e.preventDefault();
@@ -335,7 +363,11 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo, resizing, endResize, snap10mm]);
+  }, [
+    nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo,
+    resizing, endResize, snap10mm, activeLayer, setActiveLayer, toggleLayerVisibility, toggleLayerLock, groupResizing, endGroupResize,
+    ghost, cancelGhost
+  ]);
 
   // Global listeners to end/cancel operations on window blur or pointerup outside canvas
   React.useEffect(() => {
