@@ -528,6 +528,12 @@ type SceneState = {
 
     // Active layer for editing (only pieces in this layer are interactive)
     activeLayer?: ID;
+
+    // Layer visibility (default true) - hidden layers have opacity 0 and pointerEvents none
+    layerVisibility: Record<ID, boolean>;
+
+    // Layer locked state (default false) - locked layers cannot be edited but remain visible
+    layerLocked: Record<ID, boolean>;
   };
 };
 
@@ -538,6 +544,8 @@ type SceneActions = {
 
   addLayer: (name: string) => ID;
   setActiveLayer: (layerId: ID) => void;
+  toggleLayerVisibility: (layerId: ID) => void;
+  toggleLayerLock: (layerId: ID) => void;
   addRectPiece: (layerId: ID, materialId: ID, w: Milli, h: Milli, x: Milli, y: Milli, rotationDeg?: Deg) => ID;
   movePiece: (pieceId: ID, x: Milli, y: Milli) => void;
   rotatePiece: (pieceId: ID, rotationDeg: Deg) => void;
@@ -729,6 +737,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         layerOrder: [],
       };
       draft.ui.activeLayer = undefined; // Reset active layer
+      draft.ui.layerVisibility = {}; // Reset layer visibility
+      draft.ui.layerLocked = {}; // Reset layer lock state
     })),
 
   addMaterial: (m) =>
@@ -767,6 +777,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const layer: Layer = { id, name, z, pieces: [] };
       draft.scene.layers[id] = layer;
       draft.scene.layerOrder.push(id);
+      // Initialize layer visibility and lock state
+      draft.ui.layerVisibility[id] = true; // Default: visible
+      draft.ui.layerLocked[id] = false; // Default: unlocked
     }));
     return id;
   },
@@ -775,6 +788,22 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(produce((draft: SceneState) => {
       if (draft.scene.layers[layerId]) {
         draft.ui.activeLayer = layerId;
+      }
+    })),
+
+  toggleLayerVisibility: (layerId) =>
+    set(produce((draft: SceneState) => {
+      if (draft.scene.layers[layerId]) {
+        const current = draft.ui.layerVisibility[layerId] ?? true;
+        draft.ui.layerVisibility[layerId] = !current;
+      }
+    })),
+
+  toggleLayerLock: (layerId) =>
+    set(produce((draft: SceneState) => {
+      if (draft.scene.layers[layerId]) {
+        const current = draft.ui.layerLocked[layerId] ?? false;
+        draft.ui.layerLocked[layerId] = !current;
       }
     })),
 
