@@ -785,8 +785,8 @@ export default function App() {
                 if (!layer) return null;
 
                 const isActive = layerId === activeLayer;
-                const isVisible = layerVisibility[layerId] ?? true;
-                const isLocked = layerLocked[layerId] ?? false;
+                const isVisible = layerVisibility?.[layerId] ?? true;
+                const isLocked = layerLocked?.[layerId] ?? false;
 
                 return (
                   <g

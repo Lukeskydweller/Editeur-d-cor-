@@ -78,8 +78,8 @@ export function Sidebar() {
               const isAtBack = idx === 0;
               const isAtFront = idx === layerCounts.length - 1;
               const isActive = l.id === activeLayer;
-              const isVisible = layerVisibility[l.id] ?? true;
-              const isLocked = layerLocked[l.id] ?? false;
+              const isVisible = layerVisibility?.[l.id] ?? true;
+              const isLocked = layerLocked?.[l.id] ?? false;
 
               return (
                 <li

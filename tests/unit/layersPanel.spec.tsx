@@ -39,9 +39,9 @@ describe('Layers Panel UI', () => {
     const c1Layer = Object.values(state1.scene.layers).find(l => l.name === 'C1');
     expect(state1.ui.activeLayer).toBe(c1Layer?.id);
 
-    // Click C2 row
-    const c2Row = screen.getByTestId('layer-row-C2');
-    fireEvent.click(c2Row);
+    // Click C2 badge (inside the clickable area)
+    const c2Badge = screen.getByTestId('active-layer-badge-C2');
+    fireEvent.click(c2Badge);
 
     // activeLayer should switch to C2
     const state2 = useSceneStore.getState();
@@ -52,7 +52,7 @@ describe('Layers Panel UI', () => {
     const store = useSceneStore.getState();
     store.addLayer('C2');
 
-    const { rerender } = render(<Sidebar />);
+    render(<Sidebar />);
 
     // C1 should have filled badge (●) initially
     const c1Badge = screen.getByTestId('active-layer-badge-C1');
@@ -64,14 +64,10 @@ describe('Layers Panel UI', () => {
     expect(c2Badge).toBeDefined();
     expect(c2Badge.textContent).toBe('○');
 
-    // Click C2
-    const c2Row = screen.getByTestId('layer-row-C2');
-    fireEvent.click(c2Row);
+    // Click C2 badge - should bubble up to parent div with onClick
+    fireEvent.click(c2Badge);
 
-    // Re-render to see updated badges
-    rerender(<Sidebar />);
-
-    // Now C2 should have filled badge (●)
+    // Now C2 should have filled badge (●) - no rerender needed, state should update
     const c2BadgeAfter = screen.getByTestId('active-layer-badge-C2');
     expect(c2BadgeAfter.textContent).toBe('●');
 

@@ -659,6 +659,10 @@ function applySnapshot(draft: SceneState, snap: SceneStateSnapshot): void {
   draft.ui.selectedIds = snap.ui.selectedIds ? [...snap.ui.selectedIds] : undefined;
   draft.ui.selectedId = snap.ui.selectedId;
   draft.ui.primaryId = snap.ui.primaryId;
+
+  // Ensure layerVisibility and layerLocked exist (for snapshots taken before these features existed)
+  if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
+  if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
 }
 
 // Helper: push to history with FIFO limit
@@ -780,6 +784,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       draft.scene.layers[id] = layer;
       draft.scene.layerOrder.push(id);
       // Initialize layer visibility and lock state
+      if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
+      if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
       draft.ui.layerVisibility[id] = true; // Default: visible
       draft.ui.layerLocked[id] = false; // Default: unlocked
     }));
