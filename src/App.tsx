@@ -24,6 +24,8 @@ export default function App() {
   const selectedId = useSceneStore((s) => s.ui.selectedId);
   const selectedIds = useSceneStore((s) => s.ui.selectedIds);
   const activeLayer = useSceneStore((s) => s.ui.activeLayer);
+  const layerVisibility = useSceneStore((s) => s.ui.layerVisibility);
+  const layerLocked = useSceneStore((s) => s.ui.layerLocked);
   const selectPiece = useSceneStore((s) => s.selectPiece);
   const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
   const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
@@ -751,12 +753,17 @@ export default function App() {
                 if (!layer) return null;
 
                 const isActive = layerId === activeLayer;
+                const isVisible = layerVisibility[layerId] ?? true;
+                const isLocked = layerLocked[layerId] ?? false;
 
                 return (
                   <g
                     key={layerId}
                     data-layer={layer.name}
-                    style={{ pointerEvents: isActive ? 'all' : 'none', opacity: isActive ? 1 : 0.5 }}
+                    style={{
+                      pointerEvents: (isVisible && !isLocked && isActive) ? 'all' : 'none',
+                      opacity: isVisible ? (isActive ? 1 : 0.5) : 0
+                    }}
                   >
                     {layer.pieces.map((pieceId) => {
                       const p = scene.pieces[pieceId];
