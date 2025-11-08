@@ -1,0 +1,126 @@
+{
+  "audit_date": "2025-11-08",
+  "branch": "chore/ci-guardrails-setup",
+  "commit": "327ba0d",
+  "node_version": "v20.19.5",
+  "pnpm_version": "10.20.0",
+  "validation": {
+    "typecheck": "PASS",
+    "unit_tests": {
+      "status": "PASS",
+      "passed": 593,
+      "skipped": 21,
+      "total": 614,
+      "duration_sec": 15.41
+    },
+    "smoke_tests": "PASS (4/4)",
+    "build": "PASS",
+    "coverage": "PASS (80/80/80/70)"
+  },
+  "ux_contract": {
+    "max_layers": 3,
+    "layer_names": ["C1", "C2", "C3"],
+    "fixed_order": true,
+    "allow_reordering": false,
+    "allow_reassignment": false,
+    "progressive_unlock": true,
+    "ghost_rendering": true,
+    "keyboard_shortcuts": ["1", "2", "3", "V", "L"]
+  },
+  "current_state": {
+    "max_layers_enforced": true,
+    "max_layers_value": 3,
+    "guard_c4_creation": true,
+    "reassignment_possible": false,
+    "reordering_possible": true,
+    "progressive_unlock_implemented": false,
+    "ghost_rendering_implemented": true,
+    "keyboard_shortcuts_implemented": true
+  },
+  "conformity": {
+    "compliant": [
+      "MAX_LAYERS=3 enforced",
+      "Guard blocks C4+ creation",
+      "No piece reassignment",
+      "Keyboard shortcuts functional",
+      "Painter's order SVG correct",
+      "Interaction isolation by layer",
+      "Ghost rendering (red/orange)",
+      "Support validation (AABB + PathOps)",
+      "Visibility/Lock toggles"
+    ],
+    "non_compliant": [
+      "Layer reordering allowed (4 actions)",
+      "UI buttons for reordering present",
+      "Progressive unlock absent",
+      "Tests validate prohibited reordering",
+      "Keyboard mapping unstable if reordered"
+    ]
+  },
+  "files": {
+    "state_management": "src/state/useSceneStore.ts",
+    "constants": "src/constants/validation.ts",
+    "ui_sidebar": "src/components/Sidebar.tsx",
+    "rendering": "src/App.tsx",
+    "validation": "src/core/geo/validateAll.ts",
+    "pathops": "src/core/booleans/pathopsAdapter.ts",
+    "tests_layers": [
+      "tests/unit/maxLayers.spec.ts",
+      "tests/unit/layersPanel.spec.tsx",
+      "tests/unit/layers.support.spec.ts",
+      "tests/unit/layers.support.pathops.spec.ts",
+      "tests/unit/layers.visibility.spec.tsx",
+      "tests/unit/layers.lock.spec.tsx",
+      "tests/unit/layers.shortcuts.spec.tsx",
+      "tests/unit/layerIsolation.spec.ts",
+      "tests/unit/layerOrder.spec.tsx",
+      "src/App.layers.order.test.tsx",
+      "src/state/useSceneStore.layers.test.ts"
+    ]
+  },
+  "dependencies": {
+    "pathops_clipper": "Union calculation for support validation",
+    "web_worker": "Async PathOps computation",
+    "wasm_loader": "WASM PathOps module",
+    "layerOrder": "Painter's order + keyboard mapping",
+    "activeLayer": "Interaction isolation"
+  },
+  "gaps": {
+    "reordering_actions": {
+      "count": 4,
+      "actions": ["moveLayerForward", "moveLayerBackward", "moveLayerToFront", "moveLayerToBack"],
+      "location": "src/state/useSceneStore.ts:2079-2149"
+    },
+    "reordering_ui_buttons": {
+      "count": 4,
+      "buttons": ["⏫", "⬆", "⬇", "⏬"],
+      "location": "src/components/Sidebar.tsx:171-210"
+    },
+    "progressive_unlock": {
+      "implemented": false,
+      "required": true,
+      "description": "C2 unlocked when C1 filled, C3 when C2 filled"
+    },
+    "tests_to_remove": {
+      "count": 8,
+      "files": ["src/App.layers.order.test.tsx", "src/state/useSceneStore.layers.test.ts"]
+    }
+  },
+  "next_steps": {
+    "required_changes": [
+      "Remove 4 reordering actions (moveLayer*)",
+      "Remove 4 UI reordering buttons (⏫⬆⬇⏬)",
+      "Implement progressive unlock logic",
+      "Add isLayerUnlocked() guard",
+      "Update addLayer guard to check unlock",
+      "Update UI button to show unlock status",
+      "Remove/update 8+ tests for reordering",
+      "Add tests for progressive unlock"
+    ],
+    "clarifications_needed": [
+      "Definition of 'layer filled': at least 1 piece? surface coverage threshold?",
+      "Should C1 always be created at init, or only on first piece insertion?",
+      "Should keyboard shortcuts remain fixed (1→C1, 2→C2, 3→C3) even if layers empty?"
+    ]
+  }
+}

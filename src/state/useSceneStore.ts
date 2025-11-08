@@ -24,6 +24,7 @@ import {
   ENABLE_GAP_NORMALIZATION,
   MAX_LAYERS,
 } from '@/constants/validation';
+import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
 import {
@@ -130,6 +131,49 @@ function add90(d: Deg): Deg {
 }
 function sub90(d: Deg): Deg {
   return normDeg((d + 270) % 360);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helper: ensure fixedLayerIds (idempotent, backward compatible)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Garantit que scene.fixedLayerIds est défini avec des IDs valides pour C1/C2/C3.
+ * Idempotent: ne modifie rien si déjà cohérent.
+ * Compat ascendante: tente de retrouver par noms existants, créé au besoin sans changer layerOrder.
+ */
+function ensureFixedLayerIds(scene: SceneDraft) {
+  // Vérifier si déjà prêt et valide
+  if (
+    scene.fixedLayerIds &&
+    scene.layers[scene.fixedLayerIds.C1] &&
+    scene.layers[scene.fixedLayerIds.C2] &&
+    scene.layers[scene.fixedLayerIds.C3]
+  ) {
+    return; // déjà cohérent
+  }
+
+  // 1) Tenter de retrouver par noms existants
+  const byName: Partial<Record<LayerName, ID>> = {};
+  for (const id of scene.layerOrder) {
+    const nm = scene.layers[id]?.name;
+    if (nm && isLayerName(nm) && !byName[nm]) {
+      byName[nm as LayerName] = id;
+    }
+  }
+
+  // 2) Si manquant, créer au besoin (sans toucher à l'ordre)
+  for (const nm of FIXED_LAYER_NAMES) {
+    if (!byName[nm]) {
+      const id = genId('layer');
+      const z = scene.layerOrder.length;
+      scene.layers[id] = { id, name: nm, z, pieces: [] };
+      scene.layerOrder.push(id);
+      byName[nm] = id;
+    }
+  }
+
+  scene.fixedLayerIds = { C1: byName.C1!, C2: byName.C2!, C3: byName.C3! };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -955,6 +999,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           const restored = restoreFromAutosave();
           if (restored && restored.scene.layerOrder.length > 0) {
             applySnapshot(draft, restored);
+            // Ensure fixedLayerIds after restore
+            ensureFixedLayerIds(draft.scene);
+            // Set activeLayer to C1 if undefined
+            if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+              draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+            }
             return;
           }
         }
@@ -978,7 +1028,6 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
         draft.scene.layers[layerId] = { id: layerId, name: 'C1', z: 0, pieces: [pieceId] };
         draft.scene.layerOrder.push(layerId);
-        draft.ui.activeLayer = layerId; // Set C1 as default active layer
         draft.scene.materials[materialId] = {
           id: materialId,
           name: 'Paper White 200gsm',
@@ -994,6 +1043,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           kind: 'rect',
           size: { w: 120, h: 80 },
         };
+
+        // Ensure fixedLayerIds after scene creation
+        ensureFixedLayerIds(draft.scene);
+        // Set C1 as default active layer
+        draft.ui.activeLayer = draft.scene.fixedLayerIds!.C1;
       }),
     ),
 
@@ -2212,8 +2266,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           ui: normalized.ui ?? {},
         });
 
+        // Ensure fixedLayerIds after import
+        ensureFixedLayerIds(draft.scene);
+
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
+
+        // Set activeLayer to C1 if undefined
+        if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+          draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+        }
 
         draft.scene.revision++;
         // Push to history and autosave
@@ -2288,8 +2350,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           ui: normalized.ui ?? {},
         });
 
+        // Ensure fixedLayerIds after load
+        ensureFixedLayerIds(draft.scene);
+
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
+
+        // Set activeLayer to C1 if undefined
+        if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+          draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+        }
 
         draft.scene.revision++;
         // Push to history and autosave
@@ -3658,3 +3728,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 // Type helper for Zustand selectors to avoid implicit 'any' in callbacks
 // Defined AFTER useSceneStore to avoid circular reference
 export type SceneStoreState = ReturnType<typeof useSceneStore.getState>;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Exported selectors for fixed layer IDs (avoid s => s.scene, reduce re-renders)
+// ─────────────────────────────────────────────────────────────────────────
+
+export const getFixedLayerIds = (s: SceneStoreState) => s.scene.fixedLayerIds!;
+export const getFixedLayerIdByName = (s: SceneStoreState, name: LayerName) =>
+  s.scene.fixedLayerIds ? s.scene.fixedLayerIds[name] : undefined;
