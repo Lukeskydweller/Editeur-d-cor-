@@ -329,12 +329,13 @@ export default function App() {
         return;
       }
 
-      // Layer shortcuts: Digit1/2/3 → switch to C1/C2/C3
+      // Layer shortcuts: Digit1/2/3 → switch to C1/C2/C3 (stable mapping by name)
       if (['1', '2', '3'].includes(e.key) && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        const layerIndex = parseInt(e.key) - 1;
         const currentState = useSceneStore.getState();
-        const targetLayerId = currentState.scene.layerOrder[layerIndex];
+        const ids = currentState.scene.fixedLayerIds;
+        const keyToName = e.key === '1' ? 'C1' : e.key === '2' ? 'C2' : 'C3';
+        const targetLayerId = ids?.[keyToName];
         if (targetLayerId) {
           setActiveLayer(targetLayerId);
         }
