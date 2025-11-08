@@ -194,6 +194,31 @@ PWREADY=1 pnpm test:e2e
 pnpm validate
 ```
 
+## Features
+
+### Layers V1: Fixed 3-Layer System (C1, C2, C3)
+
+Le système de couches utilise une architecture fixe à 3 couches immuables :
+
+- **C1, C2, C3** : Couches fixes avec IDs stables
+- **Ordre strict** : C1 (base) → C2 (milieu) → C3 (haut)
+- **Migration automatique** : Scènes legacy (>3 couches) migrées automatiquement au chargement
+  - Pièces C4+ réaffectées à C3
+  - Couches legacy supprimées
+  - `layerOrder` canonisé à `[C1, C2, C3]`
+- **Invariant strict** : `piece.layerId` est `readonly` (compile-time + runtime dev assertion)
+- **Accessibilité (WCAG 2.1)** :
+  - Navigation clavier : Touches `1`, `2`, `3` pour sélectionner C1, C2, C3
+  - Visibilité : Touche `V` pour toggle
+  - Verrouillage : Touche `L` pour toggle
+  - Tous les contrôles opérables au clavier (Enter/Space)
+
+**Validation du support entre couches :**
+
+- **AABB rapide** (tests unitaires) : Bounding box overlap detection
+- **PathOps exact** (tests E2E) : Union/diff/xor géométriques (PathKit WASM)
+- Pièces C2/C3 restent manipulables (drag/resize) même en état fantôme (non supportées)
+
 ## Documentation
 
 - [Rapport de reprise projet](./RAPPORT_REPRISE_PROJET.md)
