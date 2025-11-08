@@ -215,8 +215,8 @@ describe('useSceneStore - history and autosave', () => {
 
       const restoredScene = useSceneStore.getState().scene;
       expect(Object.keys(restoredScene.pieces).length).toBe(1);
-      // ensureFixedLayerIds creates C1/C2/C3 if missing, so restored scene has 3 layers + 1 original = 4
-      expect(Object.keys(restoredScene.layers).length).toBe(4);
+      // ensureFixedLayerIds creates C1/C2/C3 + migration clamps to exactly 3 layers
+      expect(Object.keys(restoredScene.layers).length).toBe(3);
       expect(Object.keys(restoredScene.materials).length).toBe(1);
       // Verify fixedLayerIds are set after restore
       expect(restoredScene.fixedLayerIds).toBeDefined();
