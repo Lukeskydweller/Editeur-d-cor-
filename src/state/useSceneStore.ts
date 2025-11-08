@@ -141,8 +141,11 @@ function sub90(d: Deg): Deg {
  * Garantit que scene.fixedLayerIds est défini avec des IDs valides pour C1/C2/C3.
  * Idempotent: ne modifie rien si déjà cohérent.
  * Compat ascendante: tente de retrouver par noms existants, créé au besoin sans changer layerOrder.
+ * Initialise aussi layerVisibility et layerLocked pour les couches créées.
  */
-function ensureFixedLayerIds(scene: SceneDraft) {
+function ensureFixedLayerIds(draft: SceneState) {
+  const scene = draft.scene;
+
   // Vérifier si déjà prêt et valide
   if (
     scene.fixedLayerIds &&
@@ -163,6 +166,10 @@ function ensureFixedLayerIds(scene: SceneDraft) {
   }
 
   // 2) Si manquant, créer au besoin (sans toucher à l'ordre)
+  // Initialize layerVisibility and layerLocked if not present
+  if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
+  if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
+
   for (const nm of FIXED_LAYER_NAMES) {
     if (!byName[nm]) {
       const id = genId('layer');
@@ -170,10 +177,34 @@ function ensureFixedLayerIds(scene: SceneDraft) {
       scene.layers[id] = { id, name: nm, z, pieces: [] };
       scene.layerOrder.push(id);
       byName[nm] = id;
+
+      // Initialize visibility and lock state for newly created layers
+      draft.ui.layerVisibility[id] = true; // Default: visible
+      draft.ui.layerLocked[id] = false; // Default: unlocked
     }
   }
 
   scene.fixedLayerIds = { C1: byName.C1!, C2: byName.C2!, C3: byName.C3! };
+}
+
+/**
+ * canonicalizeLayerOrder
+ * Ensures layerOrder always starts with [C1, C2, C3] in that order,
+ * followed by any legacy layers (for backward compatibility).
+ * This enforces immutable painter's order: C1 bottom → C3 top.
+ */
+function canonicalizeLayerOrder(draft: SceneState) {
+  const scene = draft.scene;
+  if (!scene.fixedLayerIds) return; // Should not happen after ensureFixedLayerIds
+
+  const { C1, C2, C3 } = scene.fixedLayerIds;
+  const keep = new Set([C1, C2, C3]);
+
+  // Legacy layers (if any) are preserved after C1/C2/C3
+  const tail = scene.layerOrder.filter((id) => !keep.has(id));
+
+  // Canonical order: [C1, C2, C3, ...legacy]
+  scene.layerOrder = [C1, C2, C3, ...tail];
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -665,10 +696,6 @@ type SceneActions = {
   rotateSelected: (deltaDeg: 90 | -90) => void;
   setSelectedRotation: (deg: 0 | 90 | 180 | 270) => void;
   duplicateSelected: () => void;
-  moveLayerForward: (layerId: ID) => void;
-  moveLayerBackward: (layerId: ID) => void;
-  moveLayerToFront: (layerId: ID) => void;
-  moveLayerToBack: (layerId: ID) => void;
   undo: () => void;
   redo: () => void;
   toSceneFileV1: () => SceneFileV1;
@@ -1000,7 +1027,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           if (restored && restored.scene.layerOrder.length > 0) {
             applySnapshot(draft, restored);
             // Ensure fixedLayerIds after restore
-            ensureFixedLayerIds(draft.scene);
+            ensureFixedLayerIds(draft);
+            // Canonicalize layer order to [C1, C2, C3, ...legacy]
+            canonicalizeLayerOrder(draft);
             // Set activeLayer to C1 if undefined
             if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
               draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
@@ -1045,7 +1074,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         };
 
         // Ensure fixedLayerIds after scene creation
-        ensureFixedLayerIds(draft.scene);
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
         // Set C1 as default active layer
         draft.ui.activeLayer = draft.scene.fixedLayerIds!.C1;
       }),
@@ -2130,78 +2161,6 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       }),
     ),
 
-  moveLayerForward: (layerId) =>
-    set(
-      produce((draft: SceneState) => {
-        const idx = draft.scene.layerOrder.indexOf(layerId);
-        if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
-
-        const snap = takeSnapshot(draft);
-
-        // Swap with next
-        [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx + 1]] = [
-          draft.scene.layerOrder[idx + 1],
-          draft.scene.layerOrder[idx],
-        ];
-
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }),
-    ),
-
-  moveLayerBackward: (layerId) =>
-    set(
-      produce((draft: SceneState) => {
-        const idx = draft.scene.layerOrder.indexOf(layerId);
-        if (idx === -1 || idx === 0) return;
-
-        const snap = takeSnapshot(draft);
-
-        // Swap with previous
-        [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx - 1]] = [
-          draft.scene.layerOrder[idx - 1],
-          draft.scene.layerOrder[idx],
-        ];
-
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }),
-    ),
-
-  moveLayerToFront: (layerId) =>
-    set(
-      produce((draft: SceneState) => {
-        const idx = draft.scene.layerOrder.indexOf(layerId);
-        if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
-
-        const snap = takeSnapshot(draft);
-
-        // Remove and push to end
-        draft.scene.layerOrder.splice(idx, 1);
-        draft.scene.layerOrder.push(layerId);
-
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }),
-    ),
-
-  moveLayerToBack: (layerId) =>
-    set(
-      produce((draft: SceneState) => {
-        const idx = draft.scene.layerOrder.indexOf(layerId);
-        if (idx === -1 || idx === 0) return;
-
-        const snap = takeSnapshot(draft);
-
-        // Remove and unshift to beginning
-        draft.scene.layerOrder.splice(idx, 1);
-        draft.scene.layerOrder.unshift(layerId);
-
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }),
-    ),
-
   undo: () =>
     set(
       produce((draft: SceneState) => {
@@ -2267,7 +2226,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         });
 
         // Ensure fixedLayerIds after import
-        ensureFixedLayerIds(draft.scene);
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
 
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
@@ -2351,7 +2312,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         });
 
         // Ensure fixedLayerIds after load
-        ensureFixedLayerIds(draft.scene);
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
 
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
