@@ -10,7 +10,7 @@ import { useSceneStore } from '@/state/useSceneStore';
  * - Panel displays exactly 3 rows: C1, C2, C3
  * - "+ Layer" button does not exist
  * - Visibility and lock toggles work for all 3 layers
- * - Legacy banner appears when layerOrder.length > 3
+ * - Post-migration: legacy scenes (>3 layers) show only C1/C2/C3, no banner
  */
 describe('Layers Panel - Fixed 3 Rows', () => {
   beforeEach(() => {
@@ -104,56 +104,51 @@ describe('Layers Panel - Fixed 3 Rows', () => {
     expect(state2.ui.layerLocked?.[C3]).toBe(false);
   });
 
-  test('legacy scene (5 layers) displays only C1/C2/C3 + banner', () => {
+  test('legacy scene (>3 layers pre-migration) displays exactly 3 rows after migration, no banner', () => {
     const store = useSceneStore.getState();
 
-    // Manually create a legacy scene with 5 layers
     const c1Id = store.scene.fixedLayerIds!.C1;
     const c2Id = store.scene.fixedLayerIds!.C2;
     const c3Id = store.scene.fixedLayerIds!.C3;
 
-    // Add 2 legacy layers to layerOrder (simulating old scene)
-    const legacyId1 = 'layer_legacy_1';
-    const legacyId2 = 'layer_legacy_2';
-
-    useSceneStore.setState({
+    // Import a legacy scene fixture with 5 layers
+    const legacySceneFile = {
+      version: 1 as const,
       scene: {
-        ...store.scene,
-        layerOrder: [c1Id, c2Id, c3Id, legacyId1, legacyId2],
+        id: 'legacy-test',
+        createdAt: new Date().toISOString(),
+        size: { w: 600, h: 600 },
+        materials: store.scene.materials,
         layers: {
-          ...store.scene.layers,
-          [legacyId1]: { id: legacyId1, name: 'Legacy1', z: 3, pieces: [] },
-          [legacyId2]: { id: legacyId2, name: 'Legacy2', z: 4, pieces: [] },
+          [c1Id]: { id: c1Id, name: 'C1', z: 0, pieces: [] },
+          [c2Id]: { id: c2Id, name: 'C2', z: 1, pieces: [] },
+          [c3Id]: { id: c3Id, name: 'C3', z: 2, pieces: [] },
+          ['legacy1']: { id: 'legacy1', name: 'Legacy1', z: 3, pieces: [] },
+          ['legacy2']: { id: 'legacy2', name: 'Legacy2', z: 4, pieces: [] },
         },
+        pieces: {},
+        layerOrder: [c1Id, c2Id, c3Id, 'legacy1', 'legacy2'],
+        fixedLayerIds: { C1: c1Id, C2: c2Id, C3: c3Id },
+        revision: 0,
       },
-    });
+      ui: {},
+    };
+
+    // Import triggers migration (C4+ → C3)
+    store.importSceneFileV1(legacySceneFile);
 
     render(<Sidebar />);
 
-    // Verify only 3 layer rows displayed (C1, C2, C3)
+    // After migration: exactly 3 layers (C1, C2, C3)
+    const stateAfterMigration = useSceneStore.getState();
+    expect(stateAfterMigration.scene.layerOrder.length).toBe(3);
+
+    // Verify only 3 layer rows displayed
     const layersList = screen.getByLabelText('layers-list');
     const layerRows = layersList.querySelectorAll('li');
     expect(layerRows.length).toBe(3);
 
-    // Verify banner is displayed
-    const banner = screen.getByTestId('legacy-layers-banner');
-    expect(banner).toBeDefined();
-    expect(banner).toHaveTextContent('Scène héritée');
-    expect(banner).toHaveTextContent('couches > C3 masquées');
-    expect(banner).toHaveTextContent('migration v1 à venir');
-
-    // Verify banner has correct role for accessibility
-    expect(banner.getAttribute('role')).toBe('status');
-  });
-
-  test('no legacy banner when scene has exactly 3 layers', () => {
-    render(<Sidebar />);
-
-    // Scene should have exactly 3 layers (C1, C2, C3)
-    const store = useSceneStore.getState();
-    expect(store.scene.layerOrder.length).toBe(3);
-
-    // Verify banner is NOT displayed
+    // Verify NO banner is displayed (migration complete)
     const banner = screen.queryByTestId('legacy-layers-banner');
     expect(banner).toBeNull();
   });
