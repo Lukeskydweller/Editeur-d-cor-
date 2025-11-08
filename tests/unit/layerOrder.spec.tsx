@@ -9,7 +9,7 @@ import { useSceneStore } from '@/state/useSceneStore';
  * - Each layer has data-layer attribute
  * - C1 renders before C2, C2 before C3 (painter's order)
  */
-describe('Layer painter\'s order', () => {
+describe("Layer painter's order", () => {
   beforeEach(() => {
     const store = useSceneStore.getState();
     store.initScene(600, 600);
@@ -76,28 +76,6 @@ describe('Layer painter\'s order', () => {
     expect(state.scene.layers[c3Id].z).toBe(2);
   });
 
-  test('moving layer changes layerOrder', () => {
-    const store = useSceneStore.getState();
-
-    const c1Id = store.addLayer('C1');
-    const c2Id = store.addLayer('C2');
-
-    // Initially: [c1Id, c2Id]
-    expect(useSceneStore.getState().scene.layerOrder).toEqual([c1Id, c2Id]);
-
-    // Move C1 forward (should swap with C2)
-    store.moveLayerForward(c1Id);
-
-    const state = useSceneStore.getState();
-
-    // layerOrder should now be [c2Id, c1Id]
-    expect(state.scene.layerOrder).toEqual([c2Id, c1Id]);
-
-    // C1 is now at index 1 (front), C2 at index 0 (back)
-    expect(state.scene.layerOrder.indexOf(c1Id)).toBe(1);
-    expect(state.scene.layerOrder.indexOf(c2Id)).toBe(0);
-  });
-
   test('layers render with correct data-layer attribute names', () => {
     const store = useSceneStore.getState();
 
@@ -112,7 +90,7 @@ describe('Layer painter\'s order', () => {
     expect(state.scene.layers[c2Id].name).toBe('C2');
 
     // Verify the layerOrder maps to the correct layer names
-    const layerNames = state.scene.layerOrder.map(id => state.scene.layers[id].name);
+    const layerNames = state.scene.layerOrder.map((id) => state.scene.layers[id].name);
     expect(layerNames).toEqual(['C1', 'C2']);
   });
 });

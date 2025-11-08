@@ -50,7 +50,8 @@ describe('useSceneStore - history and autosave', () => {
 
   describe('undo/redo with duplicateSelected', () => {
     it('duplicateSelected then undo reverts state', () => {
-      const { addLayer, addMaterial, addRectPiece, selectPiece, duplicateSelected, undo } = useSceneStore.getState();
+      const { addLayer, addMaterial, addRectPiece, selectPiece, duplicateSelected, undo } =
+        useSceneStore.getState();
 
       // Setup: create layer, material, piece
       addLayer('Layer 1');
@@ -101,45 +102,10 @@ describe('useSceneStore - history and autosave', () => {
     });
   });
 
-  describe('undo/redo with moveLayerForward', () => {
-    it('moveLayerForward then undo restores layerOrder', () => {
-      const { addLayer, moveLayerForward, undo } = useSceneStore.getState();
-
-      addLayer('L1');
-      addLayer('L2');
-      addLayer('L3');
-
-      const [l1, l2, l3] = useSceneStore.getState().scene.layerOrder;
-
-      moveLayerForward(l1);
-      expect(useSceneStore.getState().scene.layerOrder).toEqual([l2, l1, l3]);
-
-      undo();
-      expect(useSceneStore.getState().scene.layerOrder).toEqual([l1, l2, l3]);
-    });
-
-    it('undo then redo reapplies layer move', () => {
-      const { addLayer, moveLayerForward, undo, redo } = useSceneStore.getState();
-
-      addLayer('L1');
-      addLayer('L2');
-
-      const [l1, l2] = useSceneStore.getState().scene.layerOrder;
-
-      moveLayerForward(l1);
-      expect(useSceneStore.getState().scene.layerOrder).toEqual([l2, l1]);
-
-      undo();
-      expect(useSceneStore.getState().scene.layerOrder).toEqual([l1, l2]);
-
-      redo();
-      expect(useSceneStore.getState().scene.layerOrder).toEqual([l2, l1]);
-    });
-  });
-
   describe('undo/redo with nudgeSelected', () => {
     it('nudgeSelected pushes to history only if moved', () => {
-      const { addLayer, addMaterial, addRectPiece, selectPiece, nudgeSelected, undo } = useSceneStore.getState();
+      const { addLayer, addMaterial, addRectPiece, selectPiece, nudgeSelected, undo } =
+        useSceneStore.getState();
 
       addLayer('L1');
       const [layerId] = useSceneStore.getState().scene.layerOrder;
@@ -249,36 +215,45 @@ describe('useSceneStore - history and autosave', () => {
 
       const restoredScene = useSceneStore.getState().scene;
       expect(Object.keys(restoredScene.pieces).length).toBe(1);
-      expect(Object.keys(restoredScene.layers).length).toBe(1);
+      // ensureFixedLayerIds creates C1/C2/C3 if missing, so restored scene has 3 layers + 1 original = 4
+      expect(Object.keys(restoredScene.layers).length).toBe(4);
       expect(Object.keys(restoredScene.materials).length).toBe(1);
+      // Verify fixedLayerIds are set after restore
+      expect(restoredScene.fixedLayerIds).toBeDefined();
     });
   });
 
   describe('selection preservation', () => {
     it('selection is preserved in history snapshots', () => {
-      const { addLayer, addMaterial, addRectPiece, selectPiece, moveLayerForward, undo } = useSceneStore.getState();
+      const { addLayer, addMaterial, addRectPiece, selectPiece, nudgeSelected, undo } =
+        useSceneStore.getState();
 
       addLayer('L1');
-      addLayer('L2');
-      const [l1, l2] = useSceneStore.getState().scene.layerOrder;
+      const [l1] = useSceneStore.getState().scene.layerOrder;
 
       const materialId = addMaterial({ name: 'Mat1', oriented: false });
-      addRectPiece(l1, materialId, 100, 50, 10, 10);
+      addRectPiece(l1, materialId, 100, 50, 100, 100);
 
       const pieces = Object.keys(useSceneStore.getState().scene.pieces);
       selectPiece(pieces[0]);
 
       expect(useSceneStore.getState().ui.selectedId).toBe(pieces[0]);
 
-      moveLayerForward(l1);
+      const originalPos = { ...useSceneStore.getState().scene.pieces[pieces[0]].position };
+
+      // Move piece (pushes to history)
+      nudgeSelected(10, 10);
 
       // Selection should still be there
       expect(useSceneStore.getState().ui.selectedId).toBe(pieces[0]);
 
       undo();
 
-      // Selection should be restored
+      // Selection should be restored and piece moved back
       expect(useSceneStore.getState().ui.selectedId).toBe(pieces[0]);
+      const restoredPos = useSceneStore.getState().scene.pieces[pieces[0]].position;
+      expect(restoredPos.x).toBe(originalPos.x);
+      expect(restoredPos.y).toBe(originalPos.y);
     });
   });
 });

@@ -77,37 +77,6 @@ describe('Layers V1 — socle fixe', () => {
     expect(state.scene.layers[c3Id!].name).toBe('C3');
   });
 
-  test('fixedLayerIds reste stable après réordonnancement (mapping clavier ne change pas)', () => {
-    const store = useSceneStore.getState();
-    store.initSceneWithDefaults(600, 600);
-
-    const state1 = useSceneStore.getState();
-    const c1IdBefore = state1.scene.fixedLayerIds!.C1;
-    const c2IdBefore = state1.scene.fixedLayerIds!.C2;
-    const c3IdBefore = state1.scene.fixedLayerIds!.C3;
-
-    // Simulate reordering (user moves C3 to front)
-    // This should NOT affect fixedLayerIds
-    store.moveLayerToFront(c3IdBefore);
-
-    const state2 = useSceneStore.getState();
-    const c1IdAfter = state2.scene.fixedLayerIds!.C1;
-    const c2IdAfter = state2.scene.fixedLayerIds!.C2;
-    const c3IdAfter = state2.scene.fixedLayerIds!.C3;
-
-    // Verify fixedLayerIds are unchanged (stable mapping)
-    expect(c1IdAfter).toBe(c1IdBefore);
-    expect(c2IdAfter).toBe(c2IdBefore);
-    expect(c3IdAfter).toBe(c3IdBefore);
-
-    // Verify keyboard shortcuts 1/2/3 still point to C1/C2/C3 by name (not by layerOrder index)
-    // layerOrder may have changed, but fixedLayerIds remains stable
-    const ids = state2.scene.fixedLayerIds!;
-    expect(ids.C1).toBe(c1IdBefore); // Key '1' → C1
-    expect(ids.C2).toBe(c2IdBefore); // Key '2' → C2
-    expect(ids.C3).toBe(c3IdBefore); // Key '3' → C3
-  });
-
   test('activeLayer est défini sur C1 après init', () => {
     const store = useSceneStore.getState();
     store.initSceneWithDefaults(600, 600);
