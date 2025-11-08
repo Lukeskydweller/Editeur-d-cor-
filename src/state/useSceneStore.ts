@@ -26,6 +26,7 @@ import {
 } from '@/constants/validation';
 import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
 import { isLayerUnlocked } from '@/state/layers.gating';
+import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
 import {
@@ -1053,6 +1054,14 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             ensureFixedLayerIds(draft);
             // Canonicalize layer order to [C1, C2, C3, ...legacy]
             canonicalizeLayerOrder(draft);
+            // Migrate to 3 fixed layers (idempotent)
+            const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+            if (migrated) {
+              draft.ui.toast = {
+                message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+                until: Date.now() + 3000,
+              };
+            }
             // Set activeLayer to C1 if undefined
             if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
               draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
@@ -2286,6 +2295,14 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         ensureFixedLayerIds(draft);
         // Canonicalize layer order to [C1, C2, C3, ...legacy]
         canonicalizeLayerOrder(draft);
+        // Migrate to 3 fixed layers (idempotent)
+        const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+        if (migrated) {
+          draft.ui.toast = {
+            message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+            until: Date.now() + 3000,
+          };
+        }
 
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
@@ -2372,6 +2389,14 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         ensureFixedLayerIds(draft);
         // Canonicalize layer order to [C1, C2, C3, ...legacy]
         canonicalizeLayerOrder(draft);
+        // Migrate to 3 fixed layers (idempotent)
+        const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+        if (migrated) {
+          draft.ui.toast = {
+            message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+            until: Date.now() + 3000,
+          };
+        }
 
         // Clear transient UI after scene replacement
         clearTransientUI(draft.ui);
