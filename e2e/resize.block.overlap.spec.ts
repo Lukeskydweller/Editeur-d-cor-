@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 test('Resize east handle shows red ghost when overlapping neighbor', async ({ page }) => {
   await page.goto('/');
@@ -140,7 +140,8 @@ test('Resize with WARN spacing shows orange ghost but commits successfully', asy
 
   // No error toast should appear
   const toast = page.locator('[role="status"]');
-  const hasErrorToast = (await toast.count()) > 0 && (await toast.textContent())?.includes('bloqué');
+  const hasErrorToast =
+    (await toast.count()) > 0 && (await toast.textContent())?.includes('bloqué');
   expect(hasErrorToast).toBe(false);
 
   // Piece should have new dimensions (resized)
@@ -256,7 +257,10 @@ test('StatusBadge reflects validation state during resize', async ({ page }) => 
     const eastHandle = page.locator('[aria-label="resize-handle-e"]');
     const handleBox = await eastHandle.boundingBox();
 
-    await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2);
+    await page.mouse.move(
+      handleBox!.x + handleBox!.width / 2,
+      handleBox!.y + handleBox!.height / 2,
+    );
     await page.mouse.down();
     await page.mouse.move(handleBox!.x + 50, handleBox!.y, { steps: 10 });
     await page.waitForTimeout(500);

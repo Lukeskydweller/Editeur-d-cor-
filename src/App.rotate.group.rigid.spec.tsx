@@ -32,6 +32,9 @@ describe('Rigid group rotation', () => {
         dragging: undefined,
         snap10mm: false,
         isTransientActive: false,
+        handlesEpoch: 0,
+        layerVisibility: {},
+        layerLocked: {},
         history: {
           past: [],
           future: [],
@@ -124,8 +127,14 @@ describe('Rigid group rotation', () => {
 
     // Conservation des distances au pivot (rigidité)
     const pivot = {
-      x: (Math.min(before.p1.x, before.p2.x, before.p3.x) + Math.max(before.p1.x, before.p2.x, before.p3.x)) / 2,
-      y: (Math.min(before.p1.y, before.p2.y, before.p3.y) + Math.max(before.p1.y, before.p2.y, before.p3.y)) / 2,
+      x:
+        (Math.min(before.p1.x, before.p2.x, before.p3.x) +
+          Math.max(before.p1.x, before.p2.x, before.p3.x)) /
+        2,
+      y:
+        (Math.min(before.p1.y, before.p2.y, before.p3.y) +
+          Math.max(before.p1.y, before.p2.y, before.p3.y)) /
+        2,
     };
 
     const distP1ToPivotBefore = Math.hypot(before.p1.x - pivot.x, before.p1.y - pivot.y);
@@ -133,8 +142,14 @@ describe('Rigid group rotation', () => {
     const distP3ToPivotBefore = Math.hypot(before.p3.x - pivot.x, before.p3.y - pivot.y);
 
     const pivotAfter = {
-      x: (Math.min(after.p1.x, after.p2.x, after.p3.x) + Math.max(after.p1.x, after.p2.x, after.p3.x)) / 2,
-      y: (Math.min(after.p1.y, after.p2.y, after.p3.y) + Math.max(after.p1.y, after.p2.y, after.p3.y)) / 2,
+      x:
+        (Math.min(after.p1.x, after.p2.x, after.p3.x) +
+          Math.max(after.p1.x, after.p2.x, after.p3.x)) /
+        2,
+      y:
+        (Math.min(after.p1.y, after.p2.y, after.p3.y) +
+          Math.max(after.p1.y, after.p2.y, after.p3.y)) /
+        2,
     };
 
     const distP1ToPivotAfter = Math.hypot(after.p1.x - pivotAfter.x, after.p1.y - pivotAfter.y);
@@ -371,9 +386,12 @@ describe('Rigid group rotation', () => {
     fireEvent.click(plus90Button); // 4th rotation (back to 0°/360°)
 
     // Vérifier que les rotations sont revenues à l'état initial (modulo 360°)
-    const finalP1Rot = ((useSceneStore.getState().scene.pieces[p1Id].rotationDeg % 360) + 360) % 360;
-    const finalP2Rot = ((useSceneStore.getState().scene.pieces[p2Id].rotationDeg % 360) + 360) % 360;
-    const finalP3Rot = ((useSceneStore.getState().scene.pieces[p3Id].rotationDeg % 360) + 360) % 360;
+    const finalP1Rot =
+      ((useSceneStore.getState().scene.pieces[p1Id].rotationDeg % 360) + 360) % 360;
+    const finalP2Rot =
+      ((useSceneStore.getState().scene.pieces[p2Id].rotationDeg % 360) + 360) % 360;
+    const finalP3Rot =
+      ((useSceneStore.getState().scene.pieces[p3Id].rotationDeg % 360) + 360) % 360;
 
     const expectedP1Rot = ((initialState.p1.rot % 360) + 360) % 360;
     const expectedP2Rot = ((initialState.p2.rot % 360) + 360) % 360;
@@ -426,11 +444,31 @@ describe('Rigid group rotation', () => {
         ...state.scene,
         pieces: {
           ...state.scene.pieces,
-          [p1Id]: { ...state.scene.pieces[p1Id], position: { x: 150 as Milli, y: 150 as Milli }, rotationDeg: 0 },
-          [p2Id]: { ...state.scene.pieces[p2Id], position: { x: 190 as Milli, y: 150 as Milli }, rotationDeg: 90 },
-          [p3Id]: { ...state.scene.pieces[p3Id], position: { x: 150 as Milli, y: 210 as Milli }, rotationDeg: 0 },
-          [p4Id]: { ...state.scene.pieces[p4Id], position: { x: 200 as Milli, y: 210 as Milli }, rotationDeg: 90 },
-          [p5Id]: { ...state.scene.pieces[p5Id], position: { x: 240 as Milli, y: 150 as Milli }, rotationDeg: 0 },
+          [p1Id]: {
+            ...state.scene.pieces[p1Id],
+            position: { x: 150 as Milli, y: 150 as Milli },
+            rotationDeg: 0,
+          },
+          [p2Id]: {
+            ...state.scene.pieces[p2Id],
+            position: { x: 190 as Milli, y: 150 as Milli },
+            rotationDeg: 90,
+          },
+          [p3Id]: {
+            ...state.scene.pieces[p3Id],
+            position: { x: 150 as Milli, y: 210 as Milli },
+            rotationDeg: 0,
+          },
+          [p4Id]: {
+            ...state.scene.pieces[p4Id],
+            position: { x: 200 as Milli, y: 210 as Milli },
+            rotationDeg: 90,
+          },
+          [p5Id]: {
+            ...state.scene.pieces[p5Id],
+            position: { x: 240 as Milli, y: 150 as Milli },
+            rotationDeg: 0,
+          },
         },
         revision: (state.scene.revision ?? 0) + 1,
       },
@@ -446,7 +484,7 @@ describe('Rigid group rotation', () => {
       const p = useSceneStore.getState().scene.pieces[id];
       const { x, y } = p.position;
       const { w: w0, h: h0 } = p.size; // intrinsèques
-      const r = ((p.rotationDeg ?? 0) % 360 + 360) % 360;
+      const r = (((p.rotationDeg ?? 0) % 360) + 360) % 360;
 
       if (r === 90 || r === 270) {
         const cx = x + w0 / 2;
@@ -463,7 +501,10 @@ describe('Rigid group rotation', () => {
 
     // Calcul pivot golden (centre bbox union)
     const goldenPivot = (ids: ID[]) => {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
       for (const id of ids) {
         const b = goldenBBox(id);
         minX = Math.min(minX, b.x);
@@ -487,12 +528,23 @@ describe('Rigid group rotation', () => {
     const centersBefore = selectedIds.map((id) => ({ id, ...goldenCenter(id) }));
 
     // Distances inter-centres avant (échantillon 3 paires)
-    const dist12Before = Math.hypot(centersBefore[1].x - centersBefore[0].x, centersBefore[1].y - centersBefore[0].y);
-    const dist23Before = Math.hypot(centersBefore[2].x - centersBefore[1].x, centersBefore[2].y - centersBefore[1].y);
-    const dist34Before = Math.hypot(centersBefore[3].x - centersBefore[2].x, centersBefore[3].y - centersBefore[2].y);
+    const dist12Before = Math.hypot(
+      centersBefore[1].x - centersBefore[0].x,
+      centersBefore[1].y - centersBefore[0].y,
+    );
+    const dist23Before = Math.hypot(
+      centersBefore[2].x - centersBefore[1].x,
+      centersBefore[2].y - centersBefore[1].y,
+    );
+    const dist34Before = Math.hypot(
+      centersBefore[3].x - centersBefore[2].x,
+      centersBefore[3].y - centersBefore[2].y,
+    );
 
     // Distances pivot avant
-    const distPivotBefore = centersBefore.map((c) => Math.hypot(c.x - pivotBefore.x, c.y - pivotBefore.y));
+    const distPivotBefore = centersBefore.map((c) =>
+      Math.hypot(c.x - pivotBefore.x, c.y - pivotBefore.y),
+    );
 
     // Centres attendus après +90° (golden math)
     const centersExpectedAfter1 = centersBefore.map((c) => ({
@@ -521,22 +573,39 @@ describe('Rigid group rotation', () => {
       const deltaX = Math.abs(centersAfter1[i].x - centersExpectedAfter1[i].x);
       const deltaY = Math.abs(centersAfter1[i].y - centersExpectedAfter1[i].y);
       if (deltaX > 0.1 || deltaY > 0.1) {
-        console.log(`Piece ${i} deviation: deltaX=${deltaX.toFixed(3)}, deltaY=${deltaY.toFixed(3)}`);
-        console.log(`  Expected: (${centersExpectedAfter1[i].x.toFixed(2)}, ${centersExpectedAfter1[i].y.toFixed(2)})`);
-        console.log(`  Actual:   (${centersAfter1[i].x.toFixed(2)}, ${centersAfter1[i].y.toFixed(2)})`);
+        console.log(
+          `Piece ${i} deviation: deltaX=${deltaX.toFixed(3)}, deltaY=${deltaY.toFixed(3)}`,
+        );
+        console.log(
+          `  Expected: (${centersExpectedAfter1[i].x.toFixed(2)}, ${centersExpectedAfter1[i].y.toFixed(2)})`,
+        );
+        console.log(
+          `  Actual:   (${centersAfter1[i].x.toFixed(2)}, ${centersAfter1[i].y.toFixed(2)})`,
+        );
 
         // Log piece details
         const p = useSceneStore.getState().scene.pieces[selectedIds[i]];
-        console.log(`  Position: (${p.position.x}, ${p.position.y}), Rot: ${p.rotationDeg}, Size: ${p.size.w}x${p.size.h}`);
+        console.log(
+          `  Position: (${p.position.x}, ${p.position.y}), Rot: ${p.rotationDeg}, Size: ${p.size.w}x${p.size.h}`,
+        );
       }
       expect(deltaX).toBeLessThan(0.1);
       expect(deltaY).toBeLessThan(0.1);
     }
 
     // Vérifier invariance forme (distances inter-centres)
-    const dist12After = Math.hypot(centersAfter1[1].x - centersAfter1[0].x, centersAfter1[1].y - centersAfter1[0].y);
-    const dist23After = Math.hypot(centersAfter1[2].x - centersAfter1[1].x, centersAfter1[2].y - centersAfter1[1].y);
-    const dist34After = Math.hypot(centersAfter1[3].x - centersAfter1[2].x, centersAfter1[3].y - centersAfter1[2].y);
+    const dist12After = Math.hypot(
+      centersAfter1[1].x - centersAfter1[0].x,
+      centersAfter1[1].y - centersAfter1[0].y,
+    );
+    const dist23After = Math.hypot(
+      centersAfter1[2].x - centersAfter1[1].x,
+      centersAfter1[2].y - centersAfter1[1].y,
+    );
+    const dist34After = Math.hypot(
+      centersAfter1[3].x - centersAfter1[2].x,
+      centersAfter1[3].y - centersAfter1[2].y,
+    );
 
     expect(Math.abs(dist12After - dist12Before)).toBeLessThan(0.1);
     expect(Math.abs(dist23After - dist23Before)).toBeLessThan(0.1);
@@ -544,7 +613,9 @@ describe('Rigid group rotation', () => {
 
     // Vérifier invariance distance pivot
     const pivotAfter1 = goldenPivot(selectedIds);
-    const distPivotAfter = centersAfter1.map((c) => Math.hypot(c.x - pivotAfter1.x, c.y - pivotAfter1.y));
+    const distPivotAfter = centersAfter1.map((c) =>
+      Math.hypot(c.x - pivotAfter1.x, c.y - pivotAfter1.y),
+    );
 
     for (let i = 0; i < selectedIds.length; i++) {
       expect(Math.abs(distPivotAfter[i] - distPivotBefore[i])).toBeLessThan(0.1);

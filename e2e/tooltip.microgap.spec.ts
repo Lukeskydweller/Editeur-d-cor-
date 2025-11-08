@@ -116,7 +116,7 @@ test.describe('Micro-tooltip persistante de gap', () => {
     await page.waitForTimeout(100);
     const tooltip = page.locator('.micro-gap-tooltip');
     await expect(tooltip).toBeVisible({ timeout: 500 });
-    let text = await tooltip.textContent();
+    const text = await tooltip.textContent();
     expect(text).toMatch(/3\.\d{2} mm/);
 
     // Déplacer p1 vers la droite (éloigner, +10mm par défaut avec snap ON)
@@ -149,7 +149,7 @@ test.describe('Micro-tooltip persistante de gap', () => {
 
     // Tooltip doit maintenant être visible avec gap réduit (~8mm)
     await expect(tooltip).toBeVisible({ timeout: 500 });
-    let text = await tooltip.textContent();
+    const text = await tooltip.textContent();
     expect(text).toMatch(/\d+\.\d{2} mm/);
 
     // Continuer à rapprocher pour passer < 1mm

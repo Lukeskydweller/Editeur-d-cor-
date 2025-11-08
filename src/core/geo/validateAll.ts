@@ -1,21 +1,25 @@
-import type { SceneV1, Problem, ProblemCode, Piece } from "../contracts/scene";
-import { collisionsSameLayer, type AABB } from "../collision/sat";
-import { getRotatedAABB, getRotatedCorners } from "./geometry";
-import { rectToPolygon, polygonAABB } from "./geometry";
-import { union as polyUnion, contains as polyContains, isPathOpsUsable } from "../booleans/pathopsAdapter";
-import { getSupportStrategy } from "../../lib/env";
-import { neighborsForPiece } from "../spatial/rbushIndex";
-import { queryNeighbors, isAutoEnabled } from "../../lib/spatial/globalIndex";
-import { incShortlistSource } from "../../lib/metrics";
-import * as SAT from "sat";
-import { MIN_GAP_MM, SPACING_WARN_MM } from "../../constants/validation";
+import type { SceneV1, Problem, ProblemCode, Piece } from '../contracts/scene';
+import { collisionsSameLayer, type AABB } from '../collision/sat';
+import { getRotatedAABB, getRotatedCorners } from './geometry';
+import { rectToPolygon, polygonAABB } from './geometry';
+import {
+  union as polyUnion,
+  contains as polyContains,
+  isPathOpsUsable,
+} from '../booleans/pathopsAdapter';
+import { getSupportStrategy } from '../../lib/env';
+import { neighborsForPiece } from '../spatial/rbushIndex';
+import { queryNeighbors, isAutoEnabled } from '../../lib/spatial/globalIndex';
+import { incShortlistSource } from '../../lib/metrics';
+import * as SAT from 'sat';
+import { MIN_GAP_MM, SPACING_WARN_MM } from '../../constants/validation';
 
 // Constants for spacing validation
-const EPS = 0.10;          // mm - tolerance numérique (même que checkInsideScene)
-const EPS_AREA = 0.50;     // mm² — tolérance zone non supportée
+const EPS = 0.1; // mm - tolerance numérique (même que checkInsideScene)
+const EPS_AREA = 0.5; // mm² — tolérance zone non supportée
 const SPACING_BLOCK = MIN_GAP_MM; // mm - block if distance < 1.0mm (during resize: only if overlap < 0)
-const SPACING_WARN = SPACING_WARN_MM;  // mm - warn if distance < 1.5mm
-const HALO = 3.0;          // mm - voisinage pour pré-filtrage (limite O(n²))
+const SPACING_WARN = SPACING_WARN_MM; // mm - warn if distance < 1.5mm
+const HALO = 3.0; // mm - voisinage pour pré-filtrage (limite O(n²))
 
 /**
  * Resize context for candidate validation.
@@ -57,7 +61,7 @@ export async function validateAll(scene: SceneV1): Promise<Problem[]> {
   // Router selon stratégie: PATHOPS (exact) ou AABB (approximation)
   const strategy = getSupportStrategy();
   if (strategy === 'PATHOPS' && isPathOpsUsable()) {
-    problems.push(...await checkLayerSupportExact(scene));
+    problems.push(...(await checkLayerSupportExact(scene)));
   } else {
     // Fallback AABB (Node/tests ou si PathOps indisponible)
     problems.push(...checkLayerSupportAABB(scene));
@@ -72,10 +76,10 @@ export async function validateAll(scene: SceneV1): Promise<Problem[]> {
 function checkOverlapSameLayer(scene: SceneV1): Problem[] {
   const pairs = collisionsSameLayer(scene);
   return pairs.map(([a, b]) => ({
-    code: "overlap_same_layer" as ProblemCode,
-    severity: "BLOCK" as const,
+    code: 'overlap_same_layer' as ProblemCode,
+    severity: 'BLOCK' as const,
     pieceId: a,
-    message: "Pieces overlap on the same layer",
+    message: 'Pieces overlap on the same layer',
     meta: { otherPieceId: b },
   }));
 }
@@ -87,7 +91,7 @@ function checkOverlapSameLayer(scene: SceneV1): Problem[] {
  */
 export function validateNoOverlapForCandidate(
   scene: SceneV1,
-  candidateIds: string[]
+  candidateIds: string[],
 ): { ok: boolean; problems: Problem[] } {
   const problems: Problem[] = [];
   const cand = new Set(candidateIds);
@@ -105,10 +109,10 @@ export function validateNoOverlapForCandidate(
     // This is either candidate ↔ external or external ↔ external
     // Report as BLOCK problem
     problems.push({
-      code: "overlap_same_layer" as ProblemCode,
-      severity: "BLOCK" as const,
+      code: 'overlap_same_layer' as ProblemCode,
+      severity: 'BLOCK' as const,
       pieceId: a,
-      message: "Pieces overlap on the same layer",
+      message: 'Pieces overlap on the same layer',
       meta: { otherPieceId: b },
     });
   }
@@ -122,22 +126,19 @@ export function validateNoOverlapForCandidate(
  */
 function checkInsideScene(scene: SceneV1): Problem[] {
   const out: Problem[] = [];
-  const W = scene.width;   // mm
-  const H = scene.height;  // mm
-  const EPS = 0.10;        // mm — tolérance numérique
+  const W = scene.width; // mm
+  const H = scene.height; // mm
+  const EPS = 0.1; // mm — tolérance numérique
 
   for (const p of scene.pieces) {
     const aabb = getRotatedAABB(p); // {x,y,w,h} en mm, après rotation
     const inside =
-      aabb.x >= -EPS &&
-      aabb.y >= -EPS &&
-      aabb.x + aabb.w <= W + EPS &&
-      aabb.y + aabb.h <= H + EPS;
+      aabb.x >= -EPS && aabb.y >= -EPS && aabb.x + aabb.w <= W + EPS && aabb.y + aabb.h <= H + EPS;
 
     if (!inside) {
       out.push({
-        code: "outside_scene" as ProblemCode,
-        severity: "BLOCK" as const,
+        code: 'outside_scene' as ProblemCode,
+        severity: 'BLOCK' as const,
         pieceId: p.id,
         message: `Hors cadre scène (AABB ${Math.round(aabb.w)}×${Math.round(aabb.h)} mm)`,
       });
@@ -161,8 +162,8 @@ function checkMinSize(scene: SceneV1): Problem[] {
 
     if (w < MIN || h < MIN) {
       out.push({
-        code: "min_size_violation" as ProblemCode,
-        severity: "BLOCK" as const,
+        code: 'min_size_violation' as ProblemCode,
+        severity: 'BLOCK' as const,
         pieceId: p.id,
         message: `Taille minimale 5 mm non respectée (w=${w.toFixed(1)} mm, h=${h.toFixed(1)} mm)`,
       });
@@ -180,7 +181,7 @@ function aabbHalo(a: AABB, halo: number): AABB {
     x: a.x - halo,
     y: a.y - halo,
     w: a.w + 2 * halo,
-    h: a.h + 2 * halo
+    h: a.h + 2 * halo,
   };
 }
 
@@ -188,12 +189,7 @@ function aabbHalo(a: AABB, halo: number): AABB {
  * Teste si deux AABBs se croisent (overlap ou touch).
  */
 function aabbIntersects(a: AABB, b: AABB): boolean {
-  return !(
-    a.x + a.w < b.x ||
-    b.x + b.w < a.x ||
-    a.y + a.h < b.y ||
-    b.y + b.h < a.y
-  );
+  return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
 }
 
 /**
@@ -265,7 +261,7 @@ function checkMinSpacing(scene: SceneV1): Problem[] {
   // Check spacing within each layer
   for (const layerPieces of piecesByLayer.values()) {
     // Pré-calcul des AABBs rotés pour toutes les pièces de la couche
-    const aabbs = layerPieces.map(p => ({ p, aabb: getRotatedAABB(p) }));
+    const aabbs = layerPieces.map((p) => ({ p, aabb: getRotatedAABB(p) }));
 
     for (let i = 0; i < aabbs.length; i++) {
       const { p: pi, aabb: ai } = aabbs[i];
@@ -301,8 +297,8 @@ function checkMinSpacing(scene: SceneV1): Problem[] {
         if (d + EPS < SPACING_BLOCK) {
           // BLOCK: écart < 1.0mm (ne devrait plus arriver car collage auto, mais on garde par sécurité)
           out.push({
-            code: "spacing_too_small" as ProblemCode,
-            severity: "BLOCK" as const,
+            code: 'spacing_too_small' as ProblemCode,
+            severity: 'BLOCK' as const,
             pieceId: pi.id,
             message: `Écart < 1,0 mm (d≈${d.toFixed(1)} mm)`,
             meta: { otherPieceId: pj.id, distance: d },
@@ -310,8 +306,8 @@ function checkMinSpacing(scene: SceneV1): Problem[] {
         } else if (d + EPS < SPACING_WARN) {
           // WARN: 1.0mm <= écart < 1.5mm
           out.push({
-            code: "spacing_too_small" as ProblemCode,
-            severity: "WARN" as const,
+            code: 'spacing_too_small' as ProblemCode,
+            severity: 'WARN' as const,
             pieceId: pi.id,
             message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
             meta: { otherPieceId: pj.id, distance: d },
@@ -337,10 +333,10 @@ export function collisionsForCandidate(
   pieceId: string,
   candidateRect: { x: number; y: number; w: number; h: number; rotationDeg?: number },
   sceneV1: SceneV1,
-  ctx?: ResizeContext
+  ctx?: ResizeContext,
 ): { overlap: boolean; neighbors: string[] } {
   // Get piece from scene to determine layer
-  const piece = sceneV1.pieces.find(p => p.id === pieceId);
+  const piece = sceneV1.pieces.find((p) => p.id === pieceId);
   if (!piece) {
     return { overlap: false, neighbors: [] };
   }
@@ -377,8 +373,8 @@ export function collisionsForCandidate(
   // Fallback: if spatial index empty or not initialized, check all pieces on same layer
   if (neighbors.length === 0) {
     neighbors = sceneV1.pieces
-      .filter(p => p.id !== pieceId && p.layerId === piece.layerId)
-      .map(p => p.id);
+      .filter((p) => p.id !== pieceId && p.layerId === piece.layerId)
+      .map((p) => p.id);
     source = 'ALL';
   }
 
@@ -386,11 +382,11 @@ export function collisionsForCandidate(
   incShortlistSource('collisionsForCandidate', source);
 
   // Filter to same layer only (and exclude group members if in group context)
-  const sameLayerNeighbors = neighbors.filter(nId => {
+  const sameLayerNeighbors = neighbors.filter((nId) => {
     // Exclude group members
     if (ctx?.memberIds?.has(nId)) return false;
 
-    const neighbor = sceneV1.pieces.find(p => p.id === nId);
+    const neighbor = sceneV1.pieces.find((p) => p.id === nId);
     return neighbor && neighbor.layerId === piece.layerId;
   });
 
@@ -398,11 +394,11 @@ export function collisionsForCandidate(
   const colliding: string[] = [];
   const candidateSAT = new SAT.Polygon(
     new SAT.Vector(0, 0),
-    candidatePoly.map(p => new SAT.Vector(p.x, p.y))
+    candidatePoly.map((p) => new SAT.Vector(p.x, p.y)),
   );
 
   for (const neighborId of sameLayerNeighbors) {
-    const neighbor = sceneV1.pieces.find(p => p.id === neighborId);
+    const neighbor = sceneV1.pieces.find((p) => p.id === neighborId);
     if (!neighbor) continue;
 
     // Get neighbor AABB for pre-filter
@@ -415,7 +411,7 @@ export function collisionsForCandidate(
     const neighborPoly = rectToPolygon(neighbor);
     const neighborSAT = new SAT.Polygon(
       new SAT.Vector(0, 0),
-      neighborPoly.map(p => new SAT.Vector(p.x, p.y))
+      neighborPoly.map((p) => new SAT.Vector(p.x, p.y)),
     );
 
     // Check for overlap with optional tolerance during resize
@@ -475,7 +471,7 @@ function isGapShrinking(
   neighborId: string,
   newGap: number,
   axis: 'X' | 'Y',
-  ctx: ResizeContext
+  ctx: ResizeContext,
 ): boolean {
   if (!ctx.baseline) return true; // No baseline = assume shrinking
 
@@ -501,12 +497,12 @@ export function spacingForCandidate(
   pieceId: string,
   candidateRect: { x: number; y: number; w: number; h: number; rotationDeg?: number },
   sceneV1: SceneV1,
-  ctx?: ResizeContext
+  ctx?: ResizeContext,
 ): Problem[] {
   const out: Problem[] = [];
 
   // Get piece from scene to determine layer
-  const piece = sceneV1.pieces.find(p => p.id === pieceId);
+  const piece = sceneV1.pieces.find((p) => p.id === pieceId);
   if (!piece) {
     return out;
   }
@@ -527,14 +523,12 @@ export function spacingForCandidate(
   const candidateAABB = polygonAABB(candidatePoly);
 
   // Get all pieces on same layer (excluding group members if in group context)
-  const layerPieces = sceneV1.pieces.filter(
-    p => {
-      if (p.id === pieceId) return false;
-      if (p.joined) return false;
-      if (ctx?.memberIds?.has(p.id)) return false; // Exclude group members
-      return p.layerId === piece.layerId;
-    }
-  );
+  const layerPieces = sceneV1.pieces.filter((p) => {
+    if (p.id === pieceId) return false;
+    if (p.joined) return false;
+    if (ctx?.memberIds?.has(p.id)) return false; // Exclude group members
+    return p.layerId === piece.layerId;
+  });
 
   // Enlarge candidate AABB with halo for pre-filtering
   const candidateHalo = aabbHalo(candidateAABB, HALO);
@@ -577,7 +571,9 @@ export function spacingForCandidate(
     }
 
     // Check if either piece has joined=true (allows border-to-border)
-    const joinedPair = piece.joined === true || neighbor.joined === true;
+    const pieceJoined = piece.joined as boolean | undefined;
+    const neighborJoined = neighbor.joined as boolean | undefined;
+    const joinedPair = pieceJoined === true || neighborJoined === true;
 
     // Revised rules for resize context:
     // - gap < 0: overlap (BLOCK) - handled by collisionsForCandidate
@@ -590,8 +586,8 @@ export function spacingForCandidate(
       if (d >= 0 && d < SPACING_WARN) {
         if (!joinedPair) {
           out.push({
-            code: "spacing_too_small" as ProblemCode,
-            severity: "WARN" as const,
+            code: 'spacing_too_small' as ProblemCode,
+            severity: 'WARN' as const,
             pieceId: pieceId,
             message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
             meta: { otherPieceId: neighbor.id, distance: d },
@@ -603,8 +599,8 @@ export function spacingForCandidate(
       if (d + eps < SPACING_BLOCK) {
         // BLOCK: gap < 1.0mm
         out.push({
-          code: "spacing_too_small" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'spacing_too_small' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: pieceId,
           message: `Écart < 1,0 mm (d≈${d.toFixed(1)} mm)`,
           meta: { otherPieceId: neighbor.id, distance: d },
@@ -612,8 +608,8 @@ export function spacingForCandidate(
       } else if (d + eps < SPACING_WARN) {
         // WARN: 1.0mm <= gap < 1.5mm
         out.push({
-          code: "spacing_too_small" as ProblemCode,
-          severity: "WARN" as const,
+          code: 'spacing_too_small' as ProblemCode,
+          severity: 'WARN' as const,
           pieceId: pieceId,
           message: `Écart < 1,5 mm (d≈${d.toFixed(1)} mm)`,
           meta: { otherPieceId: neighbor.id, distance: d },
@@ -696,10 +692,10 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
     if (belowPieces.length === 0) {
       for (const p of currentPieces) {
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
       }
       continue;
@@ -713,7 +709,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
 
       // Pre-filter support candidates using AABB intersection with halo
       const pieceHalo = aabbHalo(pieceAABB, HALO);
-      const supportCandidates = belowPieces.filter(support => {
+      const supportCandidates = belowPieces.filter((support) => {
         const supportAABB = getRotatedAABB(support);
         return aabbIntersects(pieceHalo, supportAABB);
       });
@@ -721,16 +717,16 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
       // If no candidates intersect, piece is unsupported
       if (supportCandidates.length === 0) {
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
         continue;
       }
 
       // Convert support candidates to polygons
-      const supportPolys = supportCandidates.map(s => rectToPolygon(s));
+      const supportPolys = supportCandidates.map((s) => rectToPolygon(s));
 
       // Calculate union of support polygons
       let unionPoly;
@@ -740,10 +736,10 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
         // If union fails, assume unsupported (conservative)
         console.error(`Failed to compute union for piece ${p.id}:`, err);
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
         continue;
       }
@@ -756,20 +752,20 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
         // If containment test fails, assume unsupported (conservative)
         console.error(`Failed to test containment for piece ${p.id}:`, err);
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
         continue;
       }
 
       if (!isContained) {
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
       }
     }
@@ -816,17 +812,17 @@ function checkLayerSupportAABB(scene: SceneV1): Problem[] {
     if (belowPieces.length === 0) {
       for (const p of currentPieces) {
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
       }
       continue;
     }
 
     // Compute union AABB of all support pieces
-    const belowAABBs = belowPieces.map(p => getRotatedAABB(p));
+    const belowAABBs = belowPieces.map((p) => getRotatedAABB(p));
     const unionAABB = aabbUnion(belowAABBs);
 
     if (!unionAABB) continue;
@@ -842,10 +838,10 @@ function checkLayerSupportAABB(scene: SceneV1): Problem[] {
 
       if (!isFullySupported) {
         out.push({
-          code: "unsupported_above" as ProblemCode,
-          severity: "BLOCK" as const,
+          code: 'unsupported_above' as ProblemCode,
+          severity: 'BLOCK' as const,
           pieceId: p.id,
-          message: "Pièce non supportée par couche inférieure",
+          message: 'Pièce non supportée par couche inférieure',
         });
       }
     }

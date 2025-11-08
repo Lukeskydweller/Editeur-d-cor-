@@ -1,5 +1,7 @@
-import { defineConfig } from 'vitest/config'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+/// <reference types="vitest" />
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -10,18 +12,14 @@ export default defineConfig({
     },
   },
   // Assure le support workers module et assets .wasm chargés via ?url
-  worker: { format: "es" },
-  preview: {
-    host: "0.0.0.0",
+  worker: { format: 'es' },
+  server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
   },
-  test: {
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: './src/setupTests.ts',
-    css: true,
-    coverage: { reporter: ['text', 'html'] },
-    exclude: ['**/node_modules/**', '**/dist/**', '**/e2e/**'],
+  preview: {
+    host: '0.0.0.0',
+    port: 5173,
+    strictPort: true,
   },
-})
+});

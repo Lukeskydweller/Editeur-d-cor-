@@ -1,17 +1,17 @@
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 import { listDrafts, type DraftMeta } from '@/lib/drafts';
 
 export function SidebarDrafts() {
   const [drafts, setDrafts] = useState<DraftMeta[]>([]);
 
-  const createDraft = useSceneStore((s) => s.createDraft);
-  const saveToDraft = useSceneStore((s) => s.saveToDraft);
-  const loadDraftById = useSceneStore((s) => s.loadDraftById);
-  const renameDraft = useSceneStore((s) => s.renameDraft);
-  const deleteDraftById = useSceneStore((s) => s.deleteDraftById);
+  const createDraft = useSceneStore((s: SceneStoreState) => s.createDraft);
+  const saveToDraft = useSceneStore((s: SceneStoreState) => s.saveToDraft);
+  const loadDraftById = useSceneStore((s: SceneStoreState) => s.loadDraftById);
+  const renameDraft = useSceneStore((s: SceneStoreState) => s.renameDraft);
+  const deleteDraftById = useSceneStore((s: SceneStoreState) => s.deleteDraftById);
 
   // Refresh drafts list
   const refreshDrafts = () => {

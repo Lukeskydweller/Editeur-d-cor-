@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 test('ProblemsPanel v1.1 grouping and filters', async ({ page }) => {
   await page.goto('/');

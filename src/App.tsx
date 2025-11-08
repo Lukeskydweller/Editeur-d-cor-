@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 import { validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
@@ -19,58 +19,58 @@ import GroupResizePreview from '@/ui/overlays/GroupResizePreview';
 import { EMPTY_ARR } from '@/state/constants';
 
 export default function App() {
-  const scene = useSceneStore((s) => s.scene);
-  const initSceneWithDefaults = useSceneStore((s) => s.initSceneWithDefaults);
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const selectedIds = useSceneStore((s) => s.ui.selectedIds);
-  const activeLayer = useSceneStore((s) => s.ui.activeLayer);
-  const layerVisibility = useSceneStore((s) => s.ui.layerVisibility);
-  const layerLocked = useSceneStore((s) => s.ui.layerLocked);
-  const selectPiece = useSceneStore((s) => s.selectPiece);
-  const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
-  const nudgeSelected = useSceneStore((s) => s.nudgeSelected);
-  const flashInvalidAt = useSceneStore((s) => s.ui.flashInvalidAt);
-  const effects = useSceneStore((s) => s.ui.effects);
+  const scene = useSceneStore((s: SceneStoreState) => s.scene);
+  const initSceneWithDefaults = useSceneStore((s: SceneStoreState) => s.initSceneWithDefaults);
+  const selectedId = useSceneStore((s: SceneStoreState) => s.ui.selectedId);
+  const selectedIds = useSceneStore((s: SceneStoreState) => s.ui.selectedIds);
+  const activeLayer = useSceneStore((s: SceneStoreState) => s.ui.activeLayer);
+  const layerVisibility = useSceneStore((s: SceneStoreState) => s.ui.layerVisibility);
+  const layerLocked = useSceneStore((s: SceneStoreState) => s.ui.layerLocked);
+  const selectPiece = useSceneStore((s: SceneStoreState) => s.selectPiece);
+  const setActiveLayer = useSceneStore((s: SceneStoreState) => s.setActiveLayer);
+  const nudgeSelected = useSceneStore((s: SceneStoreState) => s.nudgeSelected);
+  const flashInvalidAt = useSceneStore((s: SceneStoreState) => s.ui.flashInvalidAt);
+  const effects = useSceneStore((s: SceneStoreState) => s.ui.effects);
 
-  const dragging = useSceneStore((s) => s.ui.dragging);
-  const groupIsResizing = useSceneStore((s) => !!s.ui.groupResizing?.isResizing);
-  const beginDrag = useSceneStore((s) => s.beginDrag);
-  const updateDrag = useSceneStore((s) => s.updateDrag);
-  const endDrag = useSceneStore((s) => s.endDrag);
-  const cancelDrag = useSceneStore((s) => s.cancelDrag);
-  const addRectAtCenter = useSceneStore((s) => s.addRectAtCenter);
-  const deleteSelected = useSceneStore((s) => s.deleteSelected);
-  const snap10mm = useSceneStore((s) => s.ui.snap10mm ?? true);
-  const setSnap10mm = useSceneStore((s) => s.setSnap10mm);
-  const rotateSelected = useSceneStore((s) => s.rotateSelected);
-  const setSelectedRotation = useSceneStore((s) => s.setSelectedRotation);
-  const duplicateSelected = useSceneStore((s) => s.duplicateSelected);
-  const guides = useSceneStore((s) => s.ui.guides);
-  const toggleSelect = useSceneStore((s) => s.toggleSelect);
-  const clearSelection = useSceneStore((s) => s.clearSelection);
-  const selectAll = useSceneStore((s) => s.selectAll);
-  const startMarquee = useSceneStore((s) => s.startMarquee);
-  const updateMarquee = useSceneStore((s) => s.updateMarquee);
-  const endMarquee = useSceneStore((s) => s.endMarquee);
-  const marquee = useSceneStore((s) => s.ui.marquee);
-  const undo = useSceneStore((s) => s.undo);
-  const redo = useSceneStore((s) => s.redo);
-  const toSceneFileV1 = useSceneStore((s) => s.toSceneFileV1);
-  const importSceneFileV1 = useSceneStore((s) => s.importSceneFileV1);
-  const resizing = useSceneStore((s) => s.ui.resizing);
-  const startResize = useSceneStore((s) => s.startResize);
-  const updateResize = useSceneStore((s) => s.updateResize);
-  const endResize = useSceneStore((s) => s.endResize);
-  const lockEdge = useSceneStore((s) => s.ui.lockEdge ?? false);
-  const setLockEdge = useSceneStore((s) => s.setLockEdge);
-  const groupResizing = useSceneStore((s) => s.ui.groupResizing);
-  const startGroupResize = useSceneStore((s) => s.startGroupResize);
-  const updateGroupResize = useSceneStore((s) => s.updateGroupResize);
-  const endGroupResize = useSceneStore((s) => s.endGroupResize);
-  const ghost = useSceneStore((s) => s.ui.ghost);
-  const cancelGhost = useSceneStore((s) => s.cancelGhost);
-  const toggleLayerVisibility = useSceneStore((s) => s.toggleLayerVisibility);
-  const toggleLayerLock = useSceneStore((s) => s.toggleLayerLock);
+  const dragging = useSceneStore((s: SceneStoreState) => s.ui.dragging);
+  const groupIsResizing = useSceneStore((s: SceneStoreState) => !!s.ui.groupResizing?.isResizing);
+  const beginDrag = useSceneStore((s: SceneStoreState) => s.beginDrag);
+  const updateDrag = useSceneStore((s: SceneStoreState) => s.updateDrag);
+  const endDrag = useSceneStore((s: SceneStoreState) => s.endDrag);
+  const cancelDrag = useSceneStore((s: SceneStoreState) => s.cancelDrag);
+  const addRectAtCenter = useSceneStore((s: SceneStoreState) => s.addRectAtCenter);
+  const deleteSelected = useSceneStore((s: SceneStoreState) => s.deleteSelected);
+  const snap10mm = useSceneStore((s: SceneStoreState) => s.ui.snap10mm ?? true);
+  const setSnap10mm = useSceneStore((s: SceneStoreState) => s.setSnap10mm);
+  const rotateSelected = useSceneStore((s: SceneStoreState) => s.rotateSelected);
+  const setSelectedRotation = useSceneStore((s: SceneStoreState) => s.setSelectedRotation);
+  const duplicateSelected = useSceneStore((s: SceneStoreState) => s.duplicateSelected);
+  const guides = useSceneStore((s: SceneStoreState) => s.ui.guides);
+  const toggleSelect = useSceneStore((s: SceneStoreState) => s.toggleSelect);
+  const clearSelection = useSceneStore((s: SceneStoreState) => s.clearSelection);
+  const selectAll = useSceneStore((s: SceneStoreState) => s.selectAll);
+  const startMarquee = useSceneStore((s: SceneStoreState) => s.startMarquee);
+  const updateMarquee = useSceneStore((s: SceneStoreState) => s.updateMarquee);
+  const endMarquee = useSceneStore((s: SceneStoreState) => s.endMarquee);
+  const marquee = useSceneStore((s: SceneStoreState) => s.ui.marquee);
+  const undo = useSceneStore((s: SceneStoreState) => s.undo);
+  const redo = useSceneStore((s: SceneStoreState) => s.redo);
+  const toSceneFileV1 = useSceneStore((s: SceneStoreState) => s.toSceneFileV1);
+  const importSceneFileV1 = useSceneStore((s: SceneStoreState) => s.importSceneFileV1);
+  const resizing = useSceneStore((s: SceneStoreState) => s.ui.resizing);
+  const startResize = useSceneStore((s: SceneStoreState) => s.startResize);
+  const updateResize = useSceneStore((s: SceneStoreState) => s.updateResize);
+  const endResize = useSceneStore((s: SceneStoreState) => s.endResize);
+  const lockEdge = useSceneStore((s: SceneStoreState) => s.ui.lockEdge ?? false);
+  const setLockEdge = useSceneStore((s: SceneStoreState) => s.setLockEdge);
+  const groupResizing = useSceneStore((s: SceneStoreState) => s.ui.groupResizing);
+  const startGroupResize = useSceneStore((s: SceneStoreState) => s.startGroupResize);
+  const updateGroupResize = useSceneStore((s: SceneStoreState) => s.updateGroupResize);
+  const endGroupResize = useSceneStore((s: SceneStoreState) => s.endGroupResize);
+  const ghost = useSceneStore((s: SceneStoreState) => s.ui.ghost);
+  const cancelGhost = useSceneStore((s: SceneStoreState) => s.cancelGhost);
+  const toggleLayerVisibility = useSceneStore((s: SceneStoreState) => s.toggleLayerVisibility);
+  const toggleLayerLock = useSceneStore((s: SceneStoreState) => s.toggleLayerLock);
 
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const dragFactorRef = useRef<number>(1);
@@ -100,7 +100,10 @@ export default function App() {
     }
 
     // Multiple pieces: compute union AABB (group bbox)
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
     for (const id of selectedIdsList) {
       const piece = scene.pieces[id];
       if (!piece) continue;
@@ -116,7 +119,7 @@ export default function App() {
 
   // Expose selectionBBox to UI store for SelectionHandles component
   useEffect(() => {
-    useSceneStore.setState((state) => ({
+    useSceneStore.setState((state: SceneStoreState) => ({
       ui: { ...state.ui, selectionBBox: selectionBBox ?? undefined },
     }));
   }, [selectionBBox]);
@@ -133,7 +136,14 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('e2e') !== '1') return;
 
-    type SeedPiece = { id?: string; x: number; y: number; w: number; h: number; deg?: 0 | 90 | 180 | 270 };
+    type SeedPiece = {
+      id?: string;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      deg?: 0 | 90 | 180 | 270;
+    };
 
     (window as any).__e2e = {
       seedPieces: (pieces: SeedPiece[]) => {
@@ -157,7 +167,7 @@ export default function App() {
           };
         });
 
-        useSceneStore.setState((state) => ({
+        useSceneStore.setState((state: SceneStoreState) => ({
           scene: {
             ...state.scene,
             pieces: newPieces,
@@ -176,7 +186,8 @@ export default function App() {
         // Add computed _aabb for each piece for test convenience
         const piecesWithAABB: Record<string, any> = {};
         Object.entries(state.scene.pieces).forEach(([id, piece]) => {
-          const bbox = pieceBBox(piece);
+          if (typeof piece !== 'object' || !piece) return;
+          const bbox = pieceBBox(piece as any); // E2E boundary: external test API, piece already validated
           piecesWithAABB[id] = { ...piece, _aabb: bbox };
         });
 
@@ -192,7 +203,7 @@ export default function App() {
       selectAll: () => {
         const store = useSceneStore.getState();
         const allIds = Object.keys(store.scene.pieces);
-        useSceneStore.setState((state) => ({
+        useSceneStore.setState((state: SceneStoreState) => ({
           ui: {
             ...state.ui,
             selectedId: undefined,
@@ -202,7 +213,7 @@ export default function App() {
       },
 
       select: (ids: string[]) => {
-        useSceneStore.setState((state) => ({
+        useSceneStore.setState((state: SceneStoreState) => ({
           ui: {
             ...state.ui,
             selectedId: ids.length === 1 ? ids[0] : undefined,
@@ -364,9 +375,26 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    nudgeSelected, deleteSelected, rotateSelected, setSelectedRotation, duplicateSelected, clearSelection, selectAll, undo, redo,
-    resizing, endResize, snap10mm, activeLayer, setActiveLayer, toggleLayerVisibility, toggleLayerLock, groupResizing, endGroupResize,
-    ghost, cancelGhost
+    nudgeSelected,
+    deleteSelected,
+    rotateSelected,
+    setSelectedRotation,
+    duplicateSelected,
+    clearSelection,
+    selectAll,
+    undo,
+    redo,
+    resizing,
+    endResize,
+    snap10mm,
+    activeLayer,
+    setActiveLayer,
+    toggleLayerVisibility,
+    toggleLayerLock,
+    groupResizing,
+    endGroupResize,
+    ghost,
+    cancelGhost,
   ]);
 
   // Global listeners to end/cancel operations on window blur or pointerup outside canvas
@@ -401,11 +429,7 @@ export default function App() {
 
     // Generate filename with timestamp
     const now = new Date();
-    const timestamp = now
-      .toISOString()
-      .replace(/T/, '-')
-      .replace(/:/g, '')
-      .slice(0, 17); // YYYYMMDD-HHMMSS
+    const timestamp = now.toISOString().replace(/T/, '-').replace(/:/g, '').slice(0, 17); // YYYYMMDD-HHMMSS
     const filename = `scene-v1-${timestamp}.json`;
 
     // Create temp anchor and trigger download
@@ -433,7 +457,8 @@ export default function App() {
       importSceneFileV1(data);
       setImportError(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Format invalide ou erreur de parsing JSON';
+      const message =
+        error instanceof Error ? error.message : 'Format invalide ou erreur de parsing JSON';
       setImportError(message);
     }
 
@@ -558,7 +583,12 @@ export default function App() {
   };
 
   // Resize handle start
-  const handleResizeStart = (pieceId: string, handle: ResizeHandle, clientX: number, clientY: number) => {
+  const handleResizeStart = (
+    pieceId: string,
+    handle: ResizeHandle,
+    clientX: number,
+    clientY: number,
+  ) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
 
@@ -592,7 +622,11 @@ export default function App() {
   };
 
   // Group resize handlers
-  const handleGroupResizeStart = (handle: ResizeHandle, clientX: number, clientY: number) => {
+  const handleGroupResizeStart = (
+    handle: ResizeHandle | (string & {}),
+    clientX: number,
+    clientY: number,
+  ) => {
     const rect = svgRef.current?.getBoundingClientRect();
     if (!rect) return;
 
@@ -605,7 +639,7 @@ export default function App() {
 
     groupResizeStartRef.current = { x: clientX, y: clientY };
 
-    startGroupResize(handle, { x: svgX, y: svgY });
+    startGroupResize(handle as ResizeHandle, { x: svgX, y: svgY }); // Type narrowing: handle is ResizeHandle from SelectionHandles
     updateGroupResize({ x: svgX, y: svgY });
   };
 
@@ -654,32 +688,67 @@ export default function App() {
               <div className="flex items-center gap-4 flex-wrap">
                 <div className="flex gap-2">
                   <Button onClick={() => addRectAtCenter(100, 60)}>Ajouter rectangle</Button>
-                  <Button onClick={duplicateSelected} disabled={!selectedId && !selectedIds?.length}>
+                  <Button
+                    onClick={duplicateSelected}
+                    disabled={!selectedId && !selectedIds?.length}
+                  >
                     Dupliquer
                   </Button>
-                  <Button onClick={deleteSelected} disabled={!selectedId && !selectedIds?.length} variant="destructive">
+                  <Button
+                    onClick={deleteSelected}
+                    disabled={!selectedId && !selectedIds?.length}
+                    variant="destructive"
+                  >
                     Supprimer
                   </Button>
                 </div>
                 <div className="flex gap-2">
-                  <Button onClick={() => rotateSelected(-90)} disabled={!selectedId && !selectedIds?.length} size="sm">
+                  <Button
+                    onClick={() => rotateSelected(-90)}
+                    disabled={!selectedId && !selectedIds?.length}
+                    size="sm"
+                  >
                     Rotate −90°
                   </Button>
-                  <Button onClick={() => rotateSelected(90)} disabled={!selectedId && !selectedIds?.length} size="sm">
+                  <Button
+                    onClick={() => rotateSelected(90)}
+                    disabled={!selectedId && !selectedIds?.length}
+                    size="sm"
+                  >
                     Rotate +90°
                   </Button>
-                  <Button onClick={() => setSelectedRotation(0)} disabled={!selectedId && !selectedIds?.length} size="sm" variant="outline">
+                  <Button
+                    onClick={() => setSelectedRotation(0)}
+                    disabled={!selectedId && !selectedIds?.length}
+                    size="sm"
+                    variant="outline"
+                  >
                     Rotation 0°
                   </Button>
-                  <Button onClick={() => setSelectedRotation(90)} disabled={!selectedId && !selectedIds?.length} size="sm" variant="outline">
+                  <Button
+                    onClick={() => setSelectedRotation(90)}
+                    disabled={!selectedId && !selectedIds?.length}
+                    size="sm"
+                    variant="outline"
+                  >
                     Rotation 90°
                   </Button>
                 </div>
                 <div className="flex gap-2">
-                  <Button onClick={handleExport} size="sm" variant="outline" aria-label="export-json">
+                  <Button
+                    onClick={handleExport}
+                    size="sm"
+                    variant="outline"
+                    aria-label="export-json"
+                  >
                     Exporter JSON
                   </Button>
-                  <Button onClick={handleImportClick} size="sm" variant="outline" aria-label="import-json">
+                  <Button
+                    onClick={handleImportClick}
+                    size="sm"
+                    variant="outline"
+                    aria-label="import-json"
+                  >
                     Importer JSON
                   </Button>
                   <input
@@ -712,243 +781,303 @@ export default function App() {
                 </label>
               </div>
 
-          {/* Barre de statut des avertissements (orientation matériau uniquement) */}
-          <div className="space-y-2">
-
-            {hasWarnings && (
-              <div
-                className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
-                role="status"
-                aria-live="polite"
-                data-testid="warn-banner"
-              >
-                <div className="font-bold">
-                  WARN — {orientation.warnings.length} matériau{orientation.warnings.length > 1 ? 'x' : ''} non aligné
-                  {orientation.warnings.length > 1 ? 's' : ''}
-                </div>
-                <div className="mt-1 text-xs space-y-1">
-                  {orientation.warnings.slice(0, 3).map((w) => (
-                    <div key={w.pieceId}>
-                      {w.pieceId} → {w.materialId} (attendu {w.expectedDeg}°, réel {w.actualDeg}°)
-                    </div>
-                  ))}
-                  {orientation.warnings.length > 3 && (
-                    <div className="text-yellow-300">... et {orientation.warnings.length - 3} de plus</div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {importError && (
-              <div
-                className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
-                role="status"
-                aria-live="polite"
-                data-testid="warn-banner"
-              >
-                <div className="font-bold">WARN — Import invalide</div>
-                <div className="mt-1 text-xs">{importError}</div>
-              </div>
-            )}
-          </div>
-
-          {/* Canvas SVG */}
-          <div
-            className="relative w-full overflow-auto rounded-xl border border-white/10 bg-black/20"
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerLeave}
-          >
-            <svg
-              width="100%"
-              ref={svgRef}
-              viewBox={`0 0 ${scene.size.w} ${scene.size.h}`}
-              className="block"
-              role="img"
-              aria-label="editor-canvas"
-              onPointerDown={handleBackgroundPointerDown}
-            >
-              {/* Grille 10mm */}
-              <defs>
-                <pattern id="grid10mm" width="10" height="10" patternUnits="userSpaceOnUse">
-                  <path d="M 10 0 L 0 0 0 10" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="0.5" />
-                </pattern>
-              </defs>
-
-              {/* fond */}
-              <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="#0f172a" />
-              {/* grille sous les pièces */}
-              <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="url(#grid10mm)" />
-              {/* pièces rect - grouped by layers for painter's order and interaction isolation */}
-              {scene.layerOrder.map((layerId) => {
-                const layer = scene.layers[layerId];
-                if (!layer) return null;
-
-                const isActive = layerId === activeLayer;
-                const isVisible = layerVisibility?.[layerId] ?? true;
-                const isLocked = layerLocked?.[layerId] ?? false;
-
-                return (
-                  <g
-                    key={layerId}
-                    data-layer={layer.name}
-                    style={{
-                      pointerEvents: (isVisible && !isLocked && isActive) ? 'all' : 'none',
-                      opacity: isVisible ? (isActive ? 1 : 0.5) : 0
-                    }}
+              {/* Barre de statut des avertissements (orientation matériau uniquement) */}
+              <div className="space-y-2">
+                {hasWarnings && (
+                  <div
+                    className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="warn-banner"
                   >
-                    {layer.pieces.map((pieceId) => {
-                      const p = scene.pieces[pieceId];
-                      if (!p || p.kind !== 'rect') return null;
+                    <div className="font-bold">
+                      WARN — {orientation.warnings.length} matériau
+                      {orientation.warnings.length > 1 ? 'x' : ''} non aligné
+                      {orientation.warnings.length > 1 ? 's' : ''}
+                    </div>
+                    <div className="mt-1 text-xs space-y-1">
+                      {orientation.warnings.slice(0, 3).map((w) => (
+                        <div key={w.pieceId}>
+                          {w.pieceId} → {w.materialId} (attendu {w.expectedDeg}°, réel {w.actualDeg}
+                          °)
+                        </div>
+                      ))}
+                      {orientation.warnings.length > 3 && (
+                        <div className="text-yellow-300">
+                          ... et {orientation.warnings.length - 3} de plus
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
-                      const { x, y } = p.position;
-                      const { w, h } = p.size;
-                      const actualSelectedIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
-                      const isSelected = actualSelectedIds.includes(p.id);
-                      const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
-                      const isFocused = effects?.focusId === p.id;
-                      const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
+                {importError && (
+                  <div
+                    className="rounded-lg px-4 py-3 text-sm font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/40"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="warn-banner"
+                  >
+                    <div className="font-bold">WARN — Import invalide</div>
+                    <div className="mt-1 text-xs">{importError}</div>
+                  </div>
+                )}
+              </div>
 
-                      // Check if this is a ghost piece
-                      const isGhost = ghost?.pieceId === p.id;
-                      const ghostHasBlock = isGhost && ghost.problems.some(prob => prob.severity === 'BLOCK');
-                      const ghostHasWarn = isGhost && ghost.problems.some(prob => prob.severity === 'WARN') && !ghostHasBlock;
+              {/* Canvas SVG */}
+              <div
+                className="relative w-full overflow-auto rounded-xl border border-white/10 bg-black/20"
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerLeave={handlePointerLeave}
+              >
+                <svg
+                  width="100%"
+                  ref={svgRef}
+                  viewBox={`0 0 ${scene.size.w} ${scene.size.h}`}
+                  className="block"
+                  role="img"
+                  aria-label="editor-canvas"
+                  data-testid="scene-canvas"
+                  onPointerDown={handleBackgroundPointerDown}
+                >
+                  {/* Grille 10mm */}
+                  <defs>
+                    <pattern id="grid10mm" width="10" height="10" patternUnits="userSpaceOnUse">
+                      <path
+                        d="M 10 0 L 0 0 0 10"
+                        fill="none"
+                        stroke="rgba(255,255,255,0.1)"
+                        strokeWidth="0.5"
+                      />
+                    </pattern>
+                  </defs>
 
-                      return (
-                        <g
-                          key={p.id}
-                          transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
-                          data-testid={isSelected ? 'piece-selected' : undefined}
-                          data-invalid={isFlashingInvalid ? 'true' : undefined}
-                          data-ghost={isGhost ? 'true' : undefined}
-                        >
-                          <rect
-                            x="0"
-                            y="0"
-                            width={w}
-                            height={h}
-                            rx="6"
-                            ry="6"
-                            fill={isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'} /* rouge/orange si ghost, bleu sinon */
-                            stroke={isFlashingInvalid ? '#ef4444' : isSelected || isFocused ? '#22d3ee' : isGhost ? (ghostHasBlock ? '#dc2626' : '#f59e0b') : '#1e3a8a'}
-                            strokeWidth={isGhost ? '4' : isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
-                            onPointerDown={(e) => handlePointerDown(e, p.id)}
-                            style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
-                            className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
-                          />
-                        </g>
-                      );
-                    })}
-                  </g>
-                );
-              })}
-              {/* Ghost piece pendant drag - now handled by GroupGhostOverlay */}
-              {/* Snap guides */}
-              {guides && guides.length > 0 && (
-                <g data-testid="snap-guides">
-                  {guides.map((guide, i) => {
-                    if (guide.kind === 'v') {
-                      return (
-                        <line
-                          key={`v-${i}`}
-                          x1={guide.x}
-                          y1={0}
-                          x2={guide.x}
-                          y2={scene.size.h}
-                          stroke="#22d3ee"
-                          strokeWidth="1"
-                          strokeDasharray="4 4"
-                          pointerEvents="none"
-                        />
-                      );
-                    } else {
-                      return (
-                        <line
-                          key={`h-${i}`}
-                          x1={0}
-                          y1={guide.y}
-                          x2={scene.size.w}
-                          y2={guide.y}
-                          stroke="#22d3ee"
-                          strokeWidth="1"
-                          strokeDasharray="4 4"
-                          pointerEvents="none"
-                        />
-                      );
-                    }
-                  })}
-                </g>
-              )}
-              {/* Marquee */}
-              {marquee && (() => {
-                const { x0, y0, x1, y1 } = marquee;
-                const minX = Math.min(x0, x1);
-                const minY = Math.min(y0, y1);
-                const width = Math.abs(x1 - x0);
-                const height = Math.abs(y1 - y0);
-                return (
+                  {/* fond */}
+                  <rect x="0" y="0" width={scene.size.w} height={scene.size.h} fill="#0f172a" />
+                  {/* grille sous les pièces */}
                   <rect
-                    key="marquee"
-                    x={minX}
-                    y={minY}
-                    width={width}
-                    height={height}
-                    fill="rgba(34,211,238,0.1)"
-                    stroke="#22d3ee"
-                    strokeWidth="1"
-                    strokeDasharray="4 4"
-                    pointerEvents="none"
-                    data-testid="marquee"
+                    x="0"
+                    y="0"
+                    width={scene.size.w}
+                    height={scene.size.h}
+                    fill="url(#grid10mm)"
                   />
-                );
-              })()}
-              {/* Group ghost overlay - shows ghost for each selected piece during drag */}
-              <GroupGhostOverlay />
-              {/* Group resize preview - ONLY mounted during active group resize */}
-              {groupIsResizing && <GroupResizePreview />}
-              {/* Selection handles - rendered in same coordinate space as pieces */}
-              <SelectionHandles onGroupResizeStart={handleGroupResizeStart} />
-              {/* bordure scène */}
-              <rect
-                x="0.5"
-                y="0.5"
-                width={scene.size.w - 1}
-                height={scene.size.h - 1}
-                fill="none"
-                stroke="#94a3b8"
-                strokeDasharray="8 8"
-                strokeWidth="1"
-              />
-            </svg>
-            {/* Resize handles overlay - supports rotation via local frame transforms */}
-            {selectedId && (!selectedIds || selectedIds.length === 1) && (() => {
-              const piece = scene.pieces[selectedId];
-              if (!piece || piece.kind !== 'rect') return null;
+                  {/* pièces rect - grouped by layers for painter's order and interaction isolation */}
+                  {scene.layerOrder.map((layerId: string) => {
+                    const layer = scene.layers[layerId];
+                    if (!layer) return null;
 
-              // S23b: Handles now visible at all rotations (0/90/180/270)
-              // Resize logic uses local frame transforms
+                    const isActive = layerId === activeLayer;
+                    const isVisible = layerVisibility?.[layerId] ?? true;
+                    const isLocked = layerLocked?.[layerId] ?? false;
 
-              const rect = {
-                x: piece.position.x,
-                y: piece.position.y,
-                w: piece.size.w,
-                h: piece.size.h,
-              };
+                    return (
+                      <g
+                        key={layerId}
+                        data-layer={layer.name}
+                        style={{
+                          pointerEvents: isVisible && !isLocked && isActive ? 'all' : 'none',
+                          opacity: isVisible ? (isActive ? 1 : 0.5) : 0,
+                        }}
+                      >
+                        {layer.pieces.map((pieceId: string) => {
+                          const p = scene.pieces[pieceId];
+                          if (!p || p.kind !== 'rect') return null;
 
-              return (
-                <ResizeHandlesOverlay
-                  rect={rect}
-                  rotationDeg={piece.rotationDeg ?? 0}
-                  svgElement={svgRef.current}
-                  onStart={(handle, clientX, clientY) => handleResizeStart(selectedId, handle, clientX, clientY)}
-                  onMove={handleResizeMove}
-                  onEnd={handleResizeEnd}
-                  isResizing={!!resizing}
-                  hasGhostProblems={ghost?.pieceId === selectedId && ghost.problems.some(p => p.severity === 'BLOCK')}
-                />
-              );
-            })()}
-            {/* Group resize handles: handled by SelectionHandles inside SVG (no separate overlay) */}
+                          const { x, y } = p.position;
+                          const { w, h } = p.size;
+                          const actualSelectedIds =
+                            selectedIds ??
+                            (selectedId ? [selectedId] : (EMPTY_ARR as unknown as string[]));
+                          const isSelected = actualSelectedIds.includes(p.id);
+                          const isFlashingInvalid =
+                            isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
+                          const isFocused = effects?.focusId === p.id;
+                          const isFlashing =
+                            effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
+
+                          // Check if this is a ghost piece
+                          const isGhost = ghost?.pieceId === p.id;
+                          const ghostHasBlock =
+                            isGhost &&
+                            ghost.problems.some(
+                              (prob: { severity: string }) => prob.severity === 'BLOCK',
+                            );
+                          const ghostHasWarn =
+                            isGhost &&
+                            ghost.problems.some(
+                              (prob: { severity: string }) => prob.severity === 'WARN',
+                            ) &&
+                            !ghostHasBlock;
+
+                          return (
+                            <g
+                              key={p.id}
+                              transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
+                              data-testid="piece-rect"
+                              data-piece-id={p.id}
+                              data-selected={isSelected ? 'true' : undefined}
+                              data-invalid={isFlashingInvalid ? 'true' : undefined}
+                              data-ghost={isGhost ? 'true' : undefined}
+                            >
+                              <rect
+                                x="0"
+                                y="0"
+                                width={w}
+                                height={h}
+                                rx="6"
+                                ry="6"
+                                fill={
+                                  isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'
+                                } /* rouge/orange si ghost, bleu sinon */
+                                stroke={
+                                  isFlashingInvalid
+                                    ? '#ef4444'
+                                    : isSelected || isFocused
+                                      ? '#22d3ee'
+                                      : isGhost
+                                        ? ghostHasBlock
+                                          ? '#dc2626'
+                                          : '#f59e0b'
+                                        : '#1e3a8a'
+                                }
+                                strokeWidth={
+                                  isGhost
+                                    ? '4'
+                                    : isFlashingInvalid
+                                      ? '4'
+                                      : isSelected || isFocused
+                                        ? '3'
+                                        : '2'
+                                }
+                                onPointerDown={(e) => handlePointerDown(e, p.id)}
+                                style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
+                                className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
+                              />
+                            </g>
+                          );
+                        })}
+                      </g>
+                    );
+                  })}
+                  {/* Ghost piece pendant drag - now handled by GroupGhostOverlay */}
+                  {/* Snap guides */}
+                  {guides && guides.length > 0 && (
+                    <g data-testid="snap-guides">
+                      {guides.map(
+                        (guide: { kind: 'v' | 'h'; x?: number; y?: number }, i: number) => {
+                          if (guide.kind === 'v') {
+                            return (
+                              <line
+                                key={`v-${i}`}
+                                x1={guide.x}
+                                y1={0}
+                                x2={guide.x}
+                                y2={scene.size.h}
+                                stroke="#22d3ee"
+                                strokeWidth="1"
+                                strokeDasharray="4 4"
+                                pointerEvents="none"
+                              />
+                            );
+                          } else {
+                            return (
+                              <line
+                                key={`h-${i}`}
+                                x1={0}
+                                y1={guide.y}
+                                x2={scene.size.w}
+                                y2={guide.y}
+                                stroke="#22d3ee"
+                                strokeWidth="1"
+                                strokeDasharray="4 4"
+                                pointerEvents="none"
+                              />
+                            );
+                          }
+                        },
+                      )}
+                    </g>
+                  )}
+                  {/* Marquee */}
+                  {marquee &&
+                    (() => {
+                      const { x0, y0, x1, y1 } = marquee;
+                      const minX = Math.min(x0, x1);
+                      const minY = Math.min(y0, y1);
+                      const width = Math.abs(x1 - x0);
+                      const height = Math.abs(y1 - y0);
+                      return (
+                        <rect
+                          key="marquee"
+                          x={minX}
+                          y={minY}
+                          width={width}
+                          height={height}
+                          fill="rgba(34,211,238,0.1)"
+                          stroke="#22d3ee"
+                          strokeWidth="1"
+                          strokeDasharray="4 4"
+                          pointerEvents="none"
+                          data-testid="marquee"
+                        />
+                      );
+                    })()}
+                  {/* Group ghost overlay - shows ghost for each selected piece during drag */}
+                  <GroupGhostOverlay />
+                  {/* Group resize preview - ONLY mounted during active group resize */}
+                  {groupIsResizing && <GroupResizePreview />}
+                  {/* Selection handles - rendered in same coordinate space as pieces */}
+                  <SelectionHandles onGroupResizeStart={handleGroupResizeStart} />
+                  {/* bordure scène */}
+                  <rect
+                    x="0.5"
+                    y="0.5"
+                    width={scene.size.w - 1}
+                    height={scene.size.h - 1}
+                    fill="none"
+                    stroke="#94a3b8"
+                    strokeDasharray="8 8"
+                    strokeWidth="1"
+                  />
+                </svg>
+                {/* Resize handles overlay - supports rotation via local frame transforms */}
+                {selectedId &&
+                  (!selectedIds || selectedIds.length === 1) &&
+                  (() => {
+                    const piece = scene.pieces[selectedId];
+                    if (!piece || piece.kind !== 'rect') return null;
+
+                    // S23b: Handles now visible at all rotations (0/90/180/270)
+                    // Resize logic uses local frame transforms
+
+                    const rect = {
+                      x: piece.position.x,
+                      y: piece.position.y,
+                      w: piece.size.w,
+                      h: piece.size.h,
+                    };
+
+                    return (
+                      <ResizeHandlesOverlay
+                        rect={rect}
+                        rotationDeg={piece.rotationDeg ?? 0}
+                        svgElement={svgRef.current}
+                        onStart={(handle, clientX, clientY) =>
+                          handleResizeStart(selectedId, handle, clientX, clientY)
+                        }
+                        onMove={handleResizeMove}
+                        onEnd={handleResizeEnd}
+                        isResizing={!!resizing}
+                        hasGhostProblems={
+                          ghost?.pieceId === selectedId &&
+                          ghost.problems.some((p: { severity: string }) => p.severity === 'BLOCK')
+                        }
+                      />
+                    );
+                  })()}
+                {/* Group resize handles: handled by SelectionHandles inside SVG (no separate overlay) */}
               </div>
             </CardContent>
           </Card>

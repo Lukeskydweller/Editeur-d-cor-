@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: corepack enable
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm typecheck
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true # Informational: signals issues without blocking
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: corepack enable
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm lint --max-warnings=-1
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: corepack enable
+      - run: pnpm i --frozen-lockfile
+
+      - name: Check coverage exclude budget
+        run: node scripts/check-coverage-exclude.mjs
+
+      - run: pnpm test:unit:ci
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+      - name: Upload coverage to Codecov (optional)
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage/coverage-final.json
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Run E2E Smoke Tests
+        run: npx playwright test --grep="@smoke" --reporter=dot
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-smoke
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    needs: [typecheck, unit, e2e-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: corepack enable
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm build
+
+  # Mise à jour du snapshot — seulement sur main
+  update-coverage-snapshot:
+    if: github.ref == 'refs/heads/main'
+    needs: [unit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: corepack enable
+      - run: pnpm i --frozen-lockfile
+
+      - name: Update coverage exclude snapshot (main only)
+        run: node scripts/update-coverage-exclude-snapshot.mjs
+
+      - name: Commit updated snapshot
+        run: |
+          if [[ -n "$(git status --porcelain .ci/coverage-exclude.snapshot.txt)" ]]; then
+            git config user.name "ci-bot"
+            git config user.email "ci@noreply.github.com"
+            git add .ci/coverage-exclude.snapshot.txt
+            git commit -m "ci(coverage): update exclude budget snapshot [skip ci]"
+            git push
+          else
+            echo "No snapshot change"
+          fi

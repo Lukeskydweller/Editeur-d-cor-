@@ -24,8 +24,13 @@ export function getAll(): Record<string, number> {
 
 // Helpers for shortlist source tracking
 export function incShortlistSource(
-  fn: 'snapToPieces' | 'snapGroupToPieces' | 'collisionsForPiece' | 'collisionsSameLayer',
-  source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL'
+  fn:
+    | 'snapToPieces'
+    | 'snapGroupToPieces'
+    | 'collisionsForPiece'
+    | 'collisionsSameLayer'
+    | 'collisionsForCandidate',
+  source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL',
 ) {
   inc(`shortlist_source_total{fn=${fn},source=${source}}`);
 }

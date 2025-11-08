@@ -1,5 +1,5 @@
 import React from 'react';
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 
 /**
  * Renders ghost overlays for all selected pieces during drag.
@@ -7,12 +7,12 @@ import { useSceneStore } from '@/state/useSceneStore';
  * Rendered in the same SVG coordinate space as pieces (no viewport transform).
  */
 const GroupGhostOverlay = React.memo(() => {
-  const scene = useSceneStore((s) => s.scene);
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const selectedIds = useSceneStore((s) => s.ui.selectedIds);
-  const isTransientActive = useSceneStore((s) => s.ui.isTransientActive);
-  const transientDelta = useSceneStore((s) => s.ui.transientDelta);
-  const dragging = useSceneStore((s) => s.ui.dragging);
+  const scene = useSceneStore((s: SceneStoreState) => s.scene);
+  const selectedId = useSceneStore((s: SceneStoreState) => s.ui.selectedId);
+  const selectedIds = useSceneStore((s: SceneStoreState) => s.ui.selectedIds);
+  const isTransientActive = useSceneStore((s: SceneStoreState) => s.ui.isTransientActive);
+  const transientDelta = useSceneStore((s: SceneStoreState) => s.ui.transientDelta);
+  const dragging = useSceneStore((s: SceneStoreState) => s.ui.dragging);
 
   // Only render during drag (not resize) with transientDelta
   if (!isTransientActive || !transientDelta || !dragging) {

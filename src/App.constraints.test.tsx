@@ -104,6 +104,9 @@ test('blocks nudge and flashes invalid when overlap would occur', () => {
   expect(flashInvalidAt).toBeDefined();
 
   // Vérifier que la pièce sélectionnée a data-invalid="true"
-  const selectedPiece = screen.getByTestId('piece-selected');
+  const selectedPiece = screen
+    .getAllByTestId('piece-rect')
+    .find((el) => el.getAttribute('data-selected') === 'true');
+  expect(selectedPiece).toBeDefined();
   expect(selectedPiece).toHaveAttribute('data-invalid', 'true');
 });

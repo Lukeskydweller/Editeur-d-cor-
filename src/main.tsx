@@ -1,7 +1,7 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App'
-import './index.css'
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
 
 // Runtime feature flags
 declare global {
@@ -23,7 +23,9 @@ window.__flags = {
 // E2E test hooks for PathOps (dev and preview mode for E2E testing)
 // Check if running in development OR if window location is localhost (preview server)
 if (import.meta.env.DEV || window.location.hostname === 'localhost') {
-  const geoWorker = new Worker(new URL('./workers/geo.worker.ts', import.meta.url), { type: 'module' });
+  const geoWorker = new Worker(new URL('./workers/geo.worker.ts', import.meta.url), {
+    type: 'module',
+  });
   let msgIdCounter = 1;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
 
@@ -64,7 +66,9 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
       // Add a second piece
       if (pieces.length === 1) {
         const p1 = pieces[0];
-        store.addRectAtCenter(p1.size.w, p1.size.h);
+        if (!p1 || typeof p1 !== 'object' || !('size' in p1)) return false;
+        const p1Typed = p1 as any; // E2E boundary: test hook, pieces already validated
+        store.addRectAtCenter(p1Typed.size.w, p1Typed.size.h);
         const newPieces = Object.values(useSceneStore.getState().scene.pieces);
         if (newPieces.length < 2) return false;
       } else {
@@ -76,25 +80,30 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     const piecesNow = Object.values(useSceneStore.getState().scene.pieces);
     if (piecesNow.length >= 2) {
       const [p1, p2] = piecesNow;
+      if (!p1 || !p2 || typeof p1 !== 'object' || typeof p2 !== 'object') return false;
+      if (!('id' in p1) || !('id' in p2) || !('position' in p1) || !('position' in p2))
+        return false;
       // Move p2 to overlap with p1 by directly modifying position
-      useSceneStore.setState((state) => ({
+      const p1Typed = p1 as any; // E2E boundary: test hook, pieces already validated
+      const p2Typed = p2 as any; // E2E boundary: test hook, pieces already validated
+      useSceneStore.setState((state: ReturnType<typeof useSceneStore.getState>) => ({
         scene: {
           ...state.scene,
           pieces: {
             ...state.scene.pieces,
-            [p2.id]: {
-              ...p2,
+            [p2Typed.id]: {
+              ...p2Typed,
               position: {
-                x: p1.position.x + 5,  // Overlap by positioning p2 near p1
-                y: p1.position.y + 5
-              }
-            }
-          }
-        }
+                x: p1Typed.position.x + 5, // Overlap by positioning p2 near p1
+                y: p1Typed.position.y + 5,
+              },
+            },
+          },
+        },
       }));
 
       // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       return true;
     }
@@ -126,7 +135,7 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     if (!firstMaterialId) return false;
 
     // Clear existing pieces and add two problematic pieces
-    useSceneStore.setState((state) => ({
+    useSceneStore.setState((state: ReturnType<typeof useSceneStore.getState>) => ({
       scene: {
         ...state.scene,
         pieces: {
@@ -152,12 +161,12 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
             layerId: firstLayerId,
             materialId: firstMaterialId,
           },
-        }
-      }
+        },
+      },
     }));
 
     // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     return true;
   };
@@ -175,7 +184,7 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
     if (!firstMaterialId) return false;
 
     // Clear existing pieces and add two pieces with 1.0mm spacing
-    useSceneStore.setState((state) => ({
+    useSceneStore.setState((state: ReturnType<typeof useSceneStore.getState>) => ({
       scene: {
         ...state.scene,
         pieces: {
@@ -202,17 +211,17 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
             layerId: firstLayerId,
             materialId: firstMaterialId,
           },
-        }
+        },
       },
       ui: {
         ...state.ui,
         selectedId: 'test-spacing-1', // Select first piece
         selectedIds: ['test-spacing-1'],
-      }
+      },
     }));
 
     // Wait for bridge debounce (75ms) + validation debounce (100ms) + worker round-trip
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     return true;
   };
@@ -223,7 +232,10 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
   });
 
   // Test hook: rotate and resize piece for E2E testing
-  (window as any).__testRotateAndResize = async (opts: { rotateDeg: number; drag: { dx: number; dy: number } }) => {
+  (window as any).__testRotateAndResize = async (opts: {
+    rotateDeg: number;
+    drag: { dx: number; dy: number };
+  }) => {
     try {
       const { useSceneStore } = await import('./state/useSceneStore');
       const store = useSceneStore.getState();
@@ -237,7 +249,7 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
 
       // Clear existing pieces and create a single test piece
       const pieceId = 'test-rot-resize';
-      useSceneStore.setState((state) => ({
+      useSceneStore.setState((state: ReturnType<typeof useSceneStore.getState>) => ({
         scene: {
           ...state.scene,
           pieces: {
@@ -252,19 +264,19 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
               layerId: firstLayerId,
               materialId: firstMaterialId,
             },
-          }
+          },
         },
         ui: {
           ...state.ui,
           selectedId: pieceId,
           selectedIds: [pieceId],
-        }
+        },
       }));
 
       // Set absolute rotation
       store.setSelectedRotation(opts.rotateDeg as any);
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Perform resize via store actions
       const piece = useSceneStore.getState().scene.pieces[pieceId];
@@ -285,7 +297,7 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
       store.endResize(true);
 
       // Wait for bridge + validation
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       return { success: true };
     } catch (e: any) {
@@ -295,7 +307,13 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
 }
 
 // Test hook: spawn grid of pieces for performance testing (ALWAYS exposed for E2E)
-(window as any).__testSpawnGrid = async (opts: { cols: number; rows: number; w: number; h: number; gap: number }) => {
+(window as any).__testSpawnGrid = async (opts: {
+  cols: number;
+  rows: number;
+  w: number;
+  h: number;
+  gap: number;
+}) => {
   try {
     const { useSceneStore } = await import('./state/useSceneStore');
     const store = useSceneStore.getState();
@@ -351,11 +369,17 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
       const state = selectProblems();
       const ps = state.problems ?? [];
       const set = new Set(ps.map((p: any) => p.code));
-      const allPresent = codes.every(c => set.has(c));
-      const allAbsent = codes.every(c => !set.has(c));
+      const allPresent = codes.every((c) => set.has(c));
+      const allAbsent = codes.every((c) => !set.has(c));
       const ok = expectAbsent ? allAbsent : allPresent;
-      if (ok) { clearInterval(t); resolve(true); }
-      if (Date.now() - start > timeoutMs) { clearInterval(t); resolve(false); }
+      if (ok) {
+        clearInterval(t);
+        resolve(true);
+      }
+      if (Date.now() - start > timeoutMs) {
+        clearInterval(t);
+        resolve(false);
+      }
     }, intervalMs);
   });
 };
@@ -367,7 +391,7 @@ if (import.meta.env.DEV || window.location.hostname === 'localhost') {
   if (store.toggleJoined) {
     store.toggleJoined(id);
   }
-  await new Promise(r => setTimeout(r, 60)); // let validation debounce flush
+  await new Promise((r) => setTimeout(r, 60)); // let validation debounce flush
   return true;
 };
 
@@ -459,4 +483,4 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>,
-)
+);

@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 test('Ghost insert system - red halo appears and disappears after adjustment', async ({ page }) => {
   await page.goto('/');
@@ -147,6 +147,7 @@ test('Shape Library auto-placement works reliably', async ({ page }) => {
 
   // No error toast should be visible
   const toast = page.locator('[role="status"]');
-  const hasErrorToast = (await toast.count()) > 0 && (await toast.textContent())?.includes('saturée');
+  const hasErrorToast =
+    (await toast.count()) > 0 && (await toast.textContent())?.includes('saturée');
   expect(hasErrorToast).toBe(false);
 });

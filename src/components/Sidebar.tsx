@@ -6,32 +6,36 @@ import ProblemsPanel from '@/components/ProblemsPanel';
 import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
-import { shallow } from 'zustand/shallow';
+import { useShallow } from 'zustand/react/shallow';
 import { MAX_LAYERS } from '@/constants/validation';
+
+// Type-safe helper using useShallow for multi-picks
+type Store = ReturnType<typeof useSceneStore.getState>;
+const useSidebar = <T,>(sel: (s: Store) => T) => useSceneStore(useShallow(sel));
 
 export function Sidebar() {
   // OPTIMIZED: Precise selectors to avoid re-renders
-  const layerOrder = useSceneStore((s) => s.scene.layerOrder, shallow);
-  const layers = useSceneStore((s) => s.scene.layers, shallow);
-  const pieces = useSceneStore((s) => s.scene.pieces, shallow);
-  const materials = useSceneStore((s) => s.scene.materials, shallow);
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const activeLayer = useSceneStore((s) => s.ui.activeLayer);
-  const layerVisibility = useSceneStore((s) => s.ui.layerVisibility, shallow);
-  const layerLocked = useSceneStore((s) => s.ui.layerLocked, shallow);
+  const layerOrder = useSidebar((s) => s.scene.layerOrder);
+  const layers = useSidebar((s) => s.scene.layers);
+  const pieces = useSidebar((s) => s.scene.pieces);
+  const materials = useSidebar((s) => s.scene.materials);
+  const selectedId = useSidebar((s) => s.ui.selectedId);
+  const activeLayer = useSidebar((s) => s.ui.activeLayer);
+  const layerVisibility = useSidebar((s) => s.ui.layerVisibility);
+  const layerLocked = useSidebar((s) => s.ui.layerLocked);
 
-  const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
-  const toggleJoined = useSceneStore((s) => s.toggleJoined);
-  const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
-  const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
-  const addLayer = useSceneStore((s) => s.addLayer);
-  const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
-  const toggleLayerVisibility = useSceneStore((s) => s.toggleLayerVisibility);
-  const toggleLayerLock = useSceneStore((s) => s.toggleLayerLock);
-  const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
-  const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
-  const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
-  const moveLayerToBack = useSceneStore((s) => s.moveLayerToBack);
+  const setPieceMaterial = useSidebar((s) => s.setPieceMaterial);
+  const toggleJoined = useSidebar((s) => s.toggleJoined);
+  const setMaterialOriented = useSidebar((s) => s.setMaterialOriented);
+  const setMaterialOrientation = useSidebar((s) => s.setMaterialOrientation);
+  const addLayer = useSidebar((s) => s.addLayer);
+  const setActiveLayer = useSidebar((s) => s.setActiveLayer);
+  const toggleLayerVisibility = useSidebar((s) => s.toggleLayerVisibility);
+  const toggleLayerLock = useSidebar((s) => s.toggleLayerLock);
+  const moveLayerForward = useSidebar((s) => s.moveLayerForward);
+  const moveLayerBackward = useSidebar((s) => s.moveLayerBackward);
+  const moveLayerToFront = useSidebar((s) => s.moveLayerToFront);
+  const moveLayerToBack = useSidebar((s) => s.moveLayerToBack);
 
   // Comptages
   const layerCounts = layerOrder.map((lid) => ({
@@ -67,7 +71,11 @@ export function Sidebar() {
             disabled={layerOrder.length >= MAX_LAYERS}
             aria-label="add-layer"
             data-testid="layer-add-button"
-            title={layerOrder.length >= MAX_LAYERS ? `Maximum de ${MAX_LAYERS} couches atteint` : undefined}
+            title={
+              layerOrder.length >= MAX_LAYERS
+                ? `Maximum de ${MAX_LAYERS} couches atteint`
+                : undefined
+            }
           >
             + Layer
           </Button>
@@ -113,7 +121,9 @@ export function Sidebar() {
                       {isActive ? '●' : '○'}
                     </span>
                     <span className={isActive ? 'font-semibold' : ''}>{l.name}</span>
-                    <span className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}>
+                    <span
+                      className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}
+                    >
                       {l.count}
                     </span>
                   </div>
@@ -129,9 +139,9 @@ export function Sidebar() {
                         e.stopPropagation();
                         toggleLayerVisibility(l.id);
                       }}
-                      aria-label={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      aria-label={isVisible ? 'Masquer cette couche' : 'Afficher cette couche'}
                       aria-pressed={isVisible}
-                      title={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      title={isVisible ? 'Masquer cette couche' : 'Afficher cette couche'}
                       data-testid={`layer-eye-${l.name}`}
                       tabIndex={0}
                     >
@@ -147,9 +157,11 @@ export function Sidebar() {
                         e.stopPropagation();
                         toggleLayerLock(l.id);
                       }}
-                      aria-label={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      aria-label={
+                        isLocked ? 'Déverrouiller cette couche' : 'Verrouiller cette couche'
+                      }
                       aria-pressed={isLocked}
-                      title={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      title={isLocked ? 'Déverrouiller cette couche' : 'Verrouiller cette couche'}
                       data-testid={`layer-lock-${l.name}`}
                       tabIndex={0}
                     >
@@ -232,7 +244,10 @@ export function Sidebar() {
         <CardContent>
           <ul className="space-y-3" aria-label="materials-list">
             {materialCounts.map((m) => (
-              <li key={m.id} className="flex flex-col gap-2 pb-2 border-b border-border last:border-0">
+              <li
+                key={m.id}
+                className="flex flex-col gap-2 pb-2 border-b border-border last:border-0"
+              >
                 <div className="flex items-center justify-between">
                   <span>{m.name}</span>
                   <span className="text-muted-foreground">{m.count}</span>
@@ -253,7 +268,9 @@ export function Sidebar() {
                       <span>Angle:</span>
                       <select
                         value={m.material.orientationDeg ?? 0}
-                        onChange={(e) => setMaterialOrientation(m.id, Number(e.target.value) as 0 | 90)}
+                        onChange={(e) =>
+                          setMaterialOrientation(m.id, Number(e.target.value) as 0 | 90)
+                        }
                         aria-label={`material-${m.id}-orientation`}
                         className="rounded border border-input bg-background px-2 py-1 text-xs"
                       >

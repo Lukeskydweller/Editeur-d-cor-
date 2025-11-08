@@ -3,7 +3,7 @@
  * Activé uniquement en dev avec VITE_DEBUG_NUDGE_GAP=true
  */
 
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 import { selectNearestGap, explainGap } from '@/store/selectors/gapSelector';
 import { getEffectiveStep } from '@/lib/ui/keyboardStep';
 import { getRecentTraces, DEBUG_ENABLED } from '@/lib/debug/pipelineTrace';
@@ -16,26 +16,26 @@ export default function DebugNudgeGap() {
   // N'afficher que si flag actif
   if (!DEBUG_ENABLED) return null;
 
-  const scene = useSceneStore((s) => s.scene);
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const selectedIds = useSceneStore((s) => s.ui.selectedIds);
-  const isTransientActive = useSceneStore((s) => s.ui.isTransientActive);
-  const transientBBox = useSceneStore((s) => s.ui.transientBBox);
-  const dragging = useSceneStore((s) => s.ui.dragging);
-  const resizing = useSceneStore((s) => s.ui.resizing);
-  const snap10mm = useSceneStore((s) => s.ui.snap10mm);
+  const scene = useSceneStore((s: SceneStoreState) => s.scene);
+  const selectedId = useSceneStore((s: SceneStoreState) => s.ui.selectedId);
+  const selectedIds = useSceneStore((s: SceneStoreState) => s.ui.selectedIds);
+  const isTransientActive = useSceneStore((s: SceneStoreState) => s.ui.isTransientActive);
+  const transientBBox = useSceneStore((s: SceneStoreState) => s.ui.transientBBox);
+  const dragging = useSceneStore((s: SceneStoreState) => s.ui.dragging);
+  const resizing = useSceneStore((s: SceneStoreState) => s.ui.resizing);
+  const snap10mm = useSceneStore((s: SceneStoreState) => s.ui.snap10mm);
 
   // Calculer la bbox du sujet (commit & transitoire)
   const selIds = selectedIds ?? (selectedId ? [selectedId] : []);
-  const selectedPieces = selIds.map((id) => scene.pieces[id]).filter(Boolean);
+  const selectedPieces = selIds.map((id: string) => scene.pieces[id]).filter(Boolean);
 
   let commitBBox: BBox | null = null;
   if (selectedPieces.length > 0) {
-    const bboxes = selectedPieces.map((p) => pieceBBox(p!));
-    const minX = Math.min(...bboxes.map((b) => b.x));
-    const minY = Math.min(...bboxes.map((b) => b.y));
-    const maxX = Math.max(...bboxes.map((b) => b.x + b.w));
-    const maxY = Math.max(...bboxes.map((b) => b.y + b.h));
+    const bboxes = selectedPieces.map((p: any) => pieceBBox(p!));
+    const minX = Math.min(...bboxes.map((b: BBox) => b.x));
+    const minY = Math.min(...bboxes.map((b: BBox) => b.y));
+    const maxX = Math.max(...bboxes.map((b: BBox) => b.x + b.w));
+    const maxY = Math.max(...bboxes.map((b: BBox) => b.y + b.h));
     commitBBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
   }
 
@@ -44,9 +44,9 @@ export default function DebugNudgeGap() {
     () =>
       selectNearestGap(
         { scene, ui: { selectedId, selectedIds } },
-        isTransientActive && transientBBox ? { subjectOverride: transientBBox } : undefined
+        isTransientActive && transientBBox ? { subjectOverride: transientBBox } : undefined,
       ),
-    [scene, selectedId, selectedIds, isTransientActive, transientBBox]
+    [scene, selectedId, selectedIds, isTransientActive, transientBBox],
   );
 
   // Explain gap details
@@ -55,7 +55,7 @@ export default function DebugNudgeGap() {
     const neighborPiece = scene.pieces[gapResult.nearestId];
     if (neighborPiece) {
       const neighborBBox = pieceBBox(neighborPiece);
-      const bboxToUse = (isTransientActive && transientBBox) ? transientBBox : commitBBox;
+      const bboxToUse = isTransientActive && transientBBox ? transientBBox : commitBBox;
       gapDetails = explainGap(bboxToUse, neighborBBox);
     }
   }
@@ -157,7 +157,10 @@ export default function DebugNudgeGap() {
       {/* Step clavier */}
       <Section title="Step Clavier">
         <Line label="Snap 10mm" value={snap10mm ? 'ON' : 'OFF'} />
-        <Line label="Arrow" value={`${keyboardStep.stepMm.toFixed(2)}mm (${keyboardStep.stepPx.toFixed(2)}px)`} />
+        <Line
+          label="Arrow"
+          value={`${keyboardStep.stepMm.toFixed(2)}mm (${keyboardStep.stepPx.toFixed(2)}px)`}
+        />
         <Line
           label="Shift+Arrow"
           value={`${keyboardStepShift.stepMm.toFixed(2)}mm (${keyboardStepShift.stepPx.toFixed(2)}px)`}
@@ -168,8 +171,14 @@ export default function DebugNudgeGap() {
       {traces.length > 0 && (
         <Section title={`Traces (${traces.length} dernières)`}>
           {traces.map((t) => (
-            <div key={t.tickId} style={{ marginBottom: 6, paddingLeft: 8, borderLeft: '2px solid #0f0' }}>
-              <Line label={`#${t.tickId}`} value={`${t.source} [${t.committed ? 'OK' : t.rolledBack ? 'ROLLBACK' : 'PENDING'}]`} />
+            <div
+              key={t.tickId}
+              style={{ marginBottom: 6, paddingLeft: 8, borderLeft: '2px solid #0f0' }}
+            >
+              <Line
+                label={`#${t.tickId}`}
+                value={`${t.source} [${t.committed ? 'OK' : t.rolledBack ? 'ROLLBACK' : 'PENDING'}]`}
+              />
               <Line
                 label="Gap final"
                 value={t.finalGapMm !== null ? `${t.finalGapMm.toFixed(2)}mm` : 'null'}
@@ -191,7 +200,9 @@ export default function DebugNudgeGap() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 10 }}>
-      <div style={{ color: '#0ff', fontSize: 11, fontWeight: 'bold', marginBottom: 4 }}>{title}</div>
+      <div style={{ color: '#0ff', fontSize: 11, fontWeight: 'bold', marginBottom: 4 }}>
+        {title}
+      </div>
       <div style={{ paddingLeft: 8 }}>{children}</div>
     </div>
   );
@@ -215,5 +226,8 @@ function Line({
 }
 
 function formatBBox(bbox: BBox): string {
-  return `x:${bbox.x.toFixed(1)} y:${bbox.y.toFixed(1)} w:${bbox.w.toFixed(1)} h:${bbox.h.toFixed(1)}${bbox.rotationDeg ? ` rot:${bbox.rotationDeg}°` : ''}`;
+  // Type intersection for optional rotationDeg (debug visualization only)
+  type RotatedBBox = BBox & { rotationDeg?: number };
+  const rot = (bbox as RotatedBBox).rotationDeg;
+  return `x:${bbox.x.toFixed(1)} y:${bbox.y.toFixed(1)} w:${bbox.w.toFixed(1)} h:${bbox.h.toFixed(1)}${rot ? ` rot:${rot}°` : ''}`;
 }
