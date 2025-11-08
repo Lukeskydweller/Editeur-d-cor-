@@ -45,9 +45,6 @@ export function Sidebar() {
     return { id, name, count };
   }).filter((l): l is { id: string; name: LayerName; count: number } => l.id !== undefined);
 
-  // Check for legacy layers (> 3 layers)
-  const hasLegacyLayers = layerOrder.length > 3;
-
   const materialCounts = Object.values(materials).map((m) => {
     const count = Object.values(pieces).filter((p) => p.materialId === m.id).length;
     return { id: m.id, name: m.name, count, material: m };
@@ -70,17 +67,6 @@ export function Sidebar() {
           <CardTitle>Layers</CardTitle>
         </CardHeader>
         <CardContent data-testid="layers-panel">
-          {/* Legacy banner: shown when scene has > 3 layers */}
-          {hasLegacyLayers && (
-            <div
-              className="mb-3 p-2 text-sm bg-amber-900/30 border border-amber-700/50 rounded text-amber-200"
-              role="status"
-              data-testid="legacy-layers-banner"
-            >
-              Scène héritée : couches &gt; C3 masquées (migration v1 à venir)
-            </div>
-          )}
-
           <ul className="space-y-2" aria-label="layers-list">
             {fixedLayerCounts.map((l) => {
               const isActive = l.id === activeLayer;
