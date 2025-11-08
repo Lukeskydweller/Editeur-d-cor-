@@ -16,10 +16,10 @@ describe('Layer visibility', () => {
   });
 
   test('new layer is visible by default', () => {
-    const store = useSceneStore.getState();
-    const c2Id = store.addLayer('C2');
-
+    // C2 already exists (created by ensureFixedLayerIds), verify it's visible
     const state = useSceneStore.getState();
+    const c2Id = state.scene.fixedLayerIds!.C2;
+
     expect(state.ui.layerVisibility[c2Id]).toBe(true);
   });
 
@@ -27,7 +27,7 @@ describe('Layer visibility', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // C1 should be visible by default (true or undefined defaults to true)
@@ -45,7 +45,7 @@ describe('Layer visibility', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // Hide layer
@@ -72,7 +72,7 @@ describe('Layer visibility', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // Hide C1

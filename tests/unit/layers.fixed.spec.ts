@@ -124,8 +124,6 @@ describe('Layers V1 — socle fixe', () => {
 
     // Create initial scene
     store.initSceneWithDefaults(600, 600);
-    const state1 = useSceneStore.getState();
-    const c1Id = state1.scene.fixedLayerIds!.C1;
 
     // Export scene
     const exported = store.toSceneFileV1();
