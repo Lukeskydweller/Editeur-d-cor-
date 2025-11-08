@@ -9,6 +9,7 @@ import { DevMetrics } from '@/components/DevMetrics';
 import { useShallow } from 'zustand/react/shallow';
 import { FIXED_LAYER_NAMES } from '@/constants/layers';
 import type { LayerName } from '@/constants/layers';
+import { isLayerUnlocked } from '@/state/layers.gating';
 
 // Type-safe helper using useShallow for multi-picks
 type Store = ReturnType<typeof useSceneStore.getState>;
@@ -25,6 +26,9 @@ export function Sidebar() {
   const activeLayer = useSidebar((s) => s.ui.activeLayer);
   const layerVisibility = useSidebar((s) => s.ui.layerVisibility);
   const layerLocked = useSidebar((s) => s.ui.layerLocked);
+
+  // Get the full state for unlock checking
+  const sceneState = useSceneStore.getState();
 
   const setPieceMaterial = useSidebar((s) => s.setPieceMaterial);
   const toggleJoined = useSidebar((s) => s.toggleJoined);
@@ -82,6 +86,7 @@ export function Sidebar() {
               const isActive = l.id === activeLayer;
               const isVisible = layerVisibility?.[l.id] ?? true;
               const isLocked = layerLocked?.[l.id] ?? false;
+              const isUnlocked = isLayerUnlocked(sceneState, l.name);
 
               return (
                 <li
@@ -93,7 +98,7 @@ export function Sidebar() {
                       : 'bg-slate-700 hover:bg-slate-600'
                   }`}
                 >
-                  {/* Left side: radio button + name + count */}
+                  {/* Left side: radio button + name + count + locked badge */}
                   <div
                     className="flex items-center gap-2 flex-1 cursor-pointer"
                     onClick={() => setActiveLayer(l.id)}
@@ -120,6 +125,17 @@ export function Sidebar() {
                     >
                       {l.count}
                     </span>
+                    {/* Progressive unlock badge: show 🔐 for locked C2/C3 */}
+                    {!isUnlocked && (
+                      <span
+                        data-testid={`layer-locked-badge-${l.name}`}
+                        className="text-sm"
+                        title={`Verrouillée — ajoutez au moins une pièce à ${l.name === 'C2' ? 'C1' : 'C2'}`}
+                        aria-label={`Layer ${l.name} locked`}
+                      >
+                        🔐
+                      </span>
+                    )}
                   </div>
 
                   {/* Right side: eye + lock */}
