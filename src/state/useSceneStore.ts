@@ -27,6 +27,7 @@ import {
 import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
 import { isLayerUnlocked } from '@/state/layers.gating';
 import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
+import { devAssertNoLayerReassignment } from '@/state/invariants';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
 import {
@@ -3841,4 +3842,29 @@ export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName,
     C2: s.scene.layers[ids.C2]?.pieces?.length ?? 0,
     C3: s.scene.layers[ids.C3]?.pieces?.length ?? 0,
   };
+};
+
+/**
+ * useIsGhost
+ * Returns ghost state for a specific piece (without triggering re-renders from full scene).
+ * Returns { isGhost: boolean, hasBlock: boolean, hasWarn: boolean }
+ */
+export const useIsGhost = (pieceId: ID | undefined) => {
+  return useSceneStore((s: SceneStoreState) => {
+    if (!pieceId) {
+      return { isGhost: false, hasBlock: false, hasWarn: false };
+    }
+
+    const ghost = s.ui.ghost;
+    const isGhost = ghost?.pieceId === pieceId;
+
+    if (!isGhost || !ghost) {
+      return { isGhost: false, hasBlock: false, hasWarn: false };
+    }
+
+    const hasBlock = ghost.problems.some((p) => p.severity === 'BLOCK');
+    const hasWarn = ghost.problems.some((p) => p.severity === 'WARN') && !hasBlock;
+
+    return { isGhost, hasBlock, hasWarn };
+  });
 };

@@ -43,9 +43,10 @@ export function migrateSceneToThreeFixedLayers(scene: SceneDraft, nowISO: string
       // Move piece ID to C3 layer
       scene.layers[C3].pieces.push(pid);
 
-      // Update piece.layerId to C3
+      // Update piece.layerId to C3 (migration is the only legitimate layerId reassignment)
       if (scene.pieces?.[pid]) {
-        scene.pieces[pid].layerId = C3 as ID;
+        // Use type assertion to bypass readonly during migration
+        (scene.pieces[pid] as { layerId: ID }).layerId = C3 as ID;
       }
     }
 

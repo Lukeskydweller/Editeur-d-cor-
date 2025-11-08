@@ -22,7 +22,7 @@ export type MaterialRef = {
 
 export type Piece = {
   id: ID;
-  layerId: ID;
+  readonly layerId: ID; // Immutable: piece layer cannot be reassigned after creation
   materialId: ID;
 
   // Pose dans la scène (origine en mm, repère scène)
