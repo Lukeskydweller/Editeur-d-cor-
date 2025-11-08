@@ -32,10 +32,6 @@ export function Sidebar() {
   const setActiveLayer = useSidebar((s) => s.setActiveLayer);
   const toggleLayerVisibility = useSidebar((s) => s.toggleLayerVisibility);
   const toggleLayerLock = useSidebar((s) => s.toggleLayerLock);
-  const moveLayerForward = useSidebar((s) => s.moveLayerForward);
-  const moveLayerBackward = useSidebar((s) => s.moveLayerBackward);
-  const moveLayerToFront = useSidebar((s) => s.moveLayerToFront);
-  const moveLayerToBack = useSidebar((s) => s.moveLayerToBack);
 
   // Comptages
   const layerCounts = layerOrder.map((lid) => ({
@@ -82,9 +78,7 @@ export function Sidebar() {
         </CardHeader>
         <CardContent data-testid="layers-panel">
           <ul className="space-y-2" aria-label="layers-list">
-            {layerCounts.map((l, idx) => {
-              const isAtBack = idx === 0;
-              const isAtFront = idx === layerCounts.length - 1;
+            {layerCounts.map((l) => {
               const isActive = l.id === activeLayer;
               const isVisible = layerVisibility?.[l.id] ?? true;
               const isLocked = layerLocked?.[l.id] ?? false;
@@ -166,68 +160,6 @@ export function Sidebar() {
                       tabIndex={0}
                     >
                       {isLocked ? '🔒' : '🔓'}
-                    </Button>
-
-                    {/* Layer order buttons */}
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtBack}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerToBack(l.id);
-                      }}
-                      aria-label="send-layer-to-back"
-                      title="Send to back"
-                      tabIndex={0}
-                    >
-                      ⤒
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtBack}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerBackward(l.id);
-                      }}
-                      aria-label="send-layer-backward"
-                      title="Send backward"
-                      tabIndex={0}
-                    >
-                      ‹
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtFront}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerForward(l.id);
-                      }}
-                      aria-label="send-layer-forward"
-                      title="Send forward"
-                      tabIndex={0}
-                    >
-                      ›
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtFront}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerToFront(l.id);
-                      }}
-                      aria-label="send-layer-to-front"
-                      title="Send to front"
-                      tabIndex={0}
-                    >
-                      ⤓
                     </Button>
                   </div>
                 </li>
