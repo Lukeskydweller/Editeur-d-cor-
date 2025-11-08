@@ -25,6 +25,7 @@ import {
   MAX_LAYERS,
 } from '@/constants/validation';
 import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
+import { isLayerUnlocked } from '@/state/layers.gating';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
 import {
@@ -969,6 +970,28 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     ),
 
   addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) => {
+    // Check if layer is locked (progressive unlock gating)
+    const currentState = useSceneStore.getState();
+    const fixedIds = currentState.scene.fixedLayerIds;
+    let targetLayerName: LayerName | null = null;
+    if (fixedIds) {
+      if (layerId === fixedIds.C2) targetLayerName = 'C2';
+      else if (layerId === fixedIds.C3) targetLayerName = 'C3';
+    }
+
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return '' as ID; // Return empty ID when blocked
+    }
+
     const id = genId('piece');
     set(
       produce((draft: SceneState) => {
@@ -2077,7 +2100,40 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       }),
     ),
 
-  duplicateSelected: () =>
+  duplicateSelected: () => {
+    // Check if target layer(s) are locked (progressive unlock gating)
+    const currentState = useSceneStore.getState();
+    const selectedIds =
+      currentState.ui.selectedIds ??
+      (currentState.ui.selectedId ? [currentState.ui.selectedId] : []);
+    if (selectedIds.length === 0) return;
+
+    const fixedIds = currentState.scene.fixedLayerIds;
+    if (fixedIds) {
+      // Check if any selected piece is on a locked layer
+      for (const id of selectedIds) {
+        const piece = currentState.scene.pieces[id];
+        if (!piece) continue;
+
+        let targetLayerName: LayerName | null = null;
+        if (piece.layerId === fixedIds.C2) targetLayerName = 'C2';
+        else if (piece.layerId === fixedIds.C3) targetLayerName = 'C3';
+
+        if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+          const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+          set(
+            produce((draft: SceneState) => {
+              draft.ui.toast = {
+                message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+                until: Date.now() + 3000,
+              };
+            }),
+          );
+          return;
+        }
+      }
+    }
+
     set(
       produce((draft: SceneState) => {
         const selectedIds =
@@ -2159,7 +2215,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         pushHistory(draft, snap);
         autosave(takeSnapshot(draft));
       }),
-    ),
+    );
+  },
 
   undo: () =>
     set(
@@ -3329,6 +3386,29 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
     // Get current state
     const currentState = useSceneStore.getState();
+
+    // Check if target layer is locked (progressive unlock gating)
+    const targetLayerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    const fixedIds = currentState.scene.fixedLayerIds;
+    let targetLayerName: LayerName | null = null;
+    if (fixedIds && targetLayerId) {
+      if (targetLayerId === fixedIds.C2) targetLayerName = 'C2';
+      else if (targetLayerId === fixedIds.C3) targetLayerName = 'C3';
+    }
+
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return null;
+    }
+
     const snap = takeSnapshot(currentState);
 
     // Enforce min 5mm and round values
@@ -3506,6 +3586,28 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     const { validateOverlapsAsync } = await import('../core/geo/facade');
 
     const currentState = useSceneStore.getState();
+
+    // Check if target layer is locked (progressive unlock gating)
+    const targetLayerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    const fixedIds = currentState.scene.fixedLayerIds;
+    let targetLayerName: LayerName | null = null;
+    if (fixedIds && targetLayerId) {
+      if (targetLayerId === fixedIds.C2) targetLayerName = 'C2';
+      else if (targetLayerId === fixedIds.C3) targetLayerName = 'C3';
+    }
+
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return '' as ID; // Return empty ID when blocked
+    }
 
     // Enforce min 5mm and round values
     const w = Math.max(5, Math.round(opts.w));
