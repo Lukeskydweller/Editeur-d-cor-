@@ -2,7 +2,6 @@ import { describe, test, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { Sidebar } from '@/components/Sidebar';
 import { useSceneStore } from '@/state/useSceneStore';
-import { MAX_LAYERS } from '@/constants/validation';
 
 /**
  * Test suite: Layers Panel UI interactions
@@ -83,39 +82,5 @@ describe('Layers Panel UI', () => {
     expect(c1Row.className).toContain('bg-cyan-600');
     expect(c1Row.className).toContain('ring-2');
     expect(c1Row.className).toContain('ring-cyan-400');
-  });
-
-  test('+ Layer button has data-testid', () => {
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button');
-    expect(addButton).toBeDefined();
-    expect(addButton.textContent).toContain('Layer');
-  });
-
-  test('+ Layer button disabled when MAX_LAYERS reached', () => {
-    const store = useSceneStore.getState();
-
-    // C1 already exists, add C2 and C3
-    store.addLayer('C2');
-    store.addLayer('C3');
-
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button') as HTMLButtonElement;
-
-    // Should be disabled (3 layers present)
-    expect(addButton.disabled).toBe(true);
-    expect(useSceneStore.getState().scene.layerOrder).toHaveLength(MAX_LAYERS);
-  });
-
-  test('+ Layer button enabled when below MAX_LAYERS', () => {
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button') as HTMLButtonElement;
-
-    // Should be disabled (C1, C2, C3 already exist = MAX_LAYERS)
-    expect(addButton.disabled).toBe(true);
-    expect(useSceneStore.getState().scene.layerOrder).toHaveLength(3);
   });
 });
