@@ -3699,3 +3699,19 @@ export type SceneStoreState = ReturnType<typeof useSceneStore.getState>;
 export const getFixedLayerIds = (s: SceneStoreState) => s.scene.fixedLayerIds!;
 export const getFixedLayerIdByName = (s: SceneStoreState, name: LayerName) =>
   s.scene.fixedLayerIds ? s.scene.fixedLayerIds[name] : undefined;
+
+/**
+ * getPieceCountByFixedLayer
+ * Returns piece counts for each fixed layer (C1, C2, C3).
+ * Optimized selector to avoid re-renders when piece counts haven't changed.
+ */
+export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName, number> => {
+  const ids = s.scene.fixedLayerIds;
+  if (!ids) return { C1: 0, C2: 0, C3: 0 };
+
+  return {
+    C1: s.scene.layers[ids.C1]?.pieces?.length ?? 0,
+    C2: s.scene.layers[ids.C2]?.pieces?.length ?? 0,
+    C3: s.scene.layers[ids.C3]?.pieces?.length ?? 0,
+  };
+};
