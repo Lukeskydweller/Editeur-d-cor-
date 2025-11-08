@@ -7,7 +7,8 @@ import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
 import { useShallow } from 'zustand/react/shallow';
-import { MAX_LAYERS } from '@/constants/validation';
+import { FIXED_LAYER_NAMES } from '@/constants/layers';
+import type { LayerName } from '@/constants/layers';
 
 // Type-safe helper using useShallow for multi-picks
 type Store = ReturnType<typeof useSceneStore.getState>;
@@ -16,6 +17,7 @@ const useSidebar = <T,>(sel: (s: Store) => T) => useSceneStore(useShallow(sel));
 export function Sidebar() {
   // OPTIMIZED: Precise selectors to avoid re-renders
   const layerOrder = useSidebar((s) => s.scene.layerOrder);
+  const fixedLayerIds = useSidebar((s) => s.scene.fixedLayerIds);
   const layers = useSidebar((s) => s.scene.layers);
   const pieces = useSidebar((s) => s.scene.pieces);
   const materials = useSidebar((s) => s.scene.materials);
@@ -28,17 +30,19 @@ export function Sidebar() {
   const toggleJoined = useSidebar((s) => s.toggleJoined);
   const setMaterialOriented = useSidebar((s) => s.setMaterialOriented);
   const setMaterialOrientation = useSidebar((s) => s.setMaterialOrientation);
-  const addLayer = useSidebar((s) => s.addLayer);
   const setActiveLayer = useSidebar((s) => s.setActiveLayer);
   const toggleLayerVisibility = useSidebar((s) => s.toggleLayerVisibility);
   const toggleLayerLock = useSidebar((s) => s.toggleLayerLock);
 
-  // Comptages
-  const layerCounts = layerOrder.map((lid) => ({
-    id: lid,
-    name: layers[lid]?.name ?? lid,
-    count: (layers[lid]?.pieces ?? []).length,
-  }));
+  // Fixed 3-layer panel: only display C1, C2, C3
+  const fixedLayerCounts = FIXED_LAYER_NAMES.map((name: LayerName) => {
+    const id = fixedLayerIds?.[name];
+    const count = id ? (layers[id]?.pieces?.length ?? 0) : 0;
+    return { id, name, count };
+  }).filter((l): l is { id: string; name: LayerName; count: number } => l.id !== undefined);
+
+  // Check for legacy layers (> 3 layers)
+  const hasLegacyLayers = layerOrder.length > 3;
 
   const materialCounts = Object.values(materials).map((m) => {
     const count = Object.values(pieces).filter((p) => p.materialId === m.id).length;
@@ -58,27 +62,23 @@ export function Sidebar() {
       <DevMetrics />
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader>
           <CardTitle>Layers</CardTitle>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => addLayer(`C${layerOrder.length + 1}`)}
-            disabled={layerOrder.length >= MAX_LAYERS}
-            aria-label="add-layer"
-            data-testid="layer-add-button"
-            title={
-              layerOrder.length >= MAX_LAYERS
-                ? `Maximum de ${MAX_LAYERS} couches atteint`
-                : undefined
-            }
-          >
-            + Layer
-          </Button>
         </CardHeader>
         <CardContent data-testid="layers-panel">
+          {/* Legacy banner: shown when scene has > 3 layers */}
+          {hasLegacyLayers && (
+            <div
+              className="mb-3 p-2 text-sm bg-amber-900/30 border border-amber-700/50 rounded text-amber-200"
+              role="status"
+              data-testid="legacy-layers-banner"
+            >
+              Scène héritée : couches &gt; C3 masquées (migration v1 à venir)
+            </div>
+          )}
+
           <ul className="space-y-2" aria-label="layers-list">
-            {layerCounts.map((l) => {
+            {fixedLayerCounts.map((l) => {
               const isActive = l.id === activeLayer;
               const isVisible = layerVisibility?.[l.id] ?? true;
               const isLocked = layerLocked?.[l.id] ?? false;
@@ -122,7 +122,7 @@ export function Sidebar() {
                     </span>
                   </div>
 
-                  {/* Right side: eye + lock + layer order buttons */}
+                  {/* Right side: eye + lock */}
                   <div className="flex items-center gap-1">
                     {/* Eye icon (visibility toggle) */}
                     <Button
