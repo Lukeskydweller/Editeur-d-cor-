@@ -65,12 +65,323 @@ import {
 } from '@/core/geo/validateAll';
 import { getRotatedAABB } from '@/core/geo/geometry';
 import { EPS_UI_MM, EMPTY_ARR, DUPLICATE_OFFSET_MM } from '@/state/constants';
+import { LayeredRBush, type SpatialItem } from '@/spatial/rbushIndex';
 
 // Detect test environment for synchronous test execution
 // In Vitest, import.meta.env.MODE is 'test'
 const IS_TEST =
   typeof import.meta !== 'undefined' &&
   ((import.meta as any).env?.MODE === 'test' || !!(import.meta as any).env?.VITEST);
+
+// Singleton LayeredRBush instance for per-layer spatial indexing
+const layeredRBush = new LayeredRBush();
+
+// Pending layer rebuilds (debounced via queueMicrotask)
+const pendingLayerRebuilds = new Set<ID>();
+
+// Helper: Convert piece to spatial item (AABB with rotation)
+function indexFromPiece(p: Piece): SpatialItem {
+  // Use pieceBBox for consistency with Global mode
+  const bbox = pieceBBox(p);
+
+  // AABB bounds
+  return {
+    id: p.id,
+    layerId: p.layerId,
+    minX: bbox.x,
+    minY: bbox.y,
+    maxX: bbox.x + bbox.w,
+    maxY: bbox.y + bbox.h,
+  };
+}
+
+// Helper: Rebuild RBush index for a specific layer
+function rebuildLayerIndex(layerId: ID, pieces: Record<ID, Piece>) {
+  const layerPieces = Object.values(pieces).filter((p) => p.layerId === layerId);
+  const items = layerPieces.map(indexFromPiece);
+  layeredRBush.load(layerId, items);
+
+  // Update metrics via Zustand set to avoid mutating frozen/draft state
+  useSceneStore.setState((state) =>
+    produce(state, (draft) => {
+      if (draft.ui.spatialStats) {
+        draft.ui.spatialStats.itemsByLayer[layerId] = items.length;
+        draft.ui.spatialStats.rebuilds++;
+      }
+    }),
+  );
+}
+
+// Helper: Schedule layer rebuild (debounced via microtask or idle callback)
+function scheduleLayerRebuild(layerId: ID, urgent = false) {
+  if (pendingLayerRebuilds.has(layerId)) return;
+
+  pendingLayerRebuilds.add(layerId);
+
+  const doRebuild = () => {
+    pendingLayerRebuilds.delete(layerId);
+    const store = useSceneStore.getState();
+    rebuildLayerIndex(layerId, store.scene.pieces);
+  };
+
+  // Use requestIdleCallback for non-critical rebuilds (with 250ms timeout fallback)
+  if (!urgent && typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(doRebuild, { timeout: 250 });
+  } else {
+    // Urgent or no idle callback support: use microtask
+    queueMicrotask(doRebuild);
+  }
+}
+
+// Helper: Update piece in RBush index
+function updatePieceInIndex(piece: Piece) {
+  const item = indexFromPiece(piece);
+  layeredRBush.insert(piece.layerId, item);
+}
+
+// Helper: Remove piece from RBush index
+function removePieceFromRBushIndex(pieceId: ID, layerId: ID) {
+  // RBush requires full item to remove, so we need to find it
+  // For simplicity, schedule a rebuild of the layer
+  scheduleLayerRebuild(layerId);
+}
+
+// Module-level counters to avoid nested setState issues
+const pendingQueryCounts = { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 };
+
+// Helper: Increment spatial query counter (module-level)
+function bumpQueryCounter(type: 'GLOBAL' | 'RBUSH' | 'FALLBACK') {
+  pendingQueryCounts[type]++;
+}
+
+// Helper: Flush pending query counts to store
+function flushQueryCounters(draft: SceneState) {
+  if (draft.ui.spatialStats) {
+    draft.ui.spatialStats.queries.GLOBAL += pendingQueryCounts.GLOBAL;
+    draft.ui.spatialStats.queries.RBUSH += pendingQueryCounts.RBUSH;
+    draft.ui.spatialStats.queries.FALLBACK += pendingQueryCounts.FALLBACK;
+    pendingQueryCounts.GLOBAL = 0;
+    pendingQueryCounts.RBUSH = 0;
+    pendingQueryCounts.FALLBACK = 0;
+  }
+}
+
+// Helper: Record performance measurement for spatial query (DEV only)
+function recordPerfSample(mode: 'global' | 'rbush', durationMs: number) {
+  // Skip performance recording in production builds
+  if (!import.meta.env.DEV) return;
+
+  const MAX_SAMPLES = 100;
+
+  useSceneStore.setState((state) =>
+    produce(state, (draft) => {
+      if (!draft.ui.spatialStats) {
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
+      }
+
+      if (!draft.ui.spatialStats.perf) {
+        draft.ui.spatialStats.perf = {};
+      }
+
+      if (!draft.ui.spatialStats.perf[mode]) {
+        draft.ui.spatialStats.perf[mode] = {
+          samples: [],
+          avg: 0,
+          p95: 0,
+        };
+      }
+
+      const perfMode = draft.ui.spatialStats.perf[mode]!;
+
+      // Add sample (sliding window)
+      perfMode.samples.push(durationMs);
+      if (perfMode.samples.length > MAX_SAMPLES) {
+        perfMode.samples.shift();
+      }
+
+      // Compute avg
+      const sum = perfMode.samples.reduce((a, b) => a + b, 0);
+      perfMode.avg = sum / perfMode.samples.length;
+
+      // Compute p95
+      const sorted = [...perfMode.samples].sort((a, b) => a - b);
+      const p95Index = Math.floor(sorted.length * 0.95);
+      perfMode.p95 = sorted[p95Index] ?? 0;
+    }),
+  );
+}
+
+/**
+ * Shortlist pieces on same layer that intersect with given AABB
+ *
+ * Uses RBush spatial index when enabled, falls back to global O(n) scan otherwise.
+ * Returns piece IDs only (same-layer filter already applied).
+ *
+ * @param layerId - Layer to search
+ * @param bbox - Bounding box to query
+ * @param sceneOverride - Optional scene to query against
+ * @param excludeIds - Optional set of IDs to exclude from results (e.g., selected pieces during drag)
+ * @returns Array of piece IDs on same layer intersecting bbox
+ */
+function shortlistSameLayerAABB(
+  layerId: ID,
+  bbox: { x: number; y: number; w: number; h: number },
+  sceneOverride?: SceneDraft,
+  excludeIds?: Set<ID>,
+): ID[] {
+  const store = useSceneStore.getState();
+  const { ui, scene: storeScene } = store;
+  const scene = sceneOverride ?? storeScene;
+
+  // Determine spatial engine mode
+  const mode = (window as any).__SPATIAL__ ?? ui.spatialEngine ?? 'auto';
+  const pieceCount = Object.keys(scene.pieces).length;
+  const threshold = ui.spatialThreshold ?? 120;
+
+  // Use RBush if explicitly enabled or auto-enabled above threshold
+  const useRBush = mode === 'rbush' || (mode === 'auto' && pieceCount >= threshold);
+
+  if (useRBush) {
+    bumpQueryCounter('RBUSH');
+
+    // Convert bbox to RBush query format
+    const query = {
+      minX: bbox.x,
+      minY: bbox.y,
+      maxX: bbox.x + bbox.w,
+      maxY: bbox.y + bbox.h,
+    };
+
+    // Performance instrumentation (DEV only)
+    if (import.meta.env.DEV) {
+      const startMark = `rbush:${Date.now()}`;
+      performance.mark(startMark);
+
+      const results = layeredRBush.search(layerId, query);
+      const rbushHits = results.length;
+
+      // Filter out excluded IDs (e.g., selected pieces during drag)
+      const filtered = excludeIds
+        ? results.filter((item) => !excludeIds.has(item.id)).map((item) => item.id)
+        : results.map((item) => item.id);
+
+      // Measure performance
+      const endMark = `${startMark}:end`;
+      performance.mark(endMark);
+      performance.measure(`rbush:shortlist`, startMark, endMark);
+      const entries = performance.getEntriesByName(`rbush:shortlist`);
+      const duration = entries.length > 0 ? entries[entries.length - 1].duration : 0;
+      recordPerfSample('rbush', duration);
+
+      // Cleanup marks
+      performance.clearMarks(startMark);
+      performance.clearMarks(endMark);
+      performance.clearMeasures(`rbush:shortlist`);
+
+      // Debug logging
+      if ((window as any).__DBG_DRAG__) {
+        console.log('[SPATIAL_SHORTLIST]', {
+          mode: 'RBush',
+          layerId,
+          pieceCount,
+          rbushHits,
+          excludeCount: excludeIds?.size ?? 0,
+          shortlist: filtered.length,
+          bbox,
+          duration: `${duration.toFixed(3)}ms`,
+        });
+      }
+
+      return filtered;
+    } else {
+      // Production: no instrumentation
+      const results = layeredRBush.search(layerId, query);
+      return excludeIds
+        ? results.filter((item) => !excludeIds.has(item.id)).map((item) => item.id)
+        : results.map((item) => item.id);
+    }
+  }
+
+  // Fallback: Global O(n) scan with same-layer filter
+  bumpQueryCounter('GLOBAL');
+
+  // Performance instrumentation (DEV only)
+  if (import.meta.env.DEV) {
+    const startMark = `global:${Date.now()}`;
+    performance.mark(startMark);
+
+    const candidates: ID[] = [];
+    let globalHits = 0;
+    for (const piece of Object.values(scene.pieces)) {
+      if (piece.layerId !== layerId) continue;
+
+      const pBbox = pieceBBox(piece);
+      const overlaps = rectsOverlap(
+        { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h },
+        { x: pBbox.x, y: pBbox.y, w: pBbox.w, h: pBbox.h },
+      );
+
+      if (overlaps) {
+        globalHits++;
+        // Filter out excluded IDs (e.g., selected pieces during drag)
+        if (!excludeIds || !excludeIds.has(piece.id)) {
+          candidates.push(piece.id);
+        }
+      }
+    }
+
+    // Measure performance
+    const endMark = `${startMark}:end`;
+    performance.mark(endMark);
+    performance.measure(`global:shortlist`, startMark, endMark);
+    const entries = performance.getEntriesByName(`global:shortlist`);
+    const duration = entries.length > 0 ? entries[entries.length - 1].duration : 0;
+    recordPerfSample('global', duration);
+
+    // Cleanup marks
+    performance.clearMarks(startMark);
+    performance.clearMarks(endMark);
+    performance.clearMeasures(`global:shortlist`);
+
+    // Debug logging
+    if ((window as any).__DBG_DRAG__) {
+      console.log('[SPATIAL_SHORTLIST]', {
+        mode: 'Global',
+        layerId,
+        pieceCount,
+        globalHits,
+        excludeCount: excludeIds?.size ?? 0,
+        shortlist: candidates.length,
+        bbox,
+        duration: `${duration.toFixed(3)}ms`,
+      });
+    }
+
+    return candidates;
+  } else {
+    // Production: no instrumentation
+    const candidates: ID[] = [];
+    for (const piece of Object.values(scene.pieces)) {
+      if (piece.layerId !== layerId) continue;
+
+      const pBbox = pieceBBox(piece);
+      const overlaps = rectsOverlap(
+        { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h },
+        { x: pBbox.x, y: pBbox.y, w: pBbox.w, h: pBbox.h },
+      );
+
+      if (overlaps && (!excludeIds || !excludeIds.has(piece.id))) {
+        candidates.push(piece.id);
+      }
+    }
+
+    return candidates;
+  }
+}
 
 // Helper to notify auto-spatial module after structural mutations
 function notifyAutoSpatial() {
@@ -670,6 +981,34 @@ export type SceneState = {
     // Revision counter for exact support calculation (incremented on each recalculation)
     // Used to detect stale results and prevent applying obsolete async validation
     exactSupportRevision?: number;
+
+    // Spatial indexing configuration
+    spatialEngine?: 'global' | 'rbush' | 'auto';
+    spatialThreshold?: number; // Piece count threshold for auto-enable
+
+    // Spatial indexing metrics
+    spatialStats?: {
+      itemsByLayer: Record<ID, number>;
+      rebuilds: number;
+      queries: {
+        GLOBAL: number;
+        RBUSH: number;
+        FALLBACK: number;
+      };
+      // Performance metrics (sliding window of last 100 samples)
+      perf?: {
+        global?: {
+          samples: number[];
+          avg: number;
+          p95: number;
+        };
+        rbush?: {
+          samples: number[];
+          avg: number;
+          p95: number;
+        };
+      };
+    };
   };
 };
 
@@ -1001,6 +1340,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.activeLayer = undefined; // Reset active layer
         draft.ui.layerVisibility = {}; // Reset layer visibility
         draft.ui.layerLocked = {}; // Reset layer lock state
+
+        // Initialize spatial indexing defaults (AUTO mode with threshold 120)
+        draft.ui.spatialEngine = 'auto';
+        draft.ui.spatialThreshold = 120;
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
       }),
     ),
 
@@ -1134,6 +1482,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         if (window.__flags?.USE_GLOBAL_SPATIAL) {
           syncPieceToIndex(id, { x, y, w, h });
         }
+
+        // Update RBush spatial index
+        updatePieceInIndex(piece);
+        if (draft.ui.spatialStats) {
+          draft.ui.spatialStats.itemsByLayer[layerId] =
+            (draft.ui.spatialStats.itemsByLayer[layerId] || 0) + 1;
+        }
       }),
     );
     return id;
@@ -1158,7 +1513,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     set(
       produce((draft: SceneState) => {
         const p = draft.scene.pieces[pieceId];
-        if (p) p.rotationDeg = rotationDeg;
+        if (p) {
+          p.rotationDeg = rotationDeg;
+          // Schedule RBush rebuild for this layer (rotation changes AABB)
+          scheduleLayerRebuild(p.layerId);
+        }
       }),
     ),
 
@@ -1232,6 +1591,21 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         canonicalizeLayerOrder(draft);
         // Set C1 as default active layer
         draft.ui.activeLayer = draft.scene.fixedLayerIds!.C1;
+
+        // Initialize spatial engine configuration and metrics
+        draft.ui.spatialEngine = draft.ui.spatialEngine ?? 'auto';
+        draft.ui.spatialThreshold = draft.ui.spatialThreshold ?? 120;
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
+
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
+        }
       }),
     ),
 
@@ -1830,6 +2204,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             dy: finalY - commitBBox.y,
           };
         }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
       }),
     ),
 
@@ -1928,12 +2305,18 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           }
 
           // Succès: commit des positions translatées
+          const affectedLayers = new Set<ID>();
           for (const id of selectedIds) {
             const p = draft.scene.pieces[id];
             if (!p) continue;
             const commitPos = commitPositions[id];
             if (!commitPos) continue;
             p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+            affectedLayers.add(p.layerId);
+          }
+          // Schedule RBush rebuild for affected layers
+          for (const layerId of affectedLayers) {
+            scheduleLayerRebuild(layerId);
           }
           // Validation problems tracked via UI state, not scene state
           draft.scene.revision++;
@@ -1980,6 +2363,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
               const piecePos = aabbToPiecePosition(finalX, finalY, piece);
               piece.position.x = piecePos.x;
               piece.position.y = piecePos.y;
+              // Schedule RBush rebuild for this layer
+              scheduleLayerRebuild(piece.layerId);
             }
             draft.scene.revision++;
             pushHistory(draft, snap);
@@ -2026,6 +2411,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
               });
           });
         }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
       }),
     ),
 
@@ -2131,6 +2519,13 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         for (const selectedId of selectedIds) {
           const piece = draft.scene.pieces[selectedId];
           if (!piece) continue;
+
+          // Remove from RBush spatial index before deletion
+          removePieceFromRBushIndex(selectedId, piece.layerId);
+          if (draft.ui.spatialStats) {
+            const count = draft.ui.spatialStats.itemsByLayer[piece.layerId] || 0;
+            draft.ui.spatialStats.itemsByLayer[piece.layerId] = Math.max(0, count - 1);
+          }
 
           const layer = draft.scene.layers[piece.layerId];
           if (layer) {
@@ -2238,6 +2633,15 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           bumpHandlesEpoch(draft);
           pushHistory(draft, snap);
           autosave(takeSnapshot(draft));
+          // Schedule RBush rebuild for all affected layers
+          const affectedLayers = new Set<ID>();
+          for (const id of selectedIds) {
+            const piece = draft.scene.pieces[id];
+            if (piece) affectedLayers.add(piece.layerId);
+          }
+          for (const layerId of affectedLayers) {
+            scheduleLayerRebuild(layerId);
+          }
           return;
         }
 
@@ -2257,10 +2661,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         }
 
         const snap = takeSnapshot(draft);
+        const affectedLayers = new Set<ID>();
         for (const id of selectedIds) {
           const piece = draft.scene.pieces[id];
           if (!piece) continue;
           piece.rotationDeg = nextDegById[id]!;
+          affectedLayers.add(piece.layerId);
         }
 
         clearTransientUI(draft.ui);
@@ -2268,6 +2674,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         bumpHandlesEpoch(draft);
         pushHistory(draft, snap);
         autosave(takeSnapshot(draft));
+        // Schedule RBush rebuild for all affected layers
+        for (const layerId of affectedLayers) {
+          scheduleLayerRebuild(layerId);
+        }
       }),
     ),
 
@@ -2632,6 +3042,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
         }
 
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
+        }
+
         draft.scene.revision++;
         // Push to history and autosave
         pushHistory(draft, snap);
@@ -2724,6 +3140,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         // Set activeLayer to C1 if undefined
         if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
           draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+        }
+
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
         }
 
         draft.scene.revision++;
@@ -3086,6 +3508,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             );
           });
         }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
       }),
     ),
 
@@ -3212,6 +3637,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
             incResizeBlockCommitSuccess();
 
+            // Schedule RBush rebuild for this layer
+            scheduleLayerRebuild(piece.layerId);
+
             // Trigger exact support recalculation for resized piece
             // Clone ID to avoid revoked proxy issues
             const committedIds = [resizing.pieceId];
@@ -3241,6 +3669,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.isTransientActive = false;
         draft.ui.transientBBox = undefined;
         // Baseline is cleared with resizing state
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
       }),
     ),
 
@@ -4367,3 +4798,6 @@ export const useIsGhost = (pieceId: ID | undefined) => {
     };
   });
 };
+
+// Export spatial query helper, rebuild function, and RBush instance for use in other modules
+export { shortlistSameLayerAABB, rebuildLayerIndex, layeredRBush };

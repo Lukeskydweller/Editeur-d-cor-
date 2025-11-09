@@ -62,7 +62,7 @@ function HandlesRect({
           strokeWidth={1}
           style={{
             cursor: isIsotropic ? 'nwse-resize' : 'pointer',
-            pointerEvents: isIsotropic ? 'all' : 'none',
+            pointerEvents: isIsotropic && import.meta.env.VITE_E2E !== '1' ? 'all' : 'none',
           }}
           onPointerDown={(e) => {
             if (isIsotropic && onHandleStart) {
@@ -158,7 +158,12 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
   // Multi-selection: render group bbox with handles
   if (selIds.length >= 2) {
     return (
-      <g data-testid="selection-handles-group" data-layer="handles" key={key}>
+      <g
+        data-testid="selection-handles-group"
+        data-layer="handles"
+        data-e2e-overlay="true"
+        key={key}
+      >
         <HandlesRect bbox={bbox} isIsotropic={true} onHandleStart={onGroupResizeStart} />
       </g>
     );
@@ -166,7 +171,12 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
 
   // Single selection: render selection bbox handles
   return (
-    <g data-testid="selection-handles-single" data-layer="handles" key={key}>
+    <g
+      data-testid="selection-handles-single"
+      data-layer="handles"
+      data-e2e-overlay="true"
+      key={key}
+    >
       <HandlesRect bbox={bbox} isIsotropic={false} onHandleStart={undefined} />
     </g>
   );

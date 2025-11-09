@@ -1,5 +1,6 @@
 import type { SceneDraft, Piece, ID } from '@/types/scene';
 import { pieceBBox, rectsOverlap, bboxInsideRect } from '@/lib/geom';
+import { shortlistSameLayerAABB } from '@/state/useSceneStore';
 
 /**
  * Vérifie si une pièce est entièrement contenue dans les limites de la scène.
@@ -92,48 +93,63 @@ export function validateNoOverlapSameLayer(
   ok: boolean;
   conflicts: Array<[ID, ID]>;
 } {
-  const pieces = Object.values(scene.pieces);
   const conflicts: Array<[ID, ID]> = [];
   const cand = new Set(candidateIds);
 
-  // Get layer IDs of all candidates (should all be same layer)
-  const candidateLayerIds = new Set<ID>();
-  for (const id of candidateIds) {
-    const piece = scene.pieces[id];
-    if (piece?.layerId) {
-      candidateLayerIds.add(piece.layerId);
-    }
-  }
+  // OPTIMIZATION: For each candidate, query spatial index for same-layer neighbors
+  for (const candId of candidateIds) {
+    const candPiece = scene.pieces[candId];
+    if (!candPiece) continue;
 
-  for (let i = 0; i < pieces.length; i++) {
-    for (let j = i + 1; j < pieces.length; j++) {
-      const pieceA = pieces[i];
-      const pieceB = pieces[j];
+    const bboxA = pieceBBox(candPiece);
+    const margin = 0; // No margin needed for overlap detection
 
-      // Skip si les deux sont dans le groupe candidat (pas d'auto-collision interne)
-      if (cand.has(pieceA.id) && cand.has(pieceB.id)) {
-        continue;
+    try {
+      // Use shortlistSameLayerAABB to get only same-layer pieces near this candidate
+      // Exclude all candidates from the spatial query to avoid self/internal collisions
+      const neighborIds = shortlistSameLayerAABB(
+        candPiece.layerId,
+        {
+          x: bboxA.x - margin,
+          y: bboxA.y - margin,
+          w: bboxA.w + 2 * margin,
+          h: bboxA.h + 2 * margin,
+        },
+        scene,
+        cand, // Exclude all candidates (Set<ID>)
+      );
+
+      for (const neighborId of neighborIds) {
+        // Candidates already excluded by spatial query, no need to check again
+
+        const neighborPiece = scene.pieces[neighborId];
+        if (!neighborPiece) continue;
+
+        const bboxB = pieceBBox(neighborPiece);
+        if (rectsOverlap(bboxA, bboxB)) {
+          // Store as sorted pair to avoid duplicates
+          const pair: [ID, ID] = candId < neighborId ? [candId, neighborId] : [neighborId, candId];
+          // Check if we already have this pair
+          if (!conflicts.some(([a, b]) => a === pair[0] && b === pair[1])) {
+            conflicts.push(pair);
+          }
+        }
       }
+    } catch {
+      // Fallback: use O(n) scan for this candidate's layer
+      const pieces = Object.values(scene.pieces).filter(
+        (p) => p.layerId === candPiece.layerId && p.id !== candId && !cand.has(p.id),
+      );
 
-      // KEY FIX: Skip TOUTES les collisions cross-layer (même si aucune n'est candidate)
-      // On teste SEULEMENT les collisions intra-couche
-      if (pieceA.layerId !== pieceB.layerId) {
-        continue;
-      }
-
-      // SEULEMENT tester les collisions qui impliquent au moins UNE pièce candidate
-      const isACand = cand.has(pieceA.id);
-      const isBCand = cand.has(pieceB.id);
-
-      if (!isACand && !isBCand) {
-        // Aucune des deux n'est candidate → pas de collision à tester
-        continue;
-      }
-
-      const bboxA = pieceBBox(pieceA);
-      const bboxB = pieceBBox(pieceB);
-      if (rectsOverlap(bboxA, bboxB)) {
-        conflicts.push([pieceA.id, pieceB.id]);
+      for (const neighborPiece of pieces) {
+        const bboxB = pieceBBox(neighborPiece);
+        if (rectsOverlap(bboxA, bboxB)) {
+          const pair: [ID, ID] =
+            candId < neighborPiece.id ? [candId, neighborPiece.id] : [neighborPiece.id, candId];
+          if (!conflicts.some(([a, b]) => a === pair[0] && b === pair[1])) {
+            conflicts.push(pair);
+          }
+        }
       }
     }
   }

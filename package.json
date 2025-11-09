@@ -1,7 +1,7 @@
 {
   "name": "editeur-decor",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,6 +34,7 @@
     "test:e2e:ci": "playwright test --reporter=dot",
     "test:mutation": "stryker run",
     "validate": "pnpm typecheck && pnpm lint && pnpm test:unit && pnpm build",
+    "bench:spatial": "node --import tsx scripts/bench.spatial.ts",
     "prepare": "husky"
   },
   "dependencies": {

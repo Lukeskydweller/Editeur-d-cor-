@@ -35,9 +35,9 @@ test('sidebar shows layers and materials counts', () => {
   expect(screen.getByLabelText(/layers-list/i)).toBeInTheDocument();
   expect(screen.getByLabelText(/materials-list/i)).toBeInTheDocument();
 
-  // Vérifier les titres
-  expect(screen.getByText(/Layers/i)).toBeInTheDocument();
-  expect(screen.getByText(/Materials/i)).toBeInTheDocument();
+  // Vérifier les titres (peuvent apparaître plusieurs fois avec les nouveaux panneaux dev)
+  expect(screen.getAllByText(/Layers/i).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/Materials/i).length).toBeGreaterThan(0);
 
   // Vérifier qu'il y a au moins un compteur de pièces (2 pièces au total)
   const counts = screen.getAllByText('2');

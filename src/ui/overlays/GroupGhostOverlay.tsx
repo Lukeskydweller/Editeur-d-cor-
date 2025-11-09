@@ -28,7 +28,7 @@ const GroupGhostOverlay = React.memo(() => {
   }
 
   return (
-    <g data-overlay="group-ghost">
+    <g data-overlay="group-ghost" data-e2e-overlay="true">
       {selectedIdsList.map((id) => {
         const piece = scene.pieces[id];
         if (!piece || piece.kind !== 'rect') return null;

@@ -73,13 +73,24 @@ export function installTestDriver(store: typeof UseSceneStoreType) {
     },
 
     /**
-     * Simulate drag operation
+     * Select multiple pieces
+     */
+    selectMultiple(ids: ID[]) {
+      store.getState().setSelection(ids);
+    },
+
+    /**
+     * Simulate drag operation (preserves existing selection)
      */
     dragBy(id: ID, dx: number, dy: number) {
       const state = store.getState();
 
-      // Select piece first
-      state.selectOnly(id);
+      // Only change selection if piece is not already selected
+      const currentSelection =
+        state.ui.selectedIds ?? (state.ui.selectedId ? [state.ui.selectedId] : []);
+      if (!currentSelection.includes(id)) {
+        state.selectOnly(id);
+      }
 
       // Begin drag
       state.beginDrag(id);
@@ -181,6 +192,34 @@ export function installTestDriver(store: typeof UseSceneStoreType) {
         throw new Error('fixedLayerIds not initialized. Call initSceneWithDefaults first.');
       }
       return state.scene.fixedLayerIds;
+    },
+
+    /**
+     * Get spatial stats (query counts, performance)
+     */
+    getSpatialStats() {
+      const state = store.getState();
+      return state.ui.spatialStats;
+    },
+
+    /**
+     * Get ghost state
+     */
+    getGhostState() {
+      const state = store.getState();
+      return state.ui.ghost;
+    },
+
+    /**
+     * Get UI state for debugging
+     */
+    getUIState() {
+      const state = store.getState();
+      return {
+        spatialEngine: state.ui.spatialEngine,
+        spatialThreshold: state.ui.spatialThreshold,
+        pieceCount: Object.keys(state.scene.pieces).length,
+      };
     },
   };
 

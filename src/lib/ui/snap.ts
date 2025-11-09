@@ -5,6 +5,7 @@ import { queryNeighbors, isAutoEnabled } from '@/lib/spatial/globalIndex';
 import { metrics, incShortlistSource } from '@/lib/metrics';
 import { MIN_GAP_MM, SNAP_EDGE_THRESHOLD_MM, MM_TO_PX, PX_TO_MM } from '@/constants/validation';
 import { selectNearestGap } from '@/store/selectors/gapSelector';
+import { shortlistSameLayerAABB } from '@/state/useSceneStore';
 
 // Ré-exporter pour compatibilité
 export { MM_TO_PX, PX_TO_MM } from '@/constants/validation';
@@ -36,64 +37,48 @@ export function snapToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // OPTIMIZATION: Use spatial index to get nearby pieces only
+  // OPTIMIZATION: Use LayeredRBush spatial index to get nearby same-layer pieces only
   let piecesToCheck: Array<(typeof scene.pieces)[string]>;
-  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
 
-  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
-    // NEW PATH: Use global spatial index with margin
+  // Determine layer to query
+  if (excludeId && scene.pieces[excludeId]) {
+    const movingLayerId = scene.pieces[excludeId].layerId;
+    const margin = 12; // mm
+
     try {
-      const margin = 12; // mm
-      const neighborIds = queryNeighbors(
+      // Use shortlistSameLayerAABB (handles RBush/Global switching internally)
+      // Exclude the moving piece from spatial query results
+      const excludeIdSet = excludeId ? new Set([excludeId]) : undefined;
+      const neighborIds = shortlistSameLayerAABB(
+        movingLayerId,
         {
           x: candidate.x - margin,
           y: candidate.y - margin,
           w: candidate.w + 2 * margin,
           h: candidate.h + 2 * margin,
         },
-        { excludeId },
+        scene,
+        excludeIdSet,
       );
-      piecesToCheck = neighborIds.map((id) => scene.pieces[id]).filter((p) => p !== undefined);
-      metrics.rbush_candidates_snap_total += piecesToCheck.length;
-      source = 'GLOBAL_IDX';
-    } catch {
-      // Fallback: index not ready, use all pieces
-      piecesToCheck = Object.values(scene.pieces);
-      source = 'FALLBACK';
-    }
-  } else {
-    // OLD PATH: Use existing RBush via getSnapNeighbors
-    try {
-      if (excludeId) {
-        const neighborIds = getSnapNeighbors(excludeId, 12, 16);
-        piecesToCheck = neighborIds.map((id) => scene.pieces[id]).filter((p) => p !== undefined);
 
-        // If index returned no neighbors or piece not in scene, fallback to all pieces
-        // This handles cases where scene is out of sync with spatial index (e.g. tests)
-        if (piecesToCheck.length === 0 || !scene.pieces[excludeId]) {
-          piecesToCheck = Object.values(scene.pieces);
-          source = 'ALL';
-        } else {
-          source = 'RBUSH';
-        }
-      } else {
-        piecesToCheck = Object.values(scene.pieces);
-        source = 'ALL';
+      piecesToCheck = neighborIds.map((id) => scene.pieces[id]).filter((p) => p !== undefined);
+
+      // Fallback: if no neighbors found (e.g., spatial index not ready in tests),
+      // use all same-layer pieces to ensure snap still works
+      if (piecesToCheck.length === 0) {
+        piecesToCheck = Object.values(scene.pieces).filter(
+          (p) => p.layerId === movingLayerId && p.id !== excludeId,
+        );
       }
     } catch {
-      // Fallback: index not ready, use all pieces
-      piecesToCheck = Object.values(scene.pieces);
-      source = 'FALLBACK';
+      // Fallback: use all same-layer pieces
+      piecesToCheck = Object.values(scene.pieces).filter(
+        (p) => p.layerId === movingLayerId && p.id !== excludeId,
+      );
     }
-  }
-
-  // Track shortlist source metric
-  incShortlistSource('snapToPieces', source);
-
-  // Filter by layer: only consider pieces on the same layer as the moving piece
-  if (excludeId && scene.pieces[excludeId]) {
-    const movingLayerId = scene.pieces[excludeId].layerId;
-    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
+  } else {
+    // No excludeId: cannot determine layer, fallback to all pieces
+    piecesToCheck = Object.values(scene.pieces);
   }
 
   // Explore nearby pieces (using rotation-aware AABB)
@@ -167,72 +152,58 @@ export function snapGroupToPieces(
   let bestDy = 0;
   const guides: SnapGuide[] = [];
 
-  // OPTIMIZATION: Use spatial index to get nearby pieces only
+  // OPTIMIZATION: Use LayeredRBush spatial index to get nearby same-layer pieces only
   let piecesToCheck: Array<(typeof scene.pieces)[string]>;
-  let source: 'GLOBAL_IDX' | 'RBUSH' | 'FALLBACK' | 'ALL';
 
-  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
-    // NEW PATH: Use global spatial index with margin
-    try {
-      const margin = 12; // mm
-      const neighborIds = queryNeighbors(
-        {
-          x: groupRect.x - margin,
-          y: groupRect.y - margin,
-          w: groupRect.w + 2 * margin,
-          h: groupRect.h + 2 * margin,
-        },
-        { excludeIdSet: new Set(excludeIds) },
-      );
-      piecesToCheck = neighborIds.map((id) => scene.pieces[id]).filter((p) => p !== undefined);
-      metrics.rbush_candidates_snap_total += piecesToCheck.length;
-      source = 'GLOBAL_IDX';
-    } catch {
-      // Fallback: index not ready, use all pieces
-      piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
-      source = 'FALLBACK';
-    }
-  } else {
-    // OLD PATH: Use existing RBush via getSnapNeighbors
-    try {
-      if (excludeIds.length > 0) {
-        // Collect neighbors of all pieces in the group
-        const neighborSet = new Set<string>();
-        for (const id of excludeIds) {
-          const neighbors = getSnapNeighbors(id, 12, 16);
-          neighbors.forEach((nid) => neighborSet.add(nid));
-        }
-        piecesToCheck = Array.from(neighborSet)
-          .map((id) => scene.pieces[id])
-          .filter((p) => p !== undefined && !excludeIds.includes(p.id));
-
-        // If index returned no neighbors or pieces not in scene, fallback to all pieces
-        // This handles cases where scene is out of sync with spatial index (e.g. tests)
-        const allExcludedInScene = excludeIds.every((id) => scene.pieces[id]);
-        if (piecesToCheck.length === 0 || !allExcludedInScene) {
-          piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
-          source = 'ALL';
-        } else {
-          source = 'RBUSH';
-        }
-      } else {
-        piecesToCheck = Object.values(scene.pieces);
-        source = 'ALL';
-      }
-    } catch {
-      // Fallback: index not ready, use all pieces
-      piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
-      source = 'FALLBACK';
-    }
-  }
-
-  // Track shortlist source metric
-  incShortlistSource('snapGroupToPieces', source);
-
-  // Filter by layer: only consider pieces on the same layer as the group members
+  // Determine layer to query
   if (excludeIds.length > 0 && scene.pieces[excludeIds[0]]) {
     const movingLayerId = scene.pieces[excludeIds[0]].layerId;
-    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
+    const margin = 12; // mm
+    const excludeIdSet = new Set(excludeIds);
+
+    try {
+      // Collect neighbors of all pieces in the group (not just groupRect)
+      // This ensures we find pieces near any group member, not just the group bbox
+      const neighborSet = new Set<string>();
+      for (const id of excludeIds) {
+        const piece = scene.pieces[id];
+        if (!piece) continue;
+
+        const pieceBbox = pieceAABB(piece);
+        const neighborIds = shortlistSameLayerAABB(
+          movingLayerId,
+          {
+            x: pieceBbox.x - margin,
+            y: pieceBbox.y - margin,
+            w: pieceBbox.w + 2 * margin,
+            h: pieceBbox.h + 2 * margin,
+          },
+          scene,
+          excludeIdSet,
+        );
+        neighborIds.forEach((nid) => neighborSet.add(nid));
+      }
+
+      piecesToCheck = Array.from(neighborSet)
+        .map((id) => scene.pieces[id])
+        .filter((p) => p !== undefined);
+
+      // Fallback: if no neighbors found (e.g., spatial index not ready in tests),
+      // use all same-layer pieces to ensure snap still works
+      if (piecesToCheck.length === 0) {
+        piecesToCheck = Object.values(scene.pieces).filter(
+          (p) => p.layerId === movingLayerId && !excludeIdSet.has(p.id),
+        );
+      }
+    } catch {
+      // Fallback: use all same-layer pieces (excluding group members)
+      piecesToCheck = Object.values(scene.pieces).filter(
+        (p) => p.layerId === movingLayerId && !excludeIdSet.has(p.id),
+      );
+    }
+  } else {
+    // No excludeIds: cannot determine layer, fallback to all pieces
+    piecesToCheck = Object.values(scene.pieces);
   }
 
   // Explore nearby pieces (using rotation-aware AABB)
@@ -350,30 +321,37 @@ export function snapEdgeCollage(
   // Obtenir tous les voisins potentiels (même logique que snapToPieces)
   let piecesToCheck: Array<(typeof scene.pieces)[string]> = [];
 
-  if (window.__flags?.USE_GLOBAL_SPATIAL || isAutoEnabled()) {
+  // Determine layer to query
+  if (excludeIds.length > 0 && scene.pieces[excludeIds[0]]) {
+    const movingLayerId = scene.pieces[excludeIds[0]].layerId;
+    const margin = 12; // mm
+    const excludeIdSet = new Set(excludeIds);
+
     try {
-      const margin = 12; // mm
-      const neighborIds = queryNeighbors(
+      // Use shortlistSameLayerAABB (handles RBush/Global switching internally)
+      // Exclude all specified IDs from spatial query results
+      const neighborIds = shortlistSameLayerAABB(
+        movingLayerId,
         {
           x: candidate.x - margin,
           y: candidate.y - margin,
           w: candidate.w + 2 * margin,
           h: candidate.h + 2 * margin,
         },
-        { excludeIdSet: new Set(excludeIds) },
+        scene,
+        excludeIdSet,
       );
+
       piecesToCheck = neighborIds.map((id) => scene.pieces[id]).filter((p) => p !== undefined);
     } catch {
-      piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
+      // Fallback: use all same-layer pieces (excluding specified IDs)
+      piecesToCheck = Object.values(scene.pieces).filter(
+        (p) => p.layerId === movingLayerId && !excludeIdSet.has(p.id),
+      );
     }
   } else {
+    // No excludeIds: cannot determine layer, fallback to all pieces
     piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
-  }
-
-  // Filter by layer: only consider pieces on the same layer
-  if (excludeIds.length > 0 && scene.pieces[excludeIds[0]]) {
-    const movingLayerId = scene.pieces[excludeIds[0]].layerId;
-    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
   }
 
   let bestDx = 0;

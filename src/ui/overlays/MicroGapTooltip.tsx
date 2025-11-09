@@ -195,6 +195,7 @@ export default function MicroGapTooltip() {
       className="micro-gap-tooltip"
       style={style}
       data-testid="micro-gap-tooltip"
+      data-e2e-overlay="true"
       aria-hidden="true"
     >
       {label}
