@@ -90,6 +90,12 @@ export function snapToPieces(
   // Track shortlist source metric
   incShortlistSource('snapToPieces', source);
 
+  // Filter by layer: only consider pieces on the same layer as the moving piece
+  if (excludeId && scene.pieces[excludeId]) {
+    const movingLayerId = scene.pieces[excludeId].layerId;
+    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
+  }
+
   // Explore nearby pieces (using rotation-aware AABB)
   for (const p of piecesToCheck) {
     if (p.id === excludeId) continue;
@@ -222,6 +228,12 @@ export function snapGroupToPieces(
 
   // Track shortlist source metric
   incShortlistSource('snapGroupToPieces', source);
+
+  // Filter by layer: only consider pieces on the same layer as the group members
+  if (excludeIds.length > 0 && scene.pieces[excludeIds[0]]) {
+    const movingLayerId = scene.pieces[excludeIds[0]].layerId;
+    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
+  }
 
   // Explore nearby pieces (using rotation-aware AABB)
   for (const p of piecesToCheck) {
@@ -356,6 +368,12 @@ export function snapEdgeCollage(
     }
   } else {
     piecesToCheck = Object.values(scene.pieces).filter((p) => !excludeIds.includes(p.id));
+  }
+
+  // Filter by layer: only consider pieces on the same layer
+  if (excludeIds.length > 0 && scene.pieces[excludeIds[0]]) {
+    const movingLayerId = scene.pieces[excludeIds[0]].layerId;
+    piecesToCheck = piecesToCheck.filter((p) => p.layerId === movingLayerId);
   }
 
   let bestDx = 0;

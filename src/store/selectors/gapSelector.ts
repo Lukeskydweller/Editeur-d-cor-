@@ -62,19 +62,20 @@ export interface SceneStateForGap {
  * - Gaps horizontaux (left/right) : nécessitent un recouvrement vertical
  * - Gaps verticaux (top/bottom) : nécessitent un recouvrement horizontal
  */
-function computeGapWithSide(
-  subject: BBox,
-  neighbor: BBox
-): { gap: number; side: GapSide } {
+function computeGapWithSide(subject: BBox, neighbor: BBox): { gap: number; side: GapSide } {
   // Calculer les gaps directionnels (positif = séparé, négatif = overlap)
   const gapRight = neighbor.x - (subject.x + subject.w); // neighbor à droite
-  const gapLeft = subject.x - (neighbor.x + neighbor.w);  // neighbor à gauche
+  const gapLeft = subject.x - (neighbor.x + neighbor.w); // neighbor à gauche
   const gapBottom = neighbor.y - (subject.y + subject.h); // neighbor en bas
-  const gapTop = subject.y - (neighbor.y + neighbor.h);   // neighbor en haut
+  const gapTop = subject.y - (neighbor.y + neighbor.h); // neighbor en haut
 
   // Vérifier les recouvrements dans les axes perpendiculaires
-  const overlapVertical = !(subject.y + subject.h <= neighbor.y || neighbor.y + neighbor.h <= subject.y);
-  const overlapHorizontal = !(subject.x + subject.w <= neighbor.x || neighbor.x + neighbor.w <= subject.x);
+  const overlapVertical = !(
+    subject.y + subject.h <= neighbor.y || neighbor.y + neighbor.h <= subject.y
+  );
+  const overlapHorizontal = !(
+    subject.x + subject.w <= neighbor.x || neighbor.x + neighbor.w <= subject.x
+  );
 
   // Construire les gaps valides avec condition d'alignement
   const gaps: Array<{ gap: number; side: GapSide }> = [];
@@ -104,9 +105,7 @@ function computeGapWithSide(
   }
 
   // Retourner le gap minimal parmi les gaps alignés
-  const minGap = gaps.reduce((min, curr) =>
-    curr.gap < min.gap ? curr : min
-  );
+  const minGap = gaps.reduce((min, curr) => (curr.gap < min.gap ? curr : min));
 
   return minGap;
 }
@@ -117,11 +116,11 @@ function computeGapWithSide(
 function computeGroupBBox(pieces: Piece[]): BBox {
   if (pieces.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
 
-  const bboxes = pieces.map(p => pieceBBox(p));
-  const minX = Math.min(...bboxes.map(b => b.x));
-  const minY = Math.min(...bboxes.map(b => b.y));
-  const maxX = Math.max(...bboxes.map(b => b.x + b.w));
-  const maxY = Math.max(...bboxes.map(b => b.y + b.h));
+  const bboxes = pieces.map((p) => pieceBBox(p));
+  const minX = Math.min(...bboxes.map((b) => b.x));
+  const minY = Math.min(...bboxes.map((b) => b.y));
+  const maxX = Math.max(...bboxes.map((b) => b.x + b.w));
+  const maxY = Math.max(...bboxes.map((b) => b.y + b.h));
 
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
@@ -159,7 +158,7 @@ export interface SelectNearestGapOptions {
  */
 export function selectNearestGap(
   state: SceneStateForGap,
-  opts?: SelectNearestGapOptions
+  opts?: SelectNearestGapOptions,
 ): NearestGapResult {
   const { scene, ui } = state;
 
@@ -183,9 +182,7 @@ export function selectNearestGap(
       };
     }
 
-    const selectedPieces = selectedIds
-      .map(id => scene.pieces[id])
-      .filter(Boolean);
+    const selectedPieces = selectedIds.map((id) => scene.pieces[id]).filter(Boolean);
 
     if (selectedPieces.length === 0) {
       return {
@@ -206,8 +203,17 @@ export function selectNearestGap(
 
   // 3) Récupérer les voisins externes (exclure membres du groupe + excludeIds)
   const excludeSet = new Set([...selectedIds, ...(opts?.excludeIds ?? [])]);
+
+  // Get the layer of the moving piece(s) for filtering
+  const movingLayerId =
+    selectedIds.length > 0 && scene.pieces[selectedIds[0]]
+      ? scene.pieces[selectedIds[0]].layerId
+      : undefined;
+
   const neighbors = Object.values(scene.pieces)
-    .filter(p => !excludeSet.has(p.id));
+    .filter((p) => !excludeSet.has(p.id))
+    // Filter by layer: only consider pieces on the same layer
+    .filter((p) => !movingLayerId || p.layerId === movingLayerId);
 
   if (neighbors.length === 0) {
     return {
@@ -302,10 +308,7 @@ export interface ExplainGapResult {
  * @param neighborBBox BBox du voisin le plus proche
  * @returns Détails complets du calcul de gap
  */
-export function explainGap(
-  subjectBBox: BBox,
-  neighborBBox: BBox
-): ExplainGapResult {
+export function explainGap(subjectBBox: BBox, neighborBBox: BBox): ExplainGapResult {
   // Calculer les 4 gaps directionnels (px)
   const gapRight = neighborBBox.x - (subjectBBox.x + subjectBBox.w);
   const gapLeft = subjectBBox.x - (neighborBBox.x + neighborBBox.w);
