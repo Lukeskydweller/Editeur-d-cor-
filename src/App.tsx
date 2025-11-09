@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
+import { computeCommittedGhostState, type GhostSeverity } from '@/state/ghost';
 import { validateMaterialOrientation } from '@/lib/sceneRules';
 import { pxToMmFactor } from '@/lib/ui/coords';
 import { Sidebar } from '@/components/Sidebar';
@@ -17,6 +18,113 @@ import SelectionHandles from '@/ui/overlays/SelectionHandles';
 import GroupGhostOverlay from '@/ui/overlays/GroupGhostOverlay';
 import GroupResizePreview from '@/ui/overlays/GroupResizePreview';
 import { EMPTY_ARR } from '@/state/constants';
+import type { Piece, SceneDraft } from '@/types/scene';
+
+// PieceRect component: renders a single piece with ghost state detection
+function PieceRectInner({
+  pieceId,
+  scene,
+  ghost,
+  selectedId,
+  selectedIds,
+  flashInvalidAt,
+  effects,
+  handlePointerDown,
+  exactSupportResults,
+  lastExactCheckAt,
+}: {
+  pieceId: string;
+  scene: SceneDraft;
+  ghost: any;
+  selectedId: string | undefined;
+  selectedIds: string[] | undefined;
+  flashInvalidAt: number | undefined;
+  effects: any;
+  handlePointerDown: (e: React.PointerEvent, id: string) => void;
+  exactSupportResults?: Record<string, boolean>;
+  lastExactCheckAt?: number;
+}) {
+  // Calculate committed ghost state using pure function
+  const committedGhostState = computeCommittedGhostState(
+    exactSupportResults,
+    lastExactCheckAt,
+    pieceId,
+  );
+
+  const p = scene.pieces[pieceId];
+  if (!p || p.kind !== 'rect') return null;
+
+  const { x, y } = p.position;
+  const { w, h } = p.size;
+  const actualSelectedIds =
+    selectedIds ?? (selectedId ? [selectedId] : (EMPTY_ARR as unknown as string[]));
+  const isSelected = actualSelectedIds.includes(p.id);
+  const isFlashingInvalid = isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
+  const isFocused = effects?.focusId === p.id;
+  const isFlashing = effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
+
+  // Check for transient ghost (during drag/resize)
+  const isTransientGhost = ghost?.pieceId === p.id;
+  const transientGhostHasBlock =
+    isTransientGhost &&
+    ghost.problems.some((prob: { severity: string }) => prob.severity === 'BLOCK');
+  const transientGhostHasWarn =
+    isTransientGhost &&
+    ghost.problems.some((prob: { severity: string }) => prob.severity === 'WARN') &&
+    !transientGhostHasBlock;
+
+  // Combine transient ghost and committed ghost
+  const isGhost = isTransientGhost || committedGhostState.isGhost;
+  const ghostHasBlock = transientGhostHasBlock; // Committed ghosts never block
+  const ghostHasWarn = transientGhostHasWarn || committedGhostState.isGhost;
+
+  // Determine final severity for data attribute
+  let ghostSeverity: GhostSeverity = 'none';
+  if (ghostHasBlock) ghostSeverity = 'block';
+  else if (ghostHasWarn) ghostSeverity = 'warn';
+
+  return (
+    <g
+      key={p.id}
+      transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
+      data-testid="piece-rect"
+      data-piece-id={p.id}
+      data-layer={p.layerId}
+      data-selected={isSelected ? 'true' : undefined}
+      data-invalid={isFlashingInvalid ? 'true' : undefined}
+      data-ghost={isGhost ? '1' : '0'}
+      data-ghost-severity={ghostSeverity}
+    >
+      <rect
+        x="0"
+        y="0"
+        width={w}
+        height={h}
+        rx="6"
+        ry="6"
+        fill={isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'}
+        stroke={
+          isFlashingInvalid
+            ? '#ef4444'
+            : isSelected || isFocused
+              ? '#22d3ee'
+              : isGhost
+                ? ghostHasBlock
+                  ? '#dc2626'
+                  : '#f59e0b'
+                : '#1e3a8a'
+        }
+        strokeWidth={isGhost ? '4' : isFlashingInvalid ? '4' : isSelected || isFocused ? '3' : '2'}
+        strokeDasharray={isGhost && ghostHasWarn ? '4 4' : undefined}
+        onPointerDown={(e) => handlePointerDown(e, p.id)}
+        style={{ cursor: 'pointer', opacity: isGhost ? 0.65 : 1 }}
+        className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
+      />
+    </g>
+  );
+}
+
+const PieceRect = React.memo(PieceRectInner);
 
 export default function App() {
   const scene = useSceneStore((s: SceneStoreState) => s.scene);
@@ -31,6 +139,8 @@ export default function App() {
   const nudgeSelected = useSceneStore((s: SceneStoreState) => s.nudgeSelected);
   const flashInvalidAt = useSceneStore((s: SceneStoreState) => s.ui.flashInvalidAt);
   const effects = useSceneStore((s: SceneStoreState) => s.ui.effects);
+  const exactSupportResults = useSceneStore((s: SceneStoreState) => s.ui.exactSupportResults);
+  const lastExactCheckAt = useSceneStore((s: SceneStoreState) => s.ui.lastExactCheckAt);
 
   const dragging = useSceneStore((s: SceneStoreState) => s.ui.dragging);
   const groupIsResizing = useSceneStore((s: SceneStoreState) => !!s.ui.groupResizing?.isResizing);
@@ -882,83 +992,21 @@ export default function App() {
                           opacity: isVisible ? (isActive ? 1 : 0.5) : 0,
                         }}
                       >
-                        {layer.pieces.map((pieceId: string) => {
-                          const p = scene.pieces[pieceId];
-                          if (!p || p.kind !== 'rect') return null;
-
-                          const { x, y } = p.position;
-                          const { w, h } = p.size;
-                          const actualSelectedIds =
-                            selectedIds ??
-                            (selectedId ? [selectedId] : (EMPTY_ARR as unknown as string[]));
-                          const isSelected = actualSelectedIds.includes(p.id);
-                          const isFlashingInvalid =
-                            isSelected && flashInvalidAt && Date.now() - flashInvalidAt < 200;
-                          const isFocused = effects?.focusId === p.id;
-                          const isFlashing =
-                            effects?.flashId === p.id && (effects.flashUntil ?? 0) > Date.now();
-
-                          // Check if this is a ghost piece
-                          const isGhost = ghost?.pieceId === p.id;
-                          const ghostHasBlock =
-                            isGhost &&
-                            ghost.problems.some(
-                              (prob: { severity: string }) => prob.severity === 'BLOCK',
-                            );
-                          const ghostHasWarn =
-                            isGhost &&
-                            ghost.problems.some(
-                              (prob: { severity: string }) => prob.severity === 'WARN',
-                            ) &&
-                            !ghostHasBlock;
-
-                          return (
-                            <g
-                              key={p.id}
-                              transform={`translate(${x} ${y}) rotate(${p.rotationDeg ?? 0} ${w / 2} ${h / 2})`}
-                              data-testid="piece-rect"
-                              data-piece-id={p.id}
-                              data-selected={isSelected ? 'true' : undefined}
-                              data-invalid={isFlashingInvalid ? 'true' : undefined}
-                              data-ghost={isGhost ? 'true' : undefined}
-                            >
-                              <rect
-                                x="0"
-                                y="0"
-                                width={w}
-                                height={h}
-                                rx="6"
-                                ry="6"
-                                fill={
-                                  isGhost ? (ghostHasBlock ? '#ef4444' : '#f59e0b') : '#60a5fa'
-                                } /* rouge/orange si ghost, bleu sinon */
-                                stroke={
-                                  isFlashingInvalid
-                                    ? '#ef4444'
-                                    : isSelected || isFocused
-                                      ? '#22d3ee'
-                                      : isGhost
-                                        ? ghostHasBlock
-                                          ? '#dc2626'
-                                          : '#f59e0b'
-                                        : '#1e3a8a'
-                                }
-                                strokeWidth={
-                                  isGhost
-                                    ? '4'
-                                    : isFlashingInvalid
-                                      ? '4'
-                                      : isSelected || isFocused
-                                        ? '3'
-                                        : '2'
-                                }
-                                onPointerDown={(e) => handlePointerDown(e, p.id)}
-                                style={{ cursor: 'pointer', opacity: isGhost ? 0.85 : 1 }}
-                                className={`${isFlashingInvalid ? 'drop-shadow-[0_0_10px_rgba(239,68,68,0.9)]' : ''} ${isFlashing ? 'outline-flash' : ''} ${ghostHasBlock ? 'ghost-illegal' : ghostHasWarn ? 'ghost-warn' : ''}`}
-                              />
-                            </g>
-                          );
-                        })}
+                        {layer.pieces.map((pieceId: string) => (
+                          <PieceRect
+                            key={pieceId}
+                            pieceId={pieceId}
+                            scene={scene}
+                            ghost={ghost}
+                            selectedId={selectedId}
+                            selectedIds={selectedIds}
+                            flashInvalidAt={flashInvalidAt}
+                            effects={effects}
+                            handlePointerDown={handlePointerDown}
+                            exactSupportResults={exactSupportResults}
+                            lastExactCheckAt={lastExactCheckAt}
+                          />
+                        ))}
                       </g>
                     );
                   })}

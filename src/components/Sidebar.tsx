@@ -6,6 +6,7 @@ import ProblemsPanel from '@/components/ProblemsPanel';
 import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
+import { DebugPanel } from '@/components/DebugPanel';
 import { useShallow } from 'zustand/react/shallow';
 import { FIXED_LAYER_NAMES } from '@/constants/layers';
 import type { LayerName } from '@/constants/layers';
@@ -61,6 +62,8 @@ export function Sidebar() {
       <ProblemsPanel />
       {/* Dev metrics for performance monitoring */}
       <DevMetrics />
+      {/* Debug panel for drag/resize validation (DEV only, behind __DBG_PANEL__ flag) */}
+      <DebugPanel />
 
       <Card>
         <CardHeader>

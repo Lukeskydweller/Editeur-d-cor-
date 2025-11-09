@@ -47,7 +47,7 @@ import {
   type DraftMeta,
 } from '@/lib/drafts';
 import { applyHandle, applyHandleWithRotation, type ResizeHandle } from '@/lib/ui/resize';
-import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
+import { pieceBBox, aabbToPiecePosition, rectsOverlap } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
 import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalIndex';
 import { validateOverlapsAsync } from '@/core/geo/facade';
@@ -662,6 +662,10 @@ export type SceneState = {
 
     // Timestamp of last exact support validation (used to invalidate useIsGhost cache)
     lastExactCheckAt?: number;
+
+    // Exact support results cache (pieceId → isSupported)
+    // Updated by recalculateExactSupport after drag/resize commit
+    exactSupportResults?: Record<ID, boolean>;
   };
 };
 
@@ -852,32 +856,71 @@ async function recalculateExactSupport(pieceIds: ID[]): Promise<void> {
 
   // Validate each piece with exact mode
   const exactResults: Record<ID, boolean> = {};
+  const piecesToRemove: ID[] = []; // Track pieces that became supported (to remove from ghost state)
+
   for (const pieceId of pieceIds) {
     const piece = state.scene.pieces[pieceId];
     if (!piece) continue;
 
     // Only check C2/C3 pieces (C1 always supported)
     const belowLayerId = getBelowLayerId(state, piece.layerId);
-    if (!belowLayerId) continue;
+    if (!belowLayerId) {
+      // C1 pieces are always supported - remove from ghost state if present
+      piecesToRemove.push(pieceId);
+      continue;
+    }
 
     // Run exact validation
     const isSupported = await isPieceFullySupportedAsync(state, pieceId, 'exact');
-    exactResults[pieceId] = isSupported;
 
-    // Debug logging in dev mode
-    if (import.meta.env.DEV && (window as any).__DBG_SUPPORT__) {
-      console.log('[support]', { mode: 'exact', pieceId, isSupported });
+    if (isSupported) {
+      // Piece is now fully supported - mark for removal from ghost state
+      piecesToRemove.push(pieceId);
+    } else {
+      // Piece is NOT supported - mark as ghost
+      exactResults[pieceId] = false;
+    }
+
+    // DEV: Log support check with full diagnostic format
+    if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+      console.log('[SUPPORT_CHECK]', {
+        op: 'support_exact',
+        pieceId,
+        layerId: piece.layerId,
+        reasons: {
+          collision: false,
+          spacing: false,
+          bounds: false,
+          supportFast: 'n/a',
+          supportExact: isSupported ? 'ok' : 'missing',
+        },
+        setHasBlockFrom: 'none', // Support NEVER blocks
+        ghost: isSupported ? '0' : '1',
+        timestamp: Date.now(),
+      });
     }
   }
 
-  // Trigger minimal state update to cause useIsGhost re-evaluation
-  // Bump a timestamp to invalidate cached ghost state
-  useSceneStore.setState((state) => ({
-    ui: {
-      ...state.ui,
-      lastExactCheckAt: Date.now(),
-    },
-  }));
+  // Merge exact results with existing ones, removing pieces that became supported
+  useSceneStore.setState((state) => {
+    const mergedResults = {
+      ...(state.ui.exactSupportResults ?? {}),
+      ...exactResults,
+    };
+
+    // Remove pieces that are now fully supported
+    for (const pieceId of piecesToRemove) {
+      delete mergedResults[pieceId];
+    }
+
+    return {
+      ui: {
+        ...state.ui,
+        exactSupportResults: mergedResults,
+        lastExactCheckAt: Date.now(),
+      },
+    };
+  });
 }
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -1171,6 +1214,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.primaryId = id;
         computeGroupBBox(draft);
         bumpHandlesEpoch(draft);
+
+        // Clear transient ghost when changing selection (prevents ghost state leak)
+        if (draft.ui.ghost && draft.ui.ghost.pieceId !== id) {
+          draft.ui.ghost = undefined;
+        }
       }),
     ),
 
@@ -1182,6 +1230,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.primaryId = id;
         computeGroupBBox(draft);
         bumpHandlesEpoch(draft);
+
+        // Clear transient ghost when changing selection (prevents ghost state leak)
+        if (draft.ui.ghost && draft.ui.ghost.pieceId !== id) {
+          draft.ui.ghost = undefined;
+        }
       }),
     ),
 
@@ -1422,6 +1475,20 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         const piece = draft.scene.pieces[id];
         if (!piece) return;
 
+        // DEV: Log begin drag to diagnose blocking
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          const allGhostPieceIds = Object.entries(draft.ui.exactSupportResults ?? {})
+            .filter(([_, supported]) => !supported)
+            .map(([pieceId, _]) => pieceId);
+          console.log('[DRAG_GUARD] beginDrag called', {
+            targetId: id,
+            targetLayerId: piece.layerId,
+            committedGhostPieceIds: allGhostPieceIds,
+            isTargetInCommittedGhost: allGhostPieceIds.includes(id),
+            applyingGlobalGuard: false, // No global guard in current implementation
+          });
+        }
+
         const selectedIds =
           draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
 
@@ -1472,6 +1539,22 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           affectsSelection,
         };
         draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+
+        // DEV: Log drag start with ghost context
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          console.log('[DRAG_START]', {
+            pieceId: id,
+            layerId: piece.layerId,
+            selectedIds: finalSelectedIds,
+            currentGhost: draft.ui.ghost
+              ? {
+                  ghostPieceId: draft.ui.ghost.pieceId,
+                  problems: draft.ui.ghost.problems.length,
+                  affectsThisDrag: finalSelectedIds.includes(draft.ui.ghost.pieceId),
+                }
+              : null,
+          });
+        }
       }),
     ),
 
@@ -1616,6 +1699,21 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           // Convert AABB position to piece.position for validation
           const piecePos = aabbToPiecePosition(finalX, finalY, piece);
           testScene.pieces[dragging.id] = { ...piece, position: piecePos };
+        }
+
+        // DEV: Log validation input with ghost context
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          console.log('[DRAG_VALIDATE_INPUT]', {
+            selectedIds,
+            isGroupDrag,
+            candidatePosition: { x: finalX, y: finalY },
+            currentGhost: draft.ui.ghost
+              ? {
+                  ghostPieceId: draft.ui.ghost.pieceId,
+                  affects: selectedIds.includes(draft.ui.ghost.pieceId),
+                }
+              : null,
+          });
         }
 
         // KEY FIX: Use same-layer validation for drag (no cross-layer blocking)
@@ -2257,38 +2355,137 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
           const newId = genId('piece');
           const bbox = pieceBBox(originalPiece); // Use rotation-aware AABB
-          const clamped = clampToScene(
-            originalPiece.position.x + offsetX,
-            originalPiece.position.y + offsetY,
-            bbox.w,
-            bbox.h,
-            draft.scene.size.w,
-            draft.scene.size.h,
-          );
+
+          // Try to find collision-free position with escape mechanism
+          const maxEscapeAttempts = 5;
+          const escapeStep = 20; // mm
+          let finalX = originalPiece.position.x + offsetX;
+          let finalY = originalPiece.position.y + offsetY;
+
+          for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
+            const testX = originalPiece.position.x + offsetX + attempt * escapeStep;
+            const testY = originalPiece.position.y + offsetY + attempt * escapeStep;
+
+            const clamped = clampToScene(
+              testX,
+              testY,
+              bbox.w,
+              bbox.h,
+              draft.scene.size.w,
+              draft.scene.size.h,
+            );
+
+            // Check if this position collides with same-layer pieces
+            const testPiece: Piece = {
+              ...originalPiece,
+              id: newId,
+              position: { x: clamped.x, y: clamped.y },
+            };
+
+            const testBBox = pieceBBox(testPiece);
+            let hasCollision = false;
+
+            // Check collision with same-layer pieces only
+            for (const [pid, p] of Object.entries(draft.scene.pieces)) {
+              if (p.layerId !== originalPiece.layerId) continue;
+              const pBBox = pieceBBox(p);
+              if (rectsOverlap(testBBox, pBBox)) {
+                hasCollision = true;
+                break;
+              }
+            }
+
+            if (!hasCollision) {
+              // Found collision-free position
+              finalX = clamped.x;
+              finalY = clamped.y;
+              break;
+            }
+
+            // Continue to next attempt
+            finalX = clamped.x;
+            finalY = clamped.y;
+          }
 
           const newPiece: Piece = {
             ...originalPiece,
             id: newId,
-            position: { x: clamped.x, y: clamped.y },
+            position: { x: finalX, y: finalY },
           };
 
           draft.scene.pieces[newId] = newPiece;
           draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
           newIds.push(newId);
         } else {
-          // Duplication de groupe
+          // Duplication de groupe with escape mechanism
           const bbox = groupBBox(draft.scene, selectedIds);
-          const clamped = clampToScene(
-            bbox.x + offsetX,
-            bbox.y + offsetY,
-            bbox.w,
-            bbox.h,
-            draft.scene.size.w,
-            draft.scene.size.h,
-          );
-          const groupDx = clamped.x - bbox.x;
-          const groupDy = clamped.y - bbox.y;
 
+          // Try to find collision-free position for group
+          const maxEscapeAttempts = 5;
+          const escapeStep = 20; // mm
+          let finalGroupDx = offsetX;
+          let finalGroupDy = offsetY;
+
+          for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
+            const testGroupX = bbox.x + offsetX + attempt * escapeStep;
+            const testGroupY = bbox.y + offsetY + attempt * escapeStep;
+
+            const clamped = clampToScene(
+              testGroupX,
+              testGroupY,
+              bbox.w,
+              bbox.h,
+              draft.scene.size.w,
+              draft.scene.size.h,
+            );
+            const groupDx = clamped.x - bbox.x;
+            const groupDy = clamped.y - bbox.y;
+
+            // Check if any piece in the group would collide
+            let hasCollision = false;
+
+            for (const selectedId of selectedIds) {
+              const originalPiece = draft.scene.pieces[selectedId];
+              if (!originalPiece) continue;
+
+              const testPiece: Piece = {
+                ...originalPiece,
+                id: genId('piece'),
+                position: {
+                  x: originalPiece.position.x + groupDx,
+                  y: originalPiece.position.y + groupDy,
+                },
+              };
+
+              const testBBox = pieceBBox(testPiece);
+
+              // Check collision with same-layer pieces only (excluding other group members)
+              for (const [pid, p] of Object.entries(draft.scene.pieces)) {
+                if (selectedIds.includes(pid)) continue; // Skip other group members
+                if (p.layerId !== originalPiece.layerId) continue; // Same-layer only
+                const pBBox = pieceBBox(p);
+                if (rectsOverlap(testBBox, pBBox)) {
+                  hasCollision = true;
+                  break;
+                }
+              }
+
+              if (hasCollision) break;
+            }
+
+            if (!hasCollision) {
+              // Found collision-free position
+              finalGroupDx = groupDx;
+              finalGroupDy = groupDy;
+              break;
+            }
+
+            // Continue to next attempt
+            finalGroupDx = groupDx;
+            finalGroupDy = groupDy;
+          }
+
+          // Create duplicated group with final position
           for (const selectedId of selectedIds) {
             const originalPiece = draft.scene.pieces[selectedId];
             if (!originalPiece) continue;
@@ -2298,8 +2495,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
               ...originalPiece,
               id: newId,
               position: {
-                x: originalPiece.position.x + groupDx,
-                y: originalPiece.position.y + groupDy,
+                x: originalPiece.position.x + finalGroupDx,
+                y: originalPiece.position.y + finalGroupDy,
               },
             };
 
@@ -2528,6 +2725,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         const piece = draft.scene.pieces[pieceId];
         if (!piece) return;
 
+        // GUARD: Only allow resize if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) return;
+        if (draft.ui.layerLocked?.[piece.layerId]) return;
+
         // Capture pre-resize state for history
         const snapshot = takeSnapshot(draft);
 
@@ -2580,6 +2782,11 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
         const piece = draft.scene.pieces[resizing.pieceId];
         if (!piece) return;
+
+        // GUARD: Only allow resize if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) return;
+        if (draft.ui.layerLocked?.[piece.layerId]) return;
 
         const lockEdge = draft.ui.lockEdge ?? false;
 
@@ -2724,6 +2931,21 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
               baseline: currentState.ui.resizing!.baseline,
             };
 
+            // DEV: Log resize validation input with ghost context
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              console.log('[RESIZE_VALIDATE_INPUT]', {
+                pieceId: resizingPieceId,
+                candidateGeometry,
+                handle: currentState.ui.resizing!.handle,
+                currentGhost: currentState.ui.ghost
+                  ? {
+                      ghostPieceId: currentState.ui.ghost.pieceId,
+                      affects: currentState.ui.ghost.pieceId === resizingPieceId,
+                    }
+                  : null,
+              });
+            }
+
             // Validate candidate geometry (not store state) with resize context
             const collisionResult = collisionsForCandidate(
               resizingPieceId,
@@ -2758,6 +2980,46 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             pieceProblems.push(...spacingProblems);
 
             const hasBlock = pieceProblems.some((p) => p.severity === 'BLOCK');
+            const hasWarn = pieceProblems.some((p) => p.severity === 'WARN');
+
+            // DEV: Comprehensive validation log
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              const piece = sceneV1.pieces.find((p) => p.id === resizingPieceId);
+              const hasCollision = collisionResult.overlap;
+              const hasSpacing = spacingProblems.length > 0;
+
+              console.log('[RESIZE_VALIDATE]', {
+                op: 'resize',
+                pieceId: resizingPieceId,
+                layerId: piece?.layerId,
+                reasons: {
+                  collision: hasCollision,
+                  spacing: hasSpacing,
+                  bounds: false, // Already clamped
+                  supportFast: 'n/a', // No support during resize
+                  supportExact: 'n/a',
+                },
+                setHasBlockFrom: hasBlock
+                  ? hasCollision
+                    ? 'collision'
+                    : hasSpacing
+                      ? 'spacing'
+                      : 'unknown'
+                  : 'none',
+                ghost: hasBlock || hasWarn ? '1' : '0',
+                blockers: hasCollision
+                  ? collisionResult.neighbors.map((nId) => {
+                      const neighbor = sceneV1.pieces.find((p) => p.id === nId);
+                      return {
+                        neighborId: nId,
+                        pieceLayer: piece?.layerId,
+                        neighborLayer: neighbor?.layerId,
+                      };
+                    })
+                  : [],
+                timestamp: Date.now(),
+              });
+            }
 
             // Update ghost state
             useSceneStore.setState(
@@ -2793,6 +3055,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         if (!resizing) return;
 
         const piece = draft.scene.pieces[resizing.pieceId];
+
+        // GUARD: Only allow resize commit if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (piece && commit) {
+          if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) {
+            commit = false; // Force rollback
+          }
+          if (draft.ui.layerLocked?.[piece.layerId]) {
+            commit = false; // Force rollback
+          }
+        }
 
         if (commit && piece) {
           // Check if dimensions actually changed
@@ -2842,6 +3115,24 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           // spacingProblems with context should only contain WARN (not BLOCK) for gap >= 0
           // But check for other BLOCK problems (outside_scene, min_size, etc.)
           const hasBlock = hasOverlap;
+
+          // Dev logging: log blockers with their layer IDs
+          if (import.meta.env.DEV && hasBlock && (window as any).__DBG_DRAG__) {
+            const piece = sceneV1.pieces.find((p) => p.id === resizing.pieceId);
+            const blockerInfo = collisionResult.neighbors.map((nId) => {
+              const neighbor = sceneV1.pieces.find((p) => p.id === nId);
+              return {
+                neighborId: nId,
+                pieceLayer: piece?.layerId,
+                neighborLayer: neighbor?.layerId,
+              };
+            });
+            console.log('[resize] BLOCK detected at commit:', {
+              pieceId: resizing.pieceId,
+              blockers: blockerInfo,
+              source: 'endResize',
+            });
+          }
 
           if (hasBlock) {
             // Don't commit - rollback to origin
@@ -3988,16 +4279,28 @@ export const useIsGhost = (pieceId: ID | undefined) => {
     }
 
     // C2/C3: check support with appropriate mode
-    // Use fast mode during interaction, exact mode after commit
-    const interacting = isInteracting(s, pieceId);
-    const mode = interacting ? 'fast' : 'fast'; // TODO: 'exact' after commit hooks implemented
-    const isSupported = isPieceFullySupported(s, pieceId, mode);
+    // Use exact results if available and fresh (< 5s), otherwise fallback to fast mode
+    const exactResults = s.ui.exactSupportResults;
+    const lastCheckAt = s.ui.lastExactCheckAt ?? 0;
+    const resultsFresh = Date.now() - lastCheckAt < 5000; // 5s freshness window
+
+    let isSupported: boolean;
+    if (exactResults && pieceId in exactResults && resultsFresh) {
+      // Use stored exact results (PathOps precision)
+      isSupported = exactResults[pieceId];
+    } else {
+      // Fallback to fast mode (AABB) during interaction or if exact results stale
+      const interacting = isInteracting(s, pieceId);
+      const mode = interacting ? 'fast' : 'fast';
+      isSupported = isPieceFullySupported(s, pieceId, mode);
+    }
+
     const isCommittedGhost = !isSupported;
 
     return {
       isGhost: isCommittedGhost,
       hasBlock: false, // Committed ghosts don't block (manipulable)
-      hasWarn: false,
+      hasWarn: isCommittedGhost, // WARN for unsupported pieces
     };
   });
 };

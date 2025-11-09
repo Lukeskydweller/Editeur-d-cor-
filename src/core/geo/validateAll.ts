@@ -390,6 +390,19 @@ export function collisionsForCandidate(
     return neighbor && neighbor.layerId === piece.layerId;
   });
 
+  // DEV: Log shortlist stats for diagnostics
+  if (import.meta.env.DEV && typeof window !== 'undefined' && (window as any).__DBG_DRAG__) {
+    console.log('[COLLISION_CHECK]', {
+      pieceId,
+      layerId: piece.layerId,
+      shortlist: {
+        total: neighbors.length,
+        sameLayer: sameLayerNeighbors.length,
+        source,
+      },
+    });
+  }
+
   // Pre-filter with AABB, then apply SAT
   const colliding: string[] = [];
   const candidateSAT = new SAT.Polygon(
@@ -693,7 +706,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
       for (const p of currentPieces) {
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -718,7 +731,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
       if (supportCandidates.length === 0) {
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -737,7 +750,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
         console.error(`Failed to compute union for piece ${p.id}:`, err);
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -753,7 +766,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
         console.error(`Failed to test containment for piece ${p.id}:`, err);
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -763,7 +776,7 @@ async function checkLayerSupportExact(scene: SceneV1): Promise<Problem[]> {
       if (!isContained) {
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -813,7 +826,7 @@ function checkLayerSupportAABB(scene: SceneV1): Problem[] {
       for (const p of currentPieces) {
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });
@@ -839,7 +852,7 @@ function checkLayerSupportAABB(scene: SceneV1): Problem[] {
       if (!isFullySupported) {
         out.push({
           code: 'unsupported_above' as ProblemCode,
-          severity: 'BLOCK' as const,
+          severity: 'WARN' as const, // Support issues are WARN, not BLOCK (ghost visual only)
           pieceId: p.id,
           message: 'Pièce non supportée par couche inférieure',
         });

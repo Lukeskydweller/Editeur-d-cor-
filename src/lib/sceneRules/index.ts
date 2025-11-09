@@ -115,21 +115,19 @@ export function validateNoOverlapSameLayer(
         continue;
       }
 
-      // KEY FIX: Skip si les pièces sont sur des couches différentes
-      // Seulement tester les collisions intra-couche
+      // KEY FIX: Skip TOUTES les collisions cross-layer (même si aucune n'est candidate)
+      // On teste SEULEMENT les collisions intra-couche
+      if (pieceA.layerId !== pieceB.layerId) {
+        continue;
+      }
+
+      // SEULEMENT tester les collisions qui impliquent au moins UNE pièce candidate
       const isACand = cand.has(pieceA.id);
       const isBCand = cand.has(pieceB.id);
 
-      if (isACand || isBCand) {
-        // Au moins une pièce est candidate
-        // Vérifier que l'autre est sur la même couche
-        const candLayerId = isACand ? pieceA.layerId : pieceB.layerId;
-        const otherLayerId = isACand ? pieceB.layerId : pieceA.layerId;
-
-        if (candLayerId !== otherLayerId) {
-          // Couches différentes → pas de collision à tester
-          continue;
-        }
+      if (!isACand && !isBCand) {
+        // Aucune des deux n'est candidate → pas de collision à tester
+        continue;
       }
 
       const bboxA = pieceBBox(pieceA);
