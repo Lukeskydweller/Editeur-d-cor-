@@ -150,6 +150,7 @@ export function ResizeHandlesOverlay({
       ref={overlayRef}
       className="absolute inset-0 pointer-events-none"
       style={{ zIndex: 30 }}
+      data-e2e-overlay="true"
     >
       {handles.map(({ handle, xMm, yMm }) => {
         const screenPos = getScreenPosition(xMm, yMm);

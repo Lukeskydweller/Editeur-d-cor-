@@ -1,73 +1,241 @@
-# React + TypeScript + Vite
+# Éditeur Décor WYSIWYG
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+[![CI](https://github.com/Lukeskydweller/Editeur-d-cor-/actions/workflows/ci.yml/badge.svg)](https://github.com/Lukeskydweller/Editeur-d-cor-/actions/workflows/ci.yml)
 
-Currently, two official plugins are available:
+Éditeur WYSIWYG pour conception de décors muraux avec validation fabricabilité temps réel.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Stack
 
-## React Compiler
+- **React 19** + **TypeScript 5.9** (strict mode)
+- **Vite 7** + **Vitest 4** (tests unitaires + coverage)
+- **Playwright** (tests E2E)
+- **Zustand** (state management)
+- **RBush** (spatial indexing) + **SAT.js** (collision detection)
+- **PathKit WASM** (opérations booléennes exactes)
 
-The React Compiler is currently not compatible with SWC. See [this issue](https://github.com/vitejs/vite-plugin-react/issues/428) for tracking the progress.
+## Qualité & CI
 
-## Expanding the ESLint configuration
+### Badge CI
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Le badge ci-dessus montre le statut de la CI. Les 5 jobs suivants s'exécutent en parallèle :
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- **typecheck** : vérification types TypeScript (`pnpm typecheck`)
+- **lint** : ESLint + règles strictes (`pnpm lint`)
+- **unit** : tests unitaires Vitest avec coverage ≥80% (`pnpm test:unit:ci`)
+- **e2e** : tests Playwright end-to-end (`PWREADY=1 playwright test`)
+- **build** : build production (`pnpm build`)
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Commande de validation locale
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
+Avant de pousser du code, exécutez :
+
+```bash
+pnpm validate
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Cette commande lance séquentiellement : `typecheck` → `lint` → `test:unit` → `build`.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x';
-import reactDom from 'eslint-plugin-react-dom';
+### Validation locale (miroir de la CI)
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
+Pour reproduire exactement ce que la CI va exécuter :
+
+```bash
+pnpm validate && pnpm test:unit:ci && pnpm test:e2e
 ```
+
+Cette commande complète valide :
+
+- Types TypeScript (typecheck)
+- Qualité code (lint)
+- Tests unitaires avec coverage ≥80% (test:unit:ci)
+- Build production (build)
+- Tests E2E Playwright (test:e2e)
+
+### Hooks Git (Husky)
+
+Trois hooks sont actifs pour prévenir les régressions :
+
+#### 1. **pre-commit** (lint-staged)
+
+Exécute automatiquement avant chaque commit :
+
+```bash
+# Sur fichiers staged uniquement
+- eslint --fix (fichiers .ts/.tsx/.js/.jsx)
+- prettier --write (tous fichiers)
+```
+
+#### 2. **pre-push** (typecheck + tests)
+
+Exécute avant chaque push :
+
+```bash
+pnpm typecheck && pnpm test --run
+```
+
+Bloque le push si :
+
+- Erreurs TypeScript détectées
+- Tests unitaires échouent
+
+#### 3. **commit-msg** (commitlint)
+
+Vérifie le format du message de commit selon **Conventional Commits** :
+
+```bash
+pnpm commitlint --edit "$1"
+```
+
+### Format Conventional Commits
+
+Tous les commits doivent respecter le format :
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer]
+```
+
+**Types autorisés :**
+
+- `feat`: nouvelle fonctionnalité
+- `fix`: correction de bug
+- `docs`: documentation uniquement
+- `style`: formatting, point-virgules manquants, etc.
+- `refactor`: refactoring code (ni feat ni fix)
+- `perf`: amélioration performance
+- `test`: ajout/correction tests
+- `chore`: maintenance (deps, config, etc.)
+- `ci`: modifications CI/CD
+
+**Exemples valides :**
+
+```bash
+git commit -m "feat(layers): add C3 layer support with PathOps validation"
+git commit -m "fix(snap): correct collision detection for rotated pieces"
+git commit -m "docs(readme): update installation instructions"
+git commit -m "test(resize): add coverage for isotropic group resize"
+```
+
+**Exemples invalides (rejetés par hook) :**
+
+```bash
+git commit -m "updated stuff"              # ❌ pas de type
+git commit -m "Feature: added layers"      # ❌ majuscule interdite
+git commit -m "fix: bug."                  # ❌ point final interdit
+```
+
+### Coverage Tests
+
+Les seuils de couverture sont définis dans `vite.config.ts` :
+
+```ts
+coverage: {
+  thresholds: {
+    lines: 80,       // ≥80% lignes
+    functions: 80,   // ≥80% fonctions
+    statements: 80,  // ≥80% instructions
+    branches: 70,    // ≥70% branches
+  }
+}
+```
+
+La CI échoue si le coverage descend sous ces seuils.
+
+### Scripts disponibles
+
+| Commande            | Description                                         |
+| ------------------- | --------------------------------------------------- |
+| `pnpm dev`          | Serveur dev Vite (HMR, port 5173)                   |
+| `pnpm build`        | Build production (typecheck + vite build)           |
+| `pnpm typecheck`    | Vérification types TS (noEmit)                      |
+| `pnpm lint`         | ESLint (détecte any, unused vars)                   |
+| `pnpm fix`          | ESLint --fix (auto-correct)                         |
+| `pnpm format`       | Prettier --write                                    |
+| `pnpm test`         | Tests unitaires Vitest (watch mode)                 |
+| `pnpm test:unit`    | Tests unitaires run                                 |
+| `pnpm test:unit:ci` | Tests + coverage (CI)                               |
+| `pnpm test:e2e`     | Tests E2E Playwright                                |
+| `pnpm test:e2e:ci`  | Tests E2E (reporter dot, CI)                        |
+| `pnpm validate`     | **Validation complète** (typecheck+lint+test+build) |
+| `pnpm doctor`       | Healthcheck environnement                           |
+
+## Installation
+
+```bash
+# Installer pnpm si absent
+npm install -g pnpm
+
+# Installer dépendances
+pnpm install
+
+# Installer navigateurs Playwright
+pnpm exec playwright install --with-deps chromium
+
+# Lancer dev
+pnpm dev
+```
+
+## Tests
+
+```bash
+# Tests unitaires (watch)
+pnpm test
+
+# Tests unitaires + coverage
+pnpm test:unit:ci
+
+# Tests E2E
+PWREADY=1 pnpm test:e2e
+
+# Validation complète
+pnpm validate
+```
+
+## Features
+
+### Layers V1: Fixed 3-Layer System (C1, C2, C3)
+
+Le système de couches utilise une architecture fixe à 3 couches immuables :
+
+- **C1, C2, C3** : Couches fixes avec IDs stables
+- **Ordre strict** : C1 (base) → C2 (milieu) → C3 (haut)
+- **Migration automatique** : Scènes legacy (>3 couches) migrées automatiquement au chargement
+  - Pièces C4+ réaffectées à C3
+  - Couches legacy supprimées
+  - `layerOrder` canonisé à `[C1, C2, C3]`
+- **Invariant strict** : `piece.layerId` est `readonly` (compile-time + runtime dev assertion)
+- **Accessibilité (WCAG 2.1)** :
+  - Navigation clavier : Touches `1`, `2`, `3` pour sélectionner C1, C2, C3
+  - Visibilité : Touche `V` pour toggle
+  - Verrouillage : Touche `L` pour toggle
+  - Tous les contrôles opérables au clavier (Enter/Space)
+
+**Validation du support entre couches :**
+
+- **AABB rapide** (tests unitaires) : Bounding box overlap detection
+- **PathOps exact** (tests E2E) : Union/diff/xor géométriques (PathKit WASM)
+- Pièces C2/C3 restent manipulables (drag/resize) même en état fantôme (non supportées)
+
+## Documentation
+
+- [Rapport de reprise projet](./RAPPORT_REPRISE_PROJET.md)
+- [Contrats API Scene v1](./docs/contracts.md)
+- [Configuration seuils validation](./docs/CONFIGURATION.md)
+- [Debug report](./docs/DEBUG_REPORT.md)
+- [Notes E2E](./docs/e2e-notes.md)
+
+## Architecture
+
+Voir [RAPPORT_REPRISE_PROJET.md](./RAPPORT_REPRISE_PROJET.md) pour :
+
+- Diagrammes Mermaid (flux données, machine états)
+- Arborescence détaillée commentée
+- Alignement cahier des charges
+- Plan d'action 2 sprints
+
+## License
+
+Privé

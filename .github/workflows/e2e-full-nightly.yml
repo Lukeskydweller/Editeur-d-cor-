@@ -1,0 +1,75 @@
+name: E2E Full (Nightly)
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # Every day at 3am UTC
+  workflow_dispatch: # Allow manual trigger
+
+concurrency:
+  group: e2e-full-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  e2e-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm i --frozen-lockfile
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Run E2E Full Suite (Shard ${{ matrix.shard }}/3)
+        run: npx playwright test --retries=1 --shard=${{ matrix.shard }}/3 --reporter=list
+
+      - name: Upload Playwright report (Shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-shard-${{ matrix.shard }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  merge-reports:
+    if: always()
+    needs: e2e-full
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+          pattern: playwright-report-shard-*
+
+      - name: Merge reports
+        run: |
+          npx playwright merge-reports --reporter=html ./all-reports > merged-report.html || true
+          echo "Merged report available in artifacts"
+
+      - name: Upload merged report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-merged
+          path: merged-report.html
+          retention-days: 14
+          if-no-files-found: ignore

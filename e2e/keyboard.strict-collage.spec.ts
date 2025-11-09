@@ -1,10 +1,9 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { waitForCanvas, addRectAtPos, getPiecePosition } from './helpers';
 
-// Skip if PWREADY not set
-const test = process.env.PWREADY === '1' ? base : base.skip;
-
 test.describe('Clavier strict collage 1.0mm', () => {
+  // Skip if PWREADY not set (only run in dedicated E2E environment)
+  test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await waitForCanvas(page);
@@ -44,7 +43,9 @@ test.describe('Clavier strict collage 1.0mm', () => {
     // Refaisons avec snap OFF pour un mouvement de 1mm précis.
   });
 
-  test('(b) gap ≈ 1.2mm → ArrowRight (snap OFF, +1mm) → encore ≥ 1mm → pas de collage', async ({ page }) => {
+  test('(b) gap ≈ 1.2mm → ArrowRight (snap OFF, +1mm) → encore ≥ 1mm → pas de collage', async ({
+    page,
+  }) => {
     // Désactiver le snap 10mm pour mouvement de 1mm
     const snapCheckbox = page.locator('input[aria-label="toggle-snap-10mm"]');
     await snapCheckbox.uncheck();

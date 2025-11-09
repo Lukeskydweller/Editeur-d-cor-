@@ -1,13 +1,14 @@
 {
   "name": "editeur-decor",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint . --ext .ts,.tsx",
-    "preview": "vite preview --host",
+    "lint": "eslint . --ext .ts,.tsx --max-warnings=500",
+    "lint:strict": "eslint . --ext .ts,.tsx",
+    "preview": "vite preview --host --port 5173",
     "fix": "eslint . --ext .ts,.tsx --fix",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
@@ -16,6 +17,8 @@
     "coverage": "vitest run --coverage",
     "test:e2e": "playwright test --reporter=line",
     "test:e2e:ready": "PWREADY=1 playwright test --reporter=line",
+    "e2e": "playwright test --project=chromium",
+    "e2e:headed": "playwright test --headed --project=chromium",
     "e2e:run": "playwright test",
     "e2e:open": "playwright test --ui",
     "e2e:preview:start": "vite preview --host 0.0.0.0 --port 5173",
@@ -25,7 +28,14 @@
     "smoke:contracts": "vitest run tests/contracts.spec.ts",
     "smoke:geo": "vitest run tests/geo.facade.spec.ts",
     "smoke:deps:pathops": "node scripts/verify-pathops.js",
-    "smoke:pathops:basic": "vitest run tests/pathops.basic.spec.ts"
+    "smoke:pathops:basic": "vitest run tests/pathops.basic.spec.ts",
+    "test:unit": "vitest run",
+    "test:unit:ci": "vitest run --coverage",
+    "test:e2e:ci": "playwright test --reporter=dot",
+    "test:mutation": "stryker run",
+    "validate": "pnpm typecheck && pnpm lint && pnpm test:unit && pnpm build",
+    "bench:spatial": "node --import tsx scripts/bench.spatial.ts",
+    "prepare": "husky"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",
@@ -76,6 +86,11 @@
     "typescript-eslint": "^8.45.0",
     "vite": "^7.1.7",
     "vitest": "^4.0.6",
-    "wait-on": "^9.0.1"
+    "wait-on": "^9.0.1",
+    "@vitest/coverage-v8": "^4",
+    "husky": "^9",
+    "lint-staged": "^15",
+    "@commitlint/cli": "^19",
+    "@commitlint/config-conventional": "^20"
   }
 }

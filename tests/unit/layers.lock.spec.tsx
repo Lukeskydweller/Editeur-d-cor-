@@ -16,10 +16,10 @@ describe('Layer lock', () => {
   });
 
   test('new layer is unlocked by default', () => {
-    const store = useSceneStore.getState();
-    const c2Id = store.addLayer('C2');
-
+    // C2 already exists (created by ensureFixedLayerIds), verify it's unlocked
     const state = useSceneStore.getState();
+    const c2Id = state.scene.fixedLayerIds!.C2;
+
     expect(state.ui.layerLocked[c2Id]).toBe(false);
   });
 
@@ -27,7 +27,7 @@ describe('Layer lock', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // C1 should be unlocked by default (false or undefined defaults to false)
@@ -45,7 +45,7 @@ describe('Layer lock', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // Lock layer
@@ -72,7 +72,7 @@ describe('Layer lock', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // Lock C1
@@ -91,7 +91,7 @@ describe('Layer lock', () => {
     const store = useSceneStore.getState();
 
     const state1 = useSceneStore.getState();
-    const c1Id = Object.values(state1.scene.layers).find(l => l.name === 'C1')?.id;
+    const c1Id = Object.values(state1.scene.layers).find((l) => l.name === 'C1')?.id;
     expect(c1Id).toBeDefined();
 
     // Lock C1

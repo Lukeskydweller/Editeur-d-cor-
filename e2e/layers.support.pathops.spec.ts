@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 /**
  * E2E test for PathOps exact validation of layer support.
@@ -11,7 +11,9 @@ const test = process.env.PWREADY === '1' ? base : base.skip;
  * Verifies that pieces on upper layers must be fully contained within
  * the union of pieces on all lower layers.
  */
-test('layers support — PathOps exact validation (FORCE_SUPPORT_STRATEGY=PATHOPS)', async ({ page }) => {
+test('layers support — PathOps exact validation (FORCE_SUPPORT_STRATEGY=PATHOPS)', async ({
+  page,
+}) => {
   // Force PATHOPS strategy before app boots
   await page.addInitScript(() => {
     (window as any).__flags = {
@@ -274,7 +276,7 @@ test('layers support — PathOps union of L1+L2 supports L3', async ({ page }) =
     const fn = (window as any).__testWaitForProblems;
     if (!fn) return false;
     // Wait for validation to complete, expecting no unsupported_above
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
 
     const getProblems = (window as any).__testGetProblems;
     if (!getProblems) return false;

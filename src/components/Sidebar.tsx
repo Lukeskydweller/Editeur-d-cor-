@@ -6,39 +6,46 @@ import ProblemsPanel from '@/components/ProblemsPanel';
 import SidebarMaterials from '@/components/SidebarMaterials';
 import ShapeLibrary from '@/components/ShapeLibrary';
 import { DevMetrics } from '@/components/DevMetrics';
-import { shallow } from 'zustand/shallow';
-import { MAX_LAYERS } from '@/constants/validation';
+import { SpatialMetrics } from '@/components/SpatialMetrics';
+import { DebugPanel } from '@/components/DebugPanel';
+import { useShallow } from 'zustand/react/shallow';
+import { FIXED_LAYER_NAMES } from '@/constants/layers';
+import type { LayerName } from '@/constants/layers';
+import { isLayerUnlocked } from '@/state/layers.gating';
+
+// Type-safe helper using useShallow for multi-picks
+type Store = ReturnType<typeof useSceneStore.getState>;
+const useSidebar = <T,>(sel: (s: Store) => T) => useSceneStore(useShallow(sel));
 
 export function Sidebar() {
   // OPTIMIZED: Precise selectors to avoid re-renders
-  const layerOrder = useSceneStore((s) => s.scene.layerOrder, shallow);
-  const layers = useSceneStore((s) => s.scene.layers, shallow);
-  const pieces = useSceneStore((s) => s.scene.pieces, shallow);
-  const materials = useSceneStore((s) => s.scene.materials, shallow);
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const activeLayer = useSceneStore((s) => s.ui.activeLayer);
-  const layerVisibility = useSceneStore((s) => s.ui.layerVisibility, shallow);
-  const layerLocked = useSceneStore((s) => s.ui.layerLocked, shallow);
+  const layerOrder = useSidebar((s) => s.scene.layerOrder);
+  const fixedLayerIds = useSidebar((s) => s.scene.fixedLayerIds);
+  const layers = useSidebar((s) => s.scene.layers);
+  const pieces = useSidebar((s) => s.scene.pieces);
+  const materials = useSidebar((s) => s.scene.materials);
+  const selectedId = useSidebar((s) => s.ui.selectedId);
+  const activeLayer = useSidebar((s) => s.ui.activeLayer);
+  const layerVisibility = useSidebar((s) => s.ui.layerVisibility);
+  const layerLocked = useSidebar((s) => s.ui.layerLocked);
 
-  const setPieceMaterial = useSceneStore((s) => s.setPieceMaterial);
-  const toggleJoined = useSceneStore((s) => s.toggleJoined);
-  const setMaterialOriented = useSceneStore((s) => s.setMaterialOriented);
-  const setMaterialOrientation = useSceneStore((s) => s.setMaterialOrientation);
-  const addLayer = useSceneStore((s) => s.addLayer);
-  const setActiveLayer = useSceneStore((s) => s.setActiveLayer);
-  const toggleLayerVisibility = useSceneStore((s) => s.toggleLayerVisibility);
-  const toggleLayerLock = useSceneStore((s) => s.toggleLayerLock);
-  const moveLayerForward = useSceneStore((s) => s.moveLayerForward);
-  const moveLayerBackward = useSceneStore((s) => s.moveLayerBackward);
-  const moveLayerToFront = useSceneStore((s) => s.moveLayerToFront);
-  const moveLayerToBack = useSceneStore((s) => s.moveLayerToBack);
+  // Get the full state for unlock checking
+  const sceneState = useSceneStore.getState();
 
-  // Comptages
-  const layerCounts = layerOrder.map((lid) => ({
-    id: lid,
-    name: layers[lid]?.name ?? lid,
-    count: (layers[lid]?.pieces ?? []).length,
-  }));
+  const setPieceMaterial = useSidebar((s) => s.setPieceMaterial);
+  const toggleJoined = useSidebar((s) => s.toggleJoined);
+  const setMaterialOriented = useSidebar((s) => s.setMaterialOriented);
+  const setMaterialOrientation = useSidebar((s) => s.setMaterialOrientation);
+  const setActiveLayer = useSidebar((s) => s.setActiveLayer);
+  const toggleLayerVisibility = useSidebar((s) => s.toggleLayerVisibility);
+  const toggleLayerLock = useSidebar((s) => s.toggleLayerLock);
+
+  // Fixed 3-layer panel: only display C1, C2, C3
+  const fixedLayerCounts = FIXED_LAYER_NAMES.map((name: LayerName) => {
+    const id = fixedLayerIds?.[name];
+    const count = id ? (layers[id]?.pieces?.length ?? 0) : 0;
+    return { id, name, count };
+  }).filter((l): l is { id: string; name: LayerName; count: number } => l.id !== undefined);
 
   const materialCounts = Object.values(materials).map((m) => {
     const count = Object.values(pieces).filter((p) => p.materialId === m.id).length;
@@ -56,30 +63,22 @@ export function Sidebar() {
       <ProblemsPanel />
       {/* Dev metrics for performance monitoring */}
       <DevMetrics />
+      {/* Spatial metrics for RBush performance */}
+      {import.meta.env.DEV && <SpatialMetrics />}
+      {/* Debug panel for drag/resize validation (DEV only, behind __DBG_PANEL__ flag) */}
+      <DebugPanel />
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader>
           <CardTitle>Layers</CardTitle>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => addLayer(`C${layerOrder.length + 1}`)}
-            disabled={layerOrder.length >= MAX_LAYERS}
-            aria-label="add-layer"
-            data-testid="layer-add-button"
-            title={layerOrder.length >= MAX_LAYERS ? `Maximum de ${MAX_LAYERS} couches atteint` : undefined}
-          >
-            + Layer
-          </Button>
         </CardHeader>
         <CardContent data-testid="layers-panel">
           <ul className="space-y-2" aria-label="layers-list">
-            {layerCounts.map((l, idx) => {
-              const isAtBack = idx === 0;
-              const isAtFront = idx === layerCounts.length - 1;
+            {fixedLayerCounts.map((l) => {
               const isActive = l.id === activeLayer;
               const isVisible = layerVisibility?.[l.id] ?? true;
               const isLocked = layerLocked?.[l.id] ?? false;
+              const isUnlocked = isLayerUnlocked(sceneState, l.name);
 
               return (
                 <li
@@ -91,7 +90,7 @@ export function Sidebar() {
                       : 'bg-slate-700 hover:bg-slate-600'
                   }`}
                 >
-                  {/* Left side: radio button + name + count */}
+                  {/* Left side: radio button + name + count + locked badge */}
                   <div
                     className="flex items-center gap-2 flex-1 cursor-pointer"
                     onClick={() => setActiveLayer(l.id)}
@@ -113,12 +112,25 @@ export function Sidebar() {
                       {isActive ? '●' : '○'}
                     </span>
                     <span className={isActive ? 'font-semibold' : ''}>{l.name}</span>
-                    <span className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}>
+                    <span
+                      className={`text-sm ${isActive ? 'text-cyan-100' : 'text-muted-foreground'}`}
+                    >
                       {l.count}
                     </span>
+                    {/* Progressive unlock badge: show 🔐 for locked C2/C3 */}
+                    {!isUnlocked && (
+                      <span
+                        data-testid={`layer-locked-badge-${l.name}`}
+                        className="text-sm"
+                        title={`Verrouillée — ajoutez au moins une pièce à ${l.name === 'C2' ? 'C1' : 'C2'}`}
+                        aria-label={`Layer ${l.name} locked`}
+                      >
+                        🔐
+                      </span>
+                    )}
                   </div>
 
-                  {/* Right side: eye + lock + layer order buttons */}
+                  {/* Right side: eye + lock */}
                   <div className="flex items-center gap-1">
                     {/* Eye icon (visibility toggle) */}
                     <Button
@@ -129,9 +141,9 @@ export function Sidebar() {
                         e.stopPropagation();
                         toggleLayerVisibility(l.id);
                       }}
-                      aria-label={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      aria-label={isVisible ? 'Masquer cette couche' : 'Afficher cette couche'}
                       aria-pressed={isVisible}
-                      title={isVisible ? "Masquer cette couche" : "Afficher cette couche"}
+                      title={isVisible ? 'Masquer cette couche' : 'Afficher cette couche'}
                       data-testid={`layer-eye-${l.name}`}
                       tabIndex={0}
                     >
@@ -147,75 +159,15 @@ export function Sidebar() {
                         e.stopPropagation();
                         toggleLayerLock(l.id);
                       }}
-                      aria-label={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      aria-label={
+                        isLocked ? 'Déverrouiller cette couche' : 'Verrouiller cette couche'
+                      }
                       aria-pressed={isLocked}
-                      title={isLocked ? "Déverrouiller cette couche" : "Verrouiller cette couche"}
+                      title={isLocked ? 'Déverrouiller cette couche' : 'Verrouiller cette couche'}
                       data-testid={`layer-lock-${l.name}`}
                       tabIndex={0}
                     >
                       {isLocked ? '🔒' : '🔓'}
-                    </Button>
-
-                    {/* Layer order buttons */}
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtBack}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerToBack(l.id);
-                      }}
-                      aria-label="send-layer-to-back"
-                      title="Send to back"
-                      tabIndex={0}
-                    >
-                      ⤒
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtBack}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerBackward(l.id);
-                      }}
-                      aria-label="send-layer-backward"
-                      title="Send backward"
-                      tabIndex={0}
-                    >
-                      ‹
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtFront}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerForward(l.id);
-                      }}
-                      aria-label="send-layer-forward"
-                      title="Send forward"
-                      tabIndex={0}
-                    >
-                      ›
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-6 w-6"
-                      disabled={isAtFront}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        moveLayerToFront(l.id);
-                      }}
-                      aria-label="send-layer-to-front"
-                      title="Send to front"
-                      tabIndex={0}
-                    >
-                      ⤓
                     </Button>
                   </div>
                 </li>
@@ -232,7 +184,10 @@ export function Sidebar() {
         <CardContent>
           <ul className="space-y-3" aria-label="materials-list">
             {materialCounts.map((m) => (
-              <li key={m.id} className="flex flex-col gap-2 pb-2 border-b border-border last:border-0">
+              <li
+                key={m.id}
+                className="flex flex-col gap-2 pb-2 border-b border-border last:border-0"
+              >
                 <div className="flex items-center justify-between">
                   <span>{m.name}</span>
                   <span className="text-muted-foreground">{m.count}</span>
@@ -253,7 +208,9 @@ export function Sidebar() {
                       <span>Angle:</span>
                       <select
                         value={m.material.orientationDeg ?? 0}
-                        onChange={(e) => setMaterialOrientation(m.id, Number(e.target.value) as 0 | 90)}
+                        onChange={(e) =>
+                          setMaterialOrientation(m.id, Number(e.target.value) as 0 | 90)
+                        }
                         aria-label={`material-${m.id}-orientation`}
                         className="rounded border border-input bg-background px-2 py-1 text-xs"
                       >

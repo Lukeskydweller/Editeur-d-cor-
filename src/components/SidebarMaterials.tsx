@@ -1,10 +1,10 @@
 import { useEffect, useState, useMemo } from 'react';
-import { useSceneStore } from '../state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '../state/useSceneStore';
 import { selectProblems, subscribe } from '../store/editorStore';
 import { computeMaterialUsage, type MaterialUsage } from '../lib/materialUsage';
 
 export default function SidebarMaterials() {
-  const scene = useSceneStore((s) => s.scene);
+  const scene = useSceneStore((s: SceneStoreState) => s.scene);
   const [problems, setProblems] = useState(() => selectProblems().problems);
 
   useEffect(() => {

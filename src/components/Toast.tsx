@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { useSceneStore } from '../state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '../state/useSceneStore';
 
 export default function Toast() {
-  const toast = useSceneStore((s) => s.ui.toast);
+  const toast = useSceneStore((s: SceneStoreState) => s.ui.toast);
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {

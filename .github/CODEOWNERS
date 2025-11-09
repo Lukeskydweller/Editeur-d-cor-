@@ -1,0 +1,21 @@
+# CODEOWNERS - Reviewers obligatoires pour certains fichiers critiques
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Core state management - changements sensibles nécessitent review
+/src/state/**       @romua
+/src/core/**        @romua
+
+# Contracts et types - interface critique
+/src/core/contracts/**  @romua
+/src/types/**           @romua
+
+# Configuration CI/CD et outils
+/.github/**         @romua
+/vitest.config.ts   @romua
+/playwright.config.ts @romua
+/.eslintrc.cjs      @romua
+/tsconfig*.json     @romua
+
+# Dépendances - sécurité
+/package.json       @romua
+/pnpm-lock.yaml     @romua

@@ -1,7 +1,4 @@
-import { test as base, expect } from '@playwright/test';
-
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+import { test, expect } from '@playwright/test';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ORACLE MATH — Fonctions indépendantes pour vérification (PAS de code prod)
@@ -11,7 +8,7 @@ const test = process.env.PWREADY === '1' ? base : base.skip;
 function aabbFromIntrinsic(
   pos: { x: number; y: number },
   size: { w: number; h: number },
-  deg: number
+  deg: number,
 ): { x: number; y: number; w: number; h: number } {
   const r = ((deg % 360) + 360) % 360;
   const { w, h } = size;
@@ -29,14 +26,20 @@ function aabbFromIntrinsic(
 }
 
 /** Rotation +90° d'un point autour d'un pivot */
-function rot90(p: { x: number; y: number }, pivot: { x: number; y: number }): { x: number; y: number } {
+function rot90(
+  p: { x: number; y: number },
+  pivot: { x: number; y: number },
+): { x: number; y: number } {
   const dx = p.x - pivot.x;
   const dy = p.y - pivot.y;
   return { x: pivot.x - dy, y: pivot.y + dx };
 }
 
 /** Centre d'un AABB */
-function aabbCenter(aabb: { x: number; y: number; w: number; h: number }): { x: number; y: number } {
+function aabbCenter(aabb: { x: number; y: number; w: number; h: number }): {
+  x: number;
+  y: number;
+} {
   return { x: aabb.x + aabb.w / 2, y: aabb.y + aabb.h / 2 };
 }
 
@@ -50,6 +53,9 @@ function dist(a: { x: number; y: number }, b: { x: number; y: number }): number 
 // ═══════════════════════════════════════════════════════════════════════════
 
 test.describe('Rigid Group Rotation E2E', () => {
+  // Skip if PWREADY not set (only run in dedicated E2E environment)
+  test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
+
   test('preserves exact geometry through 4× +90° cycle', async ({ page }) => {
     // ─────────────────────────────────────────────────────────────────────
     // 1. Setup: charger app avec flag E2E
@@ -71,11 +77,11 @@ test.describe('Rigid Group Rotation E2E', () => {
     // Tous bord-à-bord dans une disposition en croix
     await page.evaluate(() => {
       (window as any).__e2e.seedPieces([
-        { id: 'p1', x: 100, y: 200, w: 60, h: 30, deg: 0 },   // gauche
-        { id: 'p2', x: 175, y: 140, w: 30, h: 60, deg: 90 },  // haut
-        { id: 'p3', x: 220, y: 200, w: 60, h: 30, deg: 0 },   // droite
-        { id: 'p4', x: 175, y: 230, w: 30, h: 60, deg: 90 },  // bas
-        { id: 'p5', x: 180, y: 190, w: 40, h: 40, deg: 0 },   // centre (carré)
+        { id: 'p1', x: 100, y: 200, w: 60, h: 30, deg: 0 }, // gauche
+        { id: 'p2', x: 175, y: 140, w: 30, h: 60, deg: 90 }, // haut
+        { id: 'p3', x: 220, y: 200, w: 60, h: 30, deg: 0 }, // droite
+        { id: 'p4', x: 175, y: 230, w: 30, h: 60, deg: 90 }, // bas
+        { id: 'p5', x: 180, y: 190, w: 40, h: 40, deg: 0 }, // centre (carré)
       ]);
     });
 
@@ -101,10 +107,10 @@ test.describe('Rigid Group Rotation E2E', () => {
 
     // Pivot = centre de l'AABB union (pas moyenne des centres!)
     const allAABBs = Object.values(initialAABBs);
-    const minX = Math.min(...allAABBs.map(b => b.x));
-    const minY = Math.min(...allAABBs.map(b => b.y));
-    const maxX = Math.max(...allAABBs.map(b => b.x + b.w));
-    const maxY = Math.max(...allAABBs.map(b => b.y + b.h));
+    const minX = Math.min(...allAABBs.map((b) => b.x));
+    const minY = Math.min(...allAABBs.map((b) => b.y));
+    const maxX = Math.max(...allAABBs.map((b) => b.x + b.w));
+    const maxY = Math.max(...allAABBs.map((b) => b.y + b.h));
     const pivot = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 
     // Distances initiales au pivot

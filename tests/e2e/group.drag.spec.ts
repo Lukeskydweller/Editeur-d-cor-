@@ -1,89 +1,147 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Group drag behavior', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('http://localhost:5173');
-    await page.waitForSelector('svg');
-  });
-
   test('drag group succeeds without rollback in empty area', async ({ page }) => {
-    // Create two pieces
-    await page.click('button:has-text("Ajouter rectangle")');
-    await page.waitForTimeout(100);
-    await page.click('button:has-text("Ajouter rectangle")');
-    await page.waitForTimeout(100);
+    // Navigate to app
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Wait for app to be ready
+    await page.waitForSelector('svg', { timeout: 5000 });
+
+    // Arrange: Create scene with C1 support and two C2 pieces
+    const ids = await page.evaluate(() => {
+      const T = (window as any).__TEST__;
+      if (!T) throw new Error('__TEST__ API not available');
+
+      T.initSceneWithDefaults(600, 600);
+
+      const layers = T.getFixedLayerIds();
+      const { C1, C2 } = layers;
+
+      // Create C1 support base
+      T.newRect(C1, 0, 0, 600, 600);
+
+      // Create two pieces at (100, 100) and (200, 100)
+      const p1 = T.newRect(C2, 100, 100, 100, 80);
+      const p2 = T.newRect(C2, 200, 100, 100, 80);
+
+      return { p1, p2 };
+    });
 
     // Get initial positions
-    const piece1 = await page.locator('[data-piece-id]').first();
-    const piece2 = await page.locator('[data-piece-id]').nth(1);
+    const posBefore = await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      return {
+        p1: T.getPieceRect(ids.p1),
+        p2: T.getPieceRect(ids.p2),
+      };
+    }, ids);
 
-    const box1Before = await piece1.boundingBox();
-    const box2Before = await piece2.boundingBox();
+    // Act: Select both pieces and drag group by (40, 40)
+    await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      T.selectMultiple([ids.p1, ids.p2]);
+    }, ids);
 
-    // Select both pieces (Ctrl+A)
-    await page.keyboard.press('Control+a');
-    await page.waitForTimeout(100);
-
-    // Drag group by 20mm (assuming viewport scale)
-    const svg = await page.locator('svg').first();
-    const svgBox = await svg.boundingBox();
-
-    if (!svgBox || !box1Before) return;
-
-    const startX = svgBox.x + 100;
-    const startY = svgBox.y + 100;
-    const endX = startX + 40; // ~20mm depending on scale
-    const endY = startY + 40;
-
-    await page.mouse.move(startX, startY);
-    await page.mouse.down();
-    await page.mouse.move(endX, endY, { steps: 10 });
-    await page.mouse.up();
-    await page.waitForTimeout(200);
+    // Drag group using first piece as reference
+    await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      T.dragBy(ids.p1, 40, 40);
+    }, ids);
 
     // Assert: positions changed
-    const box1After = await piece1.boundingBox();
-    const box2After = await piece2.boundingBox();
+    const posAfter = await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      return {
+        p1: T.getPieceRect(ids.p1),
+        p2: T.getPieceRect(ids.p2),
+      };
+    }, ids);
 
-    expect(box1After?.x).not.toBe(box1Before?.x);
-    expect(box2After?.x).not.toBe(box2Before?.x);
+    expect(posAfter.p1.x).toBeGreaterThan(posBefore.p1.x);
+    expect(posAfter.p1.y).toBeGreaterThan(posBefore.p1.y);
+    expect(posAfter.p2.x).toBeGreaterThan(posBefore.p2.x);
+    expect(posAfter.p2.y).toBeGreaterThan(posBefore.p2.y);
 
-    // Assert: no red flash (validation OK)
-    const statusBadge = await page.locator('[data-testid="status-badge"]');
-    const statusText = await statusBadge.textContent();
-    expect(statusText).toContain('OK');
+    // Verify actual movement amount is close to requested (40mm)
+    expect(posAfter.p1.x - posBefore.p1.x).toBeCloseTo(40, 0);
+    expect(posAfter.p1.y - posBefore.p1.y).toBeCloseTo(40, 0);
   });
 
   test('drag group snaps & guards vs external neighbor', async ({ page }) => {
-    // Create three pieces: two for group, one external neighbor
-    await page.click('button:has-text("Ajouter rectangle")');
-    await page.waitForTimeout(100);
-    await page.click('button:has-text("Ajouter rectangle")');
-    await page.waitForTimeout(100);
-    await page.click('button:has-text("Ajouter rectangle")');
-    await page.waitForTimeout(100);
+    // Navigate to app
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
 
-    // Position third piece as external neighbor (manual positioning would be needed)
-    // For now, just verify ghost rendering during drag
+    // Wait for app to be ready
+    await page.waitForSelector('svg', { timeout: 5000 });
 
-    // Select first two pieces
-    const piece1 = await page.locator('[data-piece-id]').first();
-    await piece1.click();
-    await page.keyboard.down('Shift');
-    const piece2 = await page.locator('[data-piece-id]').nth(1);
-    await piece2.click();
-    await page.keyboard.up('Shift');
-    await page.waitForTimeout(100);
+    // Arrange: Create scene with group (2 pieces) + external neighbor on C2
+    const ids = await page.evaluate(() => {
+      const T = (window as any).__TEST__;
+      if (!T) throw new Error('__TEST__ API not available');
 
-    // Start drag to trigger ghosts
-    await piece1.hover();
-    await page.mouse.down();
-    await page.waitForTimeout(100);
+      T.initSceneWithDefaults(600, 600);
 
-    // Assert: ghosts render
-    const ghosts = await page.locator('[data-testid="ghost-piece"]').count();
-    expect(ghosts).toBeGreaterThan(0);
+      const layers = T.getFixedLayerIds();
+      const { C1, C2 } = layers;
 
-    await page.mouse.up();
+      // Create C1 support base
+      T.newRect(C1, 0, 0, 600, 600);
+
+      // Create group: two pieces close together at (100, 100) and (220, 100)
+      const g1 = T.newRect(C2, 100, 100, 100, 80);
+      const g2 = T.newRect(C2, 220, 100, 100, 80);
+
+      // Create external neighbor at (400, 100) - far from group
+      const neighbor = T.newRect(C2, 400, 100, 100, 80);
+
+      return { g1, g2, neighbor };
+    });
+
+    // Act: Select group (g1, g2) and drag toward neighbor
+    await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      T.selectMultiple([ids.g1, ids.g2]);
+    }, ids);
+
+    // Get positions before drag
+    const posBefore = await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      return {
+        g1: T.getPieceRect(ids.g1),
+        g2: T.getPieceRect(ids.g2),
+        neighbor: T.getPieceRect(ids.neighbor),
+      };
+    }, ids);
+
+    // Drag group toward neighbor (right by 70mm - should snap or stop near neighbor)
+    await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      T.dragBy(ids.g1, 70, 0);
+    }, ids);
+
+    // Assert: Group moved
+    const posAfter = await page.evaluate((ids) => {
+      const T = (window as any).__TEST__;
+      return {
+        g1: T.getPieceRect(ids.g1),
+        g2: T.getPieceRect(ids.g2),
+        neighbor: T.getPieceRect(ids.neighbor),
+      };
+    }, ids);
+
+    expect(posAfter.g1.x).toBeGreaterThan(posBefore.g1.x);
+    expect(posAfter.g2.x).toBeGreaterThan(posBefore.g2.x);
+
+    // Assert: Neighbor position unchanged (wasn't part of group)
+    expect(posAfter.neighbor.x).toBe(posBefore.neighbor.x);
+
+    // Assert: Group should have snapped or stopped before colliding with neighbor
+    // (Allow some margin for snap tolerance)
+    const g2RightEdge = posAfter.g2.x + posAfter.g2.w;
+    const neighborLeftEdge = posAfter.neighbor.x;
+    expect(g2RightEdge).toBeLessThanOrEqual(neighborLeftEdge + 15); // 15mm snap tolerance
   });
 });

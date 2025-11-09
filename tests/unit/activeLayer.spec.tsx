@@ -22,7 +22,7 @@ describe('Active layer state', () => {
     const state = useSceneStore.getState();
 
     // C1 should exist
-    const c1Layer = Object.values(state.scene.layers).find(l => l.name === 'C1');
+    const c1Layer = Object.values(state.scene.layers).find((l) => l.name === 'C1');
     expect(c1Layer).toBeDefined();
 
     // C1 should be the active layer
@@ -33,8 +33,9 @@ describe('Active layer state', () => {
     const store = useSceneStore.getState();
     store.initSceneWithDefaults();
 
-    // Add C2
-    const c2Id = store.addLayer('C2');
+    // Get C2 (already created by ensureFixedLayerIds)
+    const state = useSceneStore.getState();
+    const c2Id = state.scene.fixedLayerIds!.C2;
 
     // Set C2 as active
     store.setActiveLayer(c2Id);

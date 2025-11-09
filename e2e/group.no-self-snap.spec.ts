@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 test('group does not snap to its own members during resize/move', async ({ page }) => {
   await page.goto('/');
@@ -51,7 +51,9 @@ test('group does not snap to its own members during resize/move', async ({ page 
   expect(groupState.hasGroupBBox).toBe(true);
 
   // Verify no BLOCK problems before operations
-  const problemsBeforeCount = await page.locator('[data-testid="problems-panel"] [data-severity="BLOCK"]').count();
+  const problemsBeforeCount = await page
+    .locator('[data-testid="problems-panel"] [data-severity="BLOCK"]')
+    .count();
   expect(problemsBeforeCount).toBe(0);
 
   // TEST 1: Group resize should not snap to its own members
@@ -77,17 +79,21 @@ test('group does not snap to its own members during resize/move', async ({ page 
   await page.waitForTimeout(500);
 
   // Verify no BLOCK problems after resize (no self-snap creating overlaps)
-  const problemsAfterResize = await page.locator('[data-testid="problems-panel"] [data-severity="BLOCK"]').count();
+  const problemsAfterResize = await page
+    .locator('[data-testid="problems-panel"] [data-severity="BLOCK"]')
+    .count();
   expect(problemsAfterResize).toBe(0);
 
   // Verify pieces were actually resized (sanity check)
   const piecesAfterResize = await page.evaluate((ids) => {
     const store = (window as any).__sceneStore;
     const pieces = store?.getState().scene.pieces || {};
-    return ids.map((id: string) => {
-      const p = pieces[id];
-      return p ? { w: p.size.w, h: p.size.h } : null;
-    }).filter(Boolean);
+    return ids
+      .map((id: string) => {
+        const p = pieces[id];
+        return p ? { w: p.size.w, h: p.size.h } : null;
+      })
+      .filter(Boolean);
   }, insertedIds);
   expect(piecesAfterResize.length).toBe(2);
   expect(piecesAfterResize[0].w).toBeGreaterThan(60); // Should be scaled up
@@ -124,7 +130,9 @@ test('group does not snap to its own members during resize/move', async ({ page 
   await page.waitForTimeout(500);
 
   // Verify no BLOCK problems after second resize (no self-snap creating overlaps)
-  const problemsAfterSecondResize = await page.locator('[data-testid="problems-panel"] [data-severity="BLOCK"]').count();
+  const problemsAfterSecondResize = await page
+    .locator('[data-testid="problems-panel"] [data-severity="BLOCK"]')
+    .count();
   expect(problemsAfterSecondResize).toBe(0);
 
   // Final check: no WARN or BLOCK problems remain
@@ -138,7 +146,7 @@ test('group does not snap to its own members during resize/move', async ({ page 
 
   // Final sanity: verify no console errors occurred
   const logs: string[] = [];
-  page.on('console', msg => {
+  page.on('console', (msg) => {
     if (msg.type() === 'error') {
       logs.push(msg.text());
     }

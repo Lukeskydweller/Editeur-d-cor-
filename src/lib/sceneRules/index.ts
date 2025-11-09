@@ -1,5 +1,6 @@
 import type { SceneDraft, Piece, ID } from '@/types/scene';
 import { pieceBBox, rectsOverlap, bboxInsideRect } from '@/lib/geom';
+import { shortlistSameLayerAABB } from '@/state/useSceneStore';
 
 /**
  * Vérifie si une pièce est entièrement contenue dans les limites de la scène.
@@ -43,7 +44,7 @@ export function validateNoOverlap(scene: SceneDraft): {
  */
 export function validateNoOverlapForCandidate(
   scene: SceneDraft,
-  candidateIds: ID[]
+  candidateIds: ID[],
 ): {
   ok: boolean;
   conflicts: Array<[ID, ID]>;
@@ -66,6 +67,89 @@ export function validateNoOverlapForCandidate(
       const bboxB = pieceBBox(pieceB);
       if (rectsOverlap(bboxA, bboxB)) {
         conflicts.push([pieceA.id, pieceB.id]);
+      }
+    }
+  }
+
+  return {
+    ok: conflicts.length === 0,
+    conflicts,
+  };
+}
+
+/**
+ * Variante same-layer pour drag/resize: teste uniquement les collisions intra-couche.
+ * - ignore les paires internes (a,b) si a∈candidateIds && b∈candidateIds
+ * - teste candidats ↔ voisins externes MAIS uniquement même couche
+ *
+ * @param scene - La scène
+ * @param candidateIds - IDs des pièces en cours de déplacement/redimensionnement
+ * @returns Validation avec conflicts filtrés par couche
+ */
+export function validateNoOverlapSameLayer(
+  scene: SceneDraft,
+  candidateIds: ID[],
+): {
+  ok: boolean;
+  conflicts: Array<[ID, ID]>;
+} {
+  const conflicts: Array<[ID, ID]> = [];
+  const cand = new Set(candidateIds);
+
+  // OPTIMIZATION: For each candidate, query spatial index for same-layer neighbors
+  for (const candId of candidateIds) {
+    const candPiece = scene.pieces[candId];
+    if (!candPiece) continue;
+
+    const bboxA = pieceBBox(candPiece);
+    const margin = 0; // No margin needed for overlap detection
+
+    try {
+      // Use shortlistSameLayerAABB to get only same-layer pieces near this candidate
+      // Exclude all candidates from the spatial query to avoid self/internal collisions
+      const neighborIds = shortlistSameLayerAABB(
+        candPiece.layerId,
+        {
+          x: bboxA.x - margin,
+          y: bboxA.y - margin,
+          w: bboxA.w + 2 * margin,
+          h: bboxA.h + 2 * margin,
+        },
+        scene,
+        cand, // Exclude all candidates (Set<ID>)
+      );
+
+      for (const neighborId of neighborIds) {
+        // Candidates already excluded by spatial query, no need to check again
+
+        const neighborPiece = scene.pieces[neighborId];
+        if (!neighborPiece) continue;
+
+        const bboxB = pieceBBox(neighborPiece);
+        if (rectsOverlap(bboxA, bboxB)) {
+          // Store as sorted pair to avoid duplicates
+          const pair: [ID, ID] = candId < neighborId ? [candId, neighborId] : [neighborId, candId];
+          // Check if we already have this pair
+          if (!conflicts.some(([a, b]) => a === pair[0] && b === pair[1])) {
+            conflicts.push(pair);
+          }
+        }
+      }
+    } catch {
+      // Fallback: use O(n) scan for this candidate's layer
+      const pieces = Object.values(scene.pieces).filter(
+        (p) => p.layerId === candPiece.layerId && p.id !== candId && !cand.has(p.id),
+      );
+
+      for (const neighborPiece of pieces) {
+        const bboxB = pieceBBox(neighborPiece);
+        if (rectsOverlap(bboxA, bboxB)) {
+          const pair: [ID, ID] =
+            candId < neighborPiece.id ? [candId, neighborPiece.id] : [neighborPiece.id, candId];
+          if (!conflicts.some(([a, b]) => a === pair[0] && b === pair[1])) {
+            conflicts.push(pair);
+          }
+        }
       }
     }
   }
@@ -102,7 +186,8 @@ export function validateMaterialOrientation(scene: SceneDraft): {
   ok: boolean;
   warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }>;
 } {
-  const warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }> = [];
+  const warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }> =
+    [];
 
   for (const p of Object.values(scene.pieces)) {
     const m = scene.materials[p.materialId];
@@ -112,7 +197,12 @@ export function validateMaterialOrientation(scene: SceneDraft): {
       const expected = (m.orientationDeg ?? 0) % 180;
       const actual = (p.rotationDeg ?? 0) % 180;
       if (expected !== actual) {
-        warnings.push({ pieceId: p.id, materialId: m.id, expectedDeg: expected, actualDeg: actual });
+        warnings.push({
+          pieceId: p.id,
+          materialId: m.id,
+          expectedDeg: expected,
+          actualDeg: actual,
+        });
       }
     }
   }

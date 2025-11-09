@@ -2,7 +2,6 @@ import { describe, test, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { Sidebar } from '@/components/Sidebar';
 import { useSceneStore } from '@/state/useSceneStore';
-import { MAX_LAYERS } from '@/constants/validation';
 
 /**
  * Test suite: Layers Panel UI interactions
@@ -29,14 +28,14 @@ describe('Layers Panel UI', () => {
   test('clicking layer row updates activeLayer', () => {
     const store = useSceneStore.getState();
 
-    // Add C2
-    const c2Id = store.addLayer('C2');
+    // C2 already exists (created by ensureFixedLayerIds)
+    const c2Id = store.scene.fixedLayerIds!.C2;
 
     render(<Sidebar />);
 
     // Get C1 layer (should be active initially)
     const state1 = useSceneStore.getState();
-    const c1Layer = Object.values(state1.scene.layers).find(l => l.name === 'C1');
+    const c1Layer = Object.values(state1.scene.layers).find((l) => l.name === 'C1');
     expect(state1.ui.activeLayer).toBe(c1Layer?.id);
 
     // Click C2 badge (inside the clickable area)
@@ -49,9 +48,7 @@ describe('Layers Panel UI', () => {
   });
 
   test('active layer badge displays on active layer row', () => {
-    const store = useSceneStore.getState();
-    store.addLayer('C2');
-
+    // C2 already exists (created by ensureFixedLayerIds)
     render(<Sidebar />);
 
     // C1 should have filled badge (●) initially
@@ -85,60 +82,5 @@ describe('Layers Panel UI', () => {
     expect(c1Row.className).toContain('bg-cyan-600');
     expect(c1Row.className).toContain('ring-2');
     expect(c1Row.className).toContain('ring-cyan-400');
-  });
-
-  test('+ Layer button has data-testid', () => {
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button');
-    expect(addButton).toBeDefined();
-    expect(addButton.textContent).toContain('Layer');
-  });
-
-  test('+ Layer button disabled when MAX_LAYERS reached', () => {
-    const store = useSceneStore.getState();
-
-    // C1 already exists, add C2 and C3
-    store.addLayer('C2');
-    store.addLayer('C3');
-
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button') as HTMLButtonElement;
-
-    // Should be disabled (3 layers present)
-    expect(addButton.disabled).toBe(true);
-    expect(useSceneStore.getState().scene.layerOrder).toHaveLength(MAX_LAYERS);
-  });
-
-  test('+ Layer button enabled when below MAX_LAYERS', () => {
-    render(<Sidebar />);
-
-    const addButton = screen.getByTestId('layer-add-button') as HTMLButtonElement;
-
-    // Should be enabled (only C1 exists)
-    expect(addButton.disabled).toBe(false);
-    expect(useSceneStore.getState().scene.layerOrder).toHaveLength(1);
-  });
-
-  test('layer action buttons have stopPropagation (do not trigger layer selection)', () => {
-    const store = useSceneStore.getState();
-    store.addLayer('C2');
-
-    // Set C2 as active
-    const c2Id = useSceneStore.getState().scene.layerOrder[1];
-    store.setActiveLayer(c2Id);
-
-    render(<Sidebar />);
-
-    // Click a layer action button on C1 row (send-layer-forward)
-    const c1Row = screen.getByTestId('layer-row-C1');
-    const forwardButton = c1Row.querySelector('[aria-label="send-layer-forward"]') as HTMLButtonElement;
-
-    expect(forwardButton).toBeDefined();
-    fireEvent.click(forwardButton);
-
-    // activeLayer should still be C2 (not switched to C1)
-    expect(useSceneStore.getState().ui.activeLayer).toBe(c2Id);
   });
 });

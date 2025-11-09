@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useSceneStore } from '../state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '../state/useSceneStore';
 
 const PRESETS = [
   { label: '60×60', w: 60, h: 60 },
@@ -10,8 +10,8 @@ const PRESETS = [
 export default function ShapeLibrary() {
   const [customW, setCustomW] = useState('60');
   const [customH, setCustomH] = useState('60');
-  const insertRect = useSceneStore((s) => s.insertRect);
-  const sceneSize = useSceneStore((s) => s.scene.size);
+  const insertRect = useSceneStore((s: SceneStoreState) => s.insertRect);
+  const sceneSize = useSceneStore((s: SceneStoreState) => s.scene.size);
 
   const handlePreset = async (w: number, h: number) => {
     await insertRect({ w, h });

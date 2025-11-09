@@ -1,8 +1,8 @@
 import React from 'react';
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 import type { ID, Milli, SceneDraft } from '@/types/scene';
 import { pieceBBox } from '@/lib/geom';
-import { shallow } from 'zustand/shallow';
+import { useShallow } from 'zustand/react/shallow';
 import { EMPTY_ARR } from '@/state/constants';
 
 interface BBox {
@@ -12,7 +12,15 @@ interface BBox {
   h: Milli;
 }
 
-function HandlesRect({ bbox, isIsotropic = false, onHandleStart }: { bbox: BBox; isIsotropic?: boolean; onHandleStart?: (handle: string, clientX: number, clientY: number) => void }) {
+function HandlesRect({
+  bbox,
+  isIsotropic = false,
+  onHandleStart,
+}: {
+  bbox: BBox;
+  isIsotropic?: boolean;
+  onHandleStart?: (handle: string, clientX: number, clientY: number) => void;
+}) {
   const r = 4; // taille visuelle poignée
   const { x, y, w, h } = bbox;
 
@@ -41,7 +49,8 @@ function HandlesRect({ bbox, isIsotropic = false, onHandleStart }: { bbox: BBox;
       {points.map(({ pos: [px, py], handle }, i) => (
         <rect
           key={i}
-          data-handle={isIsotropic ? "group-corner" : undefined}
+          data-handle={isIsotropic ? 'group-corner' : undefined}
+          data-testid={`handle-${handle}`}
           x={px - r}
           y={py - r}
           width={2 * r}
@@ -51,7 +60,10 @@ function HandlesRect({ bbox, isIsotropic = false, onHandleStart }: { bbox: BBox;
           fill="white"
           stroke="#3b82f6"
           strokeWidth={1}
-          style={{ cursor: isIsotropic ? 'nwse-resize' : 'pointer', pointerEvents: isIsotropic ? 'all' : 'none' }}
+          style={{
+            cursor: isIsotropic ? 'nwse-resize' : 'pointer',
+            pointerEvents: isIsotropic && import.meta.env.VITE_E2E !== '1' ? 'all' : 'none',
+          }}
           onPointerDown={(e) => {
             if (isIsotropic && onHandleStart) {
               e.stopPropagation();
@@ -67,7 +79,7 @@ function HandlesRect({ bbox, isIsotropic = false, onHandleStart }: { bbox: BBox;
 /**
  * Helper: compute group bbox rotation-aware (no cache, always fresh from pieceBBox)
  */
-function computeGroupBBoxRotationAware(scene: SceneDraft, ids: ID[]): BBox {
+function computeGroupBBoxRotationAware(scene: SceneDraft, ids: readonly ID[]): BBox {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -83,22 +95,33 @@ function computeGroupBBoxRotationAware(scene: SceneDraft, ids: ID[]): BBox {
     maxY = Math.max(maxY, b.y + b.h);
   }
 
-  return { x: minX as Milli, y: minY as Milli, w: (maxX - minX) as Milli, h: (maxY - minY) as Milli };
+  return {
+    x: minX as Milli,
+    y: minY as Milli,
+    w: (maxX - minX) as Milli,
+    h: (maxY - minY) as Milli,
+  };
 }
 
 interface SelectionHandlesProps {
-  onGroupResizeStart?: (handle: string, clientX: number, clientY: number) => void;
+  onGroupResizeStart?: (
+    handle: import('@/lib/ui/resize').ResizeHandle | (string & {}),
+    clientX: number,
+    clientY: number,
+  ) => void;
 }
 
 export default function SelectionHandles({ onGroupResizeStart }: SelectionHandlesProps = {}) {
   // Precise selectors - avoid subscribing to full ui/scene objects
-  const selectedId = useSceneStore((s) => s.ui.selectedId);
-  const selectedIds = useSceneStore((s) => s.ui.selectedIds, shallow);
-  const handlesEpoch = useSceneStore((s) => s.ui.handlesEpoch);
-  const sceneRevision = useSceneStore((s) => s.scene.revision);
-  const isDragging = useSceneStore((s) => !!s.ui.dragging);
-  const groupIsResizing = useSceneStore((s) => !!s.ui.groupResizing?.isResizing);
-  const groupPreviewBbox = useSceneStore((s) => s.ui.groupResizing?.preview?.bbox, shallow);
+  const selectedId = useSceneStore((s: SceneStoreState) => s.ui.selectedId);
+  const selectedIds = useSceneStore(useShallow((s: SceneStoreState) => s.ui.selectedIds));
+  const handlesEpoch = useSceneStore((s: SceneStoreState) => s.ui.handlesEpoch);
+  const sceneRevision = useSceneStore((s: SceneStoreState) => s.scene.revision);
+  const isDragging = useSceneStore((s: SceneStoreState) => !!s.ui.dragging);
+  const groupIsResizing = useSceneStore((s: SceneStoreState) => !!s.ui.groupResizing?.isResizing);
+  const groupPreviewBbox = useSceneStore(
+    useShallow((s: SceneStoreState) => s.ui.groupResizing?.preview?.bbox),
+  );
 
   // 1) clé de remount : si l'une des composantes change → remount propre
   const selIds = selectedIds ?? (selectedId ? [selectedId] : EMPTY_ARR);
@@ -135,7 +158,12 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
   // Multi-selection: render group bbox with handles
   if (selIds.length >= 2) {
     return (
-      <g data-testid="selection-handles-group" data-layer="handles" key={key}>
+      <g
+        data-testid="selection-handles-group"
+        data-layer="handles"
+        data-e2e-overlay="true"
+        key={key}
+      >
         <HandlesRect bbox={bbox} isIsotropic={true} onHandleStart={onGroupResizeStart} />
       </g>
     );
@@ -143,7 +171,12 @@ export default function SelectionHandles({ onGroupResizeStart }: SelectionHandle
 
   // Single selection: render selection bbox handles
   return (
-    <g data-testid="selection-handles-single" data-layer="handles" key={key}>
+    <g
+      data-testid="selection-handles-single"
+      data-layer="handles"
+      data-e2e-overlay="true"
+      key={key}
+    >
       <HandlesRect bbox={bbox} isIsotropic={false} onHandleStart={undefined} />
     </g>
   );

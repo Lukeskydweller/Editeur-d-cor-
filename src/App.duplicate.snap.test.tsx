@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { beforeEach, vi } from 'vitest';
 import App from './App';
 import { useSceneStore } from '@/state/useSceneStore';
+import { DUPLICATE_OFFSET_MM } from '@/state/constants';
 
 beforeEach(() => {
   // Reset store entre les tests
@@ -19,7 +20,7 @@ beforeEach(() => {
       selectedId: undefined,
       flashInvalidAt: undefined,
       dragging: undefined,
-      snap10mm: true,
+      snap10mm: false, // Disable snap to avoid rounding effects in duplication test
       guides: undefined,
     },
   });
@@ -30,6 +31,20 @@ test('Ctrl+D duplicates selected piece', () => {
   initSceneWithDefaults(600, 600);
 
   const pieceId = Object.keys(useSceneStore.getState().scene.pieces)[0];
+
+  // Resize piece to 50×50 to ensure +60,+60 offset won't trigger collision escape
+  // Default piece: (40,40) w:120 h:80 → bbox [40..160] collides with (100,100)
+  // With w:50 h:50 → bbox [40..90], duplicate at (100,100) is collision-free
+  useSceneStore.setState((s) => ({
+    scene: {
+      ...s.scene,
+      pieces: {
+        ...s.scene.pieces,
+        [pieceId]: { ...s.scene.pieces[pieceId], size: { w: 50, h: 50 } },
+      },
+    },
+  }));
+
   const originalPos = { ...useSceneStore.getState().scene.pieces[pieceId].position };
   selectPiece(pieceId);
 
@@ -50,10 +65,11 @@ test('Ctrl+D duplicates selected piece', () => {
   expect(selectedId).toBeDefined();
   expect(selectedId).not.toBe(pieceId);
 
-  // Vérifier position décalée
+  // Vérifier position décalée: net +60,+60 offset (no snap, no escape)
+  // This test measures the raw duplicate offset constant, free from snap/escape logic
   const newPiece = useSceneStore.getState().scene.pieces[selectedId!];
-  expect(newPiece.position.x).toBe(originalPos.x + 20);
-  expect(newPiece.position.y).toBe(originalPos.y + 20);
+  expect(newPiece.position.x).toBe(originalPos.x + DUPLICATE_OFFSET_MM);
+  expect(newPiece.position.y).toBe(originalPos.y + DUPLICATE_OFFSET_MM);
 });
 
 test('duplicate button works', () => {

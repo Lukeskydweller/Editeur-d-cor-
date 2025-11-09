@@ -24,7 +24,7 @@ describe('checkLayerSupport validation (AABB)', () => {
     y: number,
     w: number,
     h: number,
-    rot?: 0 | 90 | 180 | 270
+    rot?: 0 | 90 | 180 | 270,
   ): Piece {
     return {
       id,
@@ -39,7 +39,7 @@ describe('checkLayerSupport validation (AABB)', () => {
     };
   }
 
-  it('BLOCK if piece on layer 2 extends beyond union of layer 1', async () => {
+  it('WARN if piece on layer 2 extends beyond union of layer 1', async () => {
     const layers: Layer[] = [
       { id: 'L1', name: 'Layer 1', index: 0 },
       { id: 'L2', name: 'Layer 2', index: 1 },
@@ -53,10 +53,10 @@ describe('checkLayerSupport validation (AABB)', () => {
     ];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(1);
-    expect(supportProblems[0].severity).toBe('BLOCK');
+    expect(supportProblems[0].severity).toBe('WARN'); // Support issues are WARN, not BLOCK
     expect(supportProblems[0].pieceId).toBe('unsupported');
     expect(supportProblems[0].message).toContain('non supportée par couche inférieure');
   });
@@ -75,23 +75,19 @@ describe('checkLayerSupport validation (AABB)', () => {
     ];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(0);
   });
 
   it('OK for pieces on base layer (no support check)', async () => {
-    const layers: Layer[] = [
-      { id: 'L1', name: 'Layer 1', index: 0 },
-    ];
+    const layers: Layer[] = [{ id: 'L1', name: 'Layer 1', index: 0 }];
 
     // Single piece on base layer → no support check required
-    const pieces = [
-      createPiece('base', 'L1', 100, 100, 100, 100),
-    ];
+    const pieces = [createPiece('base', 'L1', 100, 100, 100, 100)];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(0);
   });
@@ -113,15 +109,15 @@ describe('checkLayerSupport validation (AABB)', () => {
 
     const problems = await validateAll(createScene(layers, pieces));
 
-    const overlapProblems = problems.filter(p => p.code === 'overlap_same_layer');
-    const spacingProblems = problems.filter(p => p.code === 'spacing_too_small');
+    const overlapProblems = problems.filter((p) => p.code === 'overlap_same_layer');
+    const spacingProblems = problems.filter((p) => p.code === 'spacing_too_small');
 
     // Should still detect overlap and spacing issues
     expect(overlapProblems.length).toBeGreaterThan(0);
     expect(spacingProblems.length).toBeGreaterThan(0);
   });
 
-  it('BLOCK if no support pieces exist below', async () => {
+  it('WARN if no support pieces exist below', async () => {
     const layers: Layer[] = [
       { id: 'L1', name: 'Layer 1', index: 0 },
       { id: 'L2', name: 'Layer 2', index: 1 },
@@ -129,15 +125,13 @@ describe('checkLayerSupport validation (AABB)', () => {
 
     // Layer 1: Empty (no support pieces)
     // Layer 2: One piece with no support below
-    const pieces = [
-      createPiece('unsupported', 'L2', 100, 100, 100, 100),
-    ];
+    const pieces = [createPiece('unsupported', 'L2', 100, 100, 100, 100)];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(1);
-    expect(supportProblems[0].severity).toBe('BLOCK');
+    expect(supportProblems[0].severity).toBe('WARN'); // Support issues are WARN, not BLOCK
     expect(supportProblems[0].pieceId).toBe('unsupported');
   });
 
@@ -152,13 +146,13 @@ describe('checkLayerSupport validation (AABB)', () => {
     // Layer 2: Narrower piece (90-190) fully contained in L1
     // Layer 3: Bridge piece (10-180) spanning and supported by union of L1+L2
     const pieces = [
-      createPiece('support1', 'L1', 0, 100, 200, 100),  // x=0-200, base support
-      createPiece('support2', 'L2', 90, 110, 100, 80),  // x=90-190, y=110-190, contained in L1
-      createPiece('bridge', 'L3', 10, 120, 170, 60),    // x=10-180, y=120-180, supported by union
+      createPiece('support1', 'L1', 0, 100, 200, 100), // x=0-200, base support
+      createPiece('support2', 'L2', 90, 110, 100, 80), // x=90-190, y=110-190, contained in L1
+      createPiece('bridge', 'L3', 10, 120, 170, 60), // x=10-180, y=120-180, supported by union
     ];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(0);
   });
@@ -180,7 +174,7 @@ describe('checkLayerSupport validation (AABB)', () => {
     ];
 
     const problems = await validateAll(createScene(layers, pieces));
-    const supportProblems = problems.filter(p => p.code === 'unsupported_above');
+    const supportProblems = problems.filter((p) => p.code === 'unsupported_above');
 
     expect(supportProblems.length).toBe(0);
   });

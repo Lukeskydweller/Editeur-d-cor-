@@ -1,8 +1,8 @@
 import React from 'react';
-import { useSceneStore } from '@/state/useSceneStore';
+import { useSceneStore, type SceneStoreState } from '@/state/useSceneStore';
 import { EMPTY_ARR } from '@/state/constants';
 import type { ID, Milli } from '@/types/scene';
-import { shallow } from 'zustand/shallow';
+import { useShallow } from 'zustand/react/shallow';
 
 /**
  * Live preview overlay for group resize operations
@@ -13,7 +13,7 @@ import { shallow } from 'zustand/shallow';
  */
 export default function GroupResizePreview() {
   // Precise selectors - no subscription to full scene/ui objects
-  const preview = useSceneStore((s) => s.ui.groupResizing?.preview, shallow);
+  const preview = useSceneStore(useShallow((s: SceneStoreState) => s.ui.groupResizing?.preview));
 
   if (!preview?.previewPieces || preview.previewPieces.length === 0) {
     return null;
@@ -47,7 +47,7 @@ export default function GroupResizePreview() {
           <g key={id} transform={transformStr}>
             {/* Render the piece with its original geometry */}
             {/* The transform matrix will scale it visually */}
-            <g transform={`translate(${x},${y}) rotate(${rotationDeg} ${w/2} ${h/2})`}>
+            <g transform={`translate(${x},${y}) rotate(${rotationDeg} ${w / 2} ${h / 2})`}>
               <rect
                 x={0}
                 y={0}

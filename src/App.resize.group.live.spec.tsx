@@ -31,6 +31,8 @@ describe('Group resize live preview (no scene mutations)', () => {
         snap10mm: false,
         isTransientActive: false,
         handlesEpoch: 0,
+        layerVisibility: {},
+        layerLocked: {},
         history: {
           past: [],
           future: [],
@@ -41,7 +43,8 @@ describe('Group resize live preview (no scene mutations)', () => {
   });
 
   test('preview matrices computed without mutating scene.pieces', () => {
-    const { addRectAtCenter, startGroupResize, _updateGroupResizeRafSafe } = useSceneStore.getState();
+    const { addRectAtCenter, startGroupResize, _updateGroupResizeRafSafe } =
+      useSceneStore.getState();
 
     // Créer 3 pièces
     addRectAtCenter(40 as Milli, 60 as Milli); // p1
@@ -102,7 +105,8 @@ describe('Group resize live preview (no scene mutations)', () => {
   });
 
   test('corner handle isotropic: scaleX === scaleY in preview matrices', () => {
-    const { addRectAtCenter, startGroupResize, _updateGroupResizeRafSafe } = useSceneStore.getState();
+    const { addRectAtCenter, startGroupResize, _updateGroupResizeRafSafe } =
+      useSceneStore.getState();
 
     // Créer 2 pièces
     addRectAtCenter(40 as Milli, 60 as Milli);

@@ -1,7 +1,7 @@
-import { test as base, expect } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
-// Skip if PWREADY not set (same pattern as other E2E tests)
-const test = process.env.PWREADY === '1' ? base : base.skip;
+// Skip if PWREADY not set (only run in dedicated E2E environment)
+test.skip(process.env.PWREADY !== '1', 'Disabled unless PWREADY=1');
 
 test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   await page.goto('/');
@@ -52,7 +52,9 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   expect(hasGroupBBox).toBe(true);
 
   // Verify no BLOCK problems before resize
-  const problemsBeforeCount = await page.locator('[data-testid="problems-panel"] [data-severity="BLOCK"]').count();
+  const problemsBeforeCount = await page
+    .locator('[data-testid="problems-panel"] [data-severity="BLOCK"]')
+    .count();
   expect(problemsBeforeCount).toBe(0);
 
   // Perform group resize by dragging SE handle
@@ -77,15 +79,19 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   const piecesAfterResize = await page.evaluate((ids) => {
     const store = (window as any).__sceneStore;
     const pieces = store?.getState().scene.pieces || {};
-    return ids.map((id: string) => {
-      const p = pieces[id];
-      return p ? {
-        w: p.size.w,
-        h: p.size.h,
-        x: p.position.x,
-        y: p.position.y,
-      } : null;
-    }).filter(Boolean);
+    return ids
+      .map((id: string) => {
+        const p = pieces[id];
+        return p
+          ? {
+              w: p.size.w,
+              h: p.size.h,
+              x: p.position.x,
+              y: p.position.y,
+            }
+          : null;
+      })
+      .filter(Boolean);
   }, insertedIds);
 
   // Both pieces should have changed dimensions
@@ -102,7 +108,9 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   }
 
   // Verify no BLOCK problems after resize
-  const problemsAfterCount = await page.locator('[data-testid="problems-panel"] [data-severity="BLOCK"]').count();
+  const problemsAfterCount = await page
+    .locator('[data-testid="problems-panel"] [data-severity="BLOCK"]')
+    .count();
   expect(problemsAfterCount).toBe(0);
 
   // Test undo
@@ -112,10 +120,12 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   const piecesAfterUndo = await page.evaluate((ids) => {
     const store = (window as any).__sceneStore;
     const pieces = store?.getState().scene.pieces || {};
-    return ids.map((id: string) => {
-      const p = pieces[id];
-      return p ? { w: p.size.w, h: p.size.h } : null;
-    }).filter(Boolean);
+    return ids
+      .map((id: string) => {
+        const p = pieces[id];
+        return p ? { w: p.size.w, h: p.size.h } : null;
+      })
+      .filter(Boolean);
   }, insertedIds);
 
   // After undo, pieces should be back to original sizes (approximately)
@@ -131,10 +141,12 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
   const piecesAfterRedo = await page.evaluate((ids) => {
     const store = (window as any).__sceneStore;
     const pieces = store?.getState().scene.pieces || {};
-    return ids.map((id: string) => {
-      const p = pieces[id];
-      return p ? { w: p.size.w, h: p.size.h } : null;
-    }).filter(Boolean);
+    return ids
+      .map((id: string) => {
+        const p = pieces[id];
+        return p ? { w: p.size.w, h: p.size.h } : null;
+      })
+      .filter(Boolean);
   }, insertedIds);
 
   // After redo, pieces should be scaled again
@@ -143,7 +155,7 @@ test('Group resize with handles - no BLOCK problems', async ({ page }) => {
 
   // Final check: no console errors
   const logs: string[] = [];
-  page.on('console', msg => {
+  page.on('console', (msg) => {
     if (msg.type() === 'error') {
       logs.push(msg.text());
     }

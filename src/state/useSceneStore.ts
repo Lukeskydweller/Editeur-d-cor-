@@ -1,11 +1,42 @@
 import { create } from 'zustand';
 import { produce } from 'immer';
 import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/types/scene';
-import { validateNoOverlap, validateNoOverlapForCandidate as validateNoOverlapForCandidateDraft, validateInsideScene } from '@/lib/sceneRules';
-import { snapToPieces, snapGroupToPieces, snapEdgeCollage, computeMinGap, finalizeCollageGuard, normalizeGapToThreshold, MM_TO_PX, type SnapGuide } from '@/lib/ui/snap';
-import { MIN_GAP_MM, SNAP_EDGE_THRESHOLD_MM, NORMALIZE_GAP_TARGET_MM, EPSILON_GAP_NORMALIZE_MM, ENABLE_GAP_NORMALIZATION, MAX_LAYERS } from '@/constants/validation';
+import {
+  validateNoOverlap,
+  validateNoOverlapForCandidate as validateNoOverlapForCandidateDraft,
+  validateNoOverlapSameLayer,
+  validateInsideScene,
+} from '@/lib/sceneRules';
+import {
+  snapToPieces,
+  snapGroupToPieces,
+  snapEdgeCollage,
+  computeMinGap,
+  finalizeCollageGuard,
+  normalizeGapToThreshold,
+  MM_TO_PX,
+  type SnapGuide,
+} from '@/lib/ui/snap';
+import {
+  MIN_GAP_MM,
+  SNAP_EDGE_THRESHOLD_MM,
+  NORMALIZE_GAP_TARGET_MM,
+  EPSILON_GAP_NORMALIZE_MM,
+  ENABLE_GAP_NORMALIZATION,
+  MAX_LAYERS,
+} from '@/constants/validation';
+import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
+import { isLayerUnlocked } from '@/state/layers.gating';
+import { getActiveOrDefaultLayerId, layerNameFromId } from '@/state/layers.active';
+import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
+import {
+  isPieceFullySupported,
+  getBelowLayerId,
+  isPieceFullySupportedAsync,
+} from '@/state/layers.support';
+import { devAssertNoLayerReassignment } from '@/state/invariants';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
-import type { Problem } from '@/core/contracts/scene';
+import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
 import {
   listDrafts,
   saveDraft,
@@ -16,15 +47,341 @@ import {
   type DraftMeta,
 } from '@/lib/drafts';
 import { applyHandle, applyHandleWithRotation, type ResizeHandle } from '@/lib/ui/resize';
-import { pieceBBox, aabbToPiecePosition } from '@/lib/geom';
+import { pieceBBox, aabbToPiecePosition, rectsOverlap } from '@/lib/geom';
 import { clampAABBToScene } from '@/lib/geom/aabb';
 import { syncPieceToIndex, removePieceFromIndex } from '@/lib/spatial/globalIndex';
 import { validateOverlapsAsync } from '@/core/geo/facade';
 import { projectDraftToV1 } from '@/sync/projector';
-import { incResizeBlockPreview, incResizeBlockCommitBlocked, incResizeBlockCommitSuccess } from '@/lib/metrics';
-import { collisionsForCandidate, spacingForCandidate, validateNoOverlapForCandidate, type ResizeContext } from '@/core/geo/validateAll';
+import {
+  incResizeBlockPreview,
+  incResizeBlockCommitBlocked,
+  incResizeBlockCommitSuccess,
+} from '@/lib/metrics';
+import {
+  collisionsForCandidate,
+  spacingForCandidate,
+  validateNoOverlapForCandidate,
+  type ResizeContext,
+} from '@/core/geo/validateAll';
 import { getRotatedAABB } from '@/core/geo/geometry';
-import { EPS_UI_MM, EMPTY_ARR } from '@/state/constants';
+import { EPS_UI_MM, EMPTY_ARR, DUPLICATE_OFFSET_MM } from '@/state/constants';
+import { LayeredRBush, type SpatialItem } from '@/spatial/rbushIndex';
+
+// Detect test environment for synchronous test execution
+// In Vitest, import.meta.env.MODE is 'test'
+const IS_TEST =
+  typeof import.meta !== 'undefined' &&
+  ((import.meta as any).env?.MODE === 'test' || !!(import.meta as any).env?.VITEST);
+
+// Singleton LayeredRBush instance for per-layer spatial indexing
+const layeredRBush = new LayeredRBush();
+
+// Pending layer rebuilds (debounced via queueMicrotask)
+const pendingLayerRebuilds = new Set<ID>();
+
+// Helper: Convert piece to spatial item (AABB with rotation)
+function indexFromPiece(p: Piece): SpatialItem {
+  // Use pieceBBox for consistency with Global mode
+  const bbox = pieceBBox(p);
+
+  // AABB bounds
+  return {
+    id: p.id,
+    layerId: p.layerId,
+    minX: bbox.x,
+    minY: bbox.y,
+    maxX: bbox.x + bbox.w,
+    maxY: bbox.y + bbox.h,
+  };
+}
+
+// Helper: Rebuild RBush index for a specific layer
+function rebuildLayerIndex(layerId: ID, pieces: Record<ID, Piece>) {
+  const layerPieces = Object.values(pieces).filter((p) => p.layerId === layerId);
+  const items = layerPieces.map(indexFromPiece);
+  layeredRBush.load(layerId, items);
+
+  // Update metrics via Zustand set to avoid mutating frozen/draft state
+  useSceneStore.setState((state) =>
+    produce(state, (draft) => {
+      if (draft.ui.spatialStats) {
+        draft.ui.spatialStats.itemsByLayer[layerId] = items.length;
+        draft.ui.spatialStats.rebuilds++;
+      }
+    }),
+  );
+}
+
+// Helper: Schedule layer rebuild (debounced via microtask or idle callback)
+function scheduleLayerRebuild(layerId: ID, urgent = false) {
+  if (pendingLayerRebuilds.has(layerId)) return;
+
+  pendingLayerRebuilds.add(layerId);
+
+  const doRebuild = () => {
+    pendingLayerRebuilds.delete(layerId);
+    const store = useSceneStore.getState();
+    rebuildLayerIndex(layerId, store.scene.pieces);
+  };
+
+  // Use requestIdleCallback for non-critical rebuilds (with 250ms timeout fallback)
+  if (!urgent && typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+    (window as any).requestIdleCallback(doRebuild, { timeout: 250 });
+  } else {
+    // Urgent or no idle callback support: use microtask
+    queueMicrotask(doRebuild);
+  }
+}
+
+// Helper: Update piece in RBush index
+function updatePieceInIndex(piece: Piece) {
+  const item = indexFromPiece(piece);
+  layeredRBush.insert(piece.layerId, item);
+}
+
+// Helper: Remove piece from RBush index
+function removePieceFromRBushIndex(pieceId: ID, layerId: ID) {
+  // RBush requires full item to remove, so we need to find it
+  // For simplicity, schedule a rebuild of the layer
+  scheduleLayerRebuild(layerId);
+}
+
+// Module-level counters to avoid nested setState issues
+const pendingQueryCounts = { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 };
+
+// Helper: Increment spatial query counter (module-level)
+function bumpQueryCounter(type: 'GLOBAL' | 'RBUSH' | 'FALLBACK') {
+  pendingQueryCounts[type]++;
+}
+
+// Helper: Flush pending query counts to store
+function flushQueryCounters(draft: SceneState) {
+  if (draft.ui.spatialStats) {
+    draft.ui.spatialStats.queries.GLOBAL += pendingQueryCounts.GLOBAL;
+    draft.ui.spatialStats.queries.RBUSH += pendingQueryCounts.RBUSH;
+    draft.ui.spatialStats.queries.FALLBACK += pendingQueryCounts.FALLBACK;
+    pendingQueryCounts.GLOBAL = 0;
+    pendingQueryCounts.RBUSH = 0;
+    pendingQueryCounts.FALLBACK = 0;
+  }
+}
+
+// Helper: Record performance measurement for spatial query (DEV only)
+function recordPerfSample(mode: 'global' | 'rbush', durationMs: number) {
+  // Skip performance recording in production builds
+  if (!import.meta.env.DEV) return;
+
+  const MAX_SAMPLES = 100;
+
+  useSceneStore.setState((state) =>
+    produce(state, (draft) => {
+      if (!draft.ui.spatialStats) {
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
+      }
+
+      if (!draft.ui.spatialStats.perf) {
+        draft.ui.spatialStats.perf = {};
+      }
+
+      if (!draft.ui.spatialStats.perf[mode]) {
+        draft.ui.spatialStats.perf[mode] = {
+          samples: [],
+          avg: 0,
+          p95: 0,
+        };
+      }
+
+      const perfMode = draft.ui.spatialStats.perf[mode]!;
+
+      // Add sample (sliding window)
+      perfMode.samples.push(durationMs);
+      if (perfMode.samples.length > MAX_SAMPLES) {
+        perfMode.samples.shift();
+      }
+
+      // Compute avg
+      const sum = perfMode.samples.reduce((a, b) => a + b, 0);
+      perfMode.avg = sum / perfMode.samples.length;
+
+      // Compute p95
+      const sorted = [...perfMode.samples].sort((a, b) => a - b);
+      const p95Index = Math.floor(sorted.length * 0.95);
+      perfMode.p95 = sorted[p95Index] ?? 0;
+    }),
+  );
+}
+
+/**
+ * Shortlist pieces on same layer that intersect with given AABB
+ *
+ * Uses RBush spatial index when enabled, falls back to global O(n) scan otherwise.
+ * Returns piece IDs only (same-layer filter already applied).
+ *
+ * @param layerId - Layer to search
+ * @param bbox - Bounding box to query
+ * @param sceneOverride - Optional scene to query against
+ * @param excludeIds - Optional set of IDs to exclude from results (e.g., selected pieces during drag)
+ * @returns Array of piece IDs on same layer intersecting bbox
+ */
+function shortlistSameLayerAABB(
+  layerId: ID,
+  bbox: { x: number; y: number; w: number; h: number },
+  sceneOverride?: SceneDraft,
+  excludeIds?: Set<ID>,
+): ID[] {
+  const store = useSceneStore.getState();
+  const { ui, scene: storeScene } = store;
+  const scene = sceneOverride ?? storeScene;
+
+  // Determine spatial engine mode
+  const mode = (window as any).__SPATIAL__ ?? ui.spatialEngine ?? 'auto';
+  const pieceCount = Object.keys(scene.pieces).length;
+  const threshold = ui.spatialThreshold ?? 120;
+
+  // Use RBush if explicitly enabled or auto-enabled above threshold
+  const useRBush = mode === 'rbush' || (mode === 'auto' && pieceCount >= threshold);
+
+  if (useRBush) {
+    bumpQueryCounter('RBUSH');
+
+    // Convert bbox to RBush query format
+    const query = {
+      minX: bbox.x,
+      minY: bbox.y,
+      maxX: bbox.x + bbox.w,
+      maxY: bbox.y + bbox.h,
+    };
+
+    // Performance instrumentation (DEV only)
+    if (import.meta.env.DEV) {
+      const startMark = `rbush:${Date.now()}`;
+      performance.mark(startMark);
+
+      const results = layeredRBush.search(layerId, query);
+      const rbushHits = results.length;
+
+      // Filter out excluded IDs (e.g., selected pieces during drag)
+      const filtered = excludeIds
+        ? results.filter((item) => !excludeIds.has(item.id)).map((item) => item.id)
+        : results.map((item) => item.id);
+
+      // Measure performance
+      const endMark = `${startMark}:end`;
+      performance.mark(endMark);
+      performance.measure(`rbush:shortlist`, startMark, endMark);
+      const entries = performance.getEntriesByName(`rbush:shortlist`);
+      const duration = entries.length > 0 ? entries[entries.length - 1].duration : 0;
+      recordPerfSample('rbush', duration);
+
+      // Cleanup marks
+      performance.clearMarks(startMark);
+      performance.clearMarks(endMark);
+      performance.clearMeasures(`rbush:shortlist`);
+
+      // Debug logging
+      if ((window as any).__DBG_DRAG__) {
+        console.log('[SPATIAL_SHORTLIST]', {
+          mode: 'RBush',
+          layerId,
+          pieceCount,
+          rbushHits,
+          excludeCount: excludeIds?.size ?? 0,
+          shortlist: filtered.length,
+          bbox,
+          duration: `${duration.toFixed(3)}ms`,
+        });
+      }
+
+      return filtered;
+    } else {
+      // Production: no instrumentation
+      const results = layeredRBush.search(layerId, query);
+      return excludeIds
+        ? results.filter((item) => !excludeIds.has(item.id)).map((item) => item.id)
+        : results.map((item) => item.id);
+    }
+  }
+
+  // Fallback: Global O(n) scan with same-layer filter
+  bumpQueryCounter('GLOBAL');
+
+  // Performance instrumentation (DEV only)
+  if (import.meta.env.DEV) {
+    const startMark = `global:${Date.now()}`;
+    performance.mark(startMark);
+
+    const candidates: ID[] = [];
+    let globalHits = 0;
+    for (const piece of Object.values(scene.pieces)) {
+      if (piece.layerId !== layerId) continue;
+
+      const pBbox = pieceBBox(piece);
+      const overlaps = rectsOverlap(
+        { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h },
+        { x: pBbox.x, y: pBbox.y, w: pBbox.w, h: pBbox.h },
+      );
+
+      if (overlaps) {
+        globalHits++;
+        // Filter out excluded IDs (e.g., selected pieces during drag)
+        if (!excludeIds || !excludeIds.has(piece.id)) {
+          candidates.push(piece.id);
+        }
+      }
+    }
+
+    // Measure performance
+    const endMark = `${startMark}:end`;
+    performance.mark(endMark);
+    performance.measure(`global:shortlist`, startMark, endMark);
+    const entries = performance.getEntriesByName(`global:shortlist`);
+    const duration = entries.length > 0 ? entries[entries.length - 1].duration : 0;
+    recordPerfSample('global', duration);
+
+    // Cleanup marks
+    performance.clearMarks(startMark);
+    performance.clearMarks(endMark);
+    performance.clearMeasures(`global:shortlist`);
+
+    // Debug logging
+    if ((window as any).__DBG_DRAG__) {
+      console.log('[SPATIAL_SHORTLIST]', {
+        mode: 'Global',
+        layerId,
+        pieceCount,
+        globalHits,
+        excludeCount: excludeIds?.size ?? 0,
+        shortlist: candidates.length,
+        bbox,
+        duration: `${duration.toFixed(3)}ms`,
+      });
+    }
+
+    return candidates;
+  } else {
+    // Production: no instrumentation
+    const candidates: ID[] = [];
+    for (const piece of Object.values(scene.pieces)) {
+      if (piece.layerId !== layerId) continue;
+
+      const pBbox = pieceBBox(piece);
+      const overlaps = rectsOverlap(
+        { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h },
+        { x: pBbox.x, y: pBbox.y, w: pBbox.w, h: pBbox.h },
+      );
+
+      if (overlaps && (!excludeIds || !excludeIds.has(piece.id))) {
+        candidates.push(piece.id);
+      }
+    }
+
+    return candidates;
+  }
+}
 
 // Helper to notify auto-spatial module after structural mutations
 function notifyAutoSpatial() {
@@ -39,13 +396,13 @@ function notifyAutoSpatial() {
 type RafJob = {
   pending?: boolean;
   rafId?: number;
-  lastArgs?: { pointer: {x: Milli; y: Milli}; altKey: boolean }
+  lastArgs?: { pointer: { x: Milli; y: Milli }; altKey: boolean };
 };
 const rafGroupResize: RafJob = {};
 
 function scheduleGroupResize(
-  fn: (args: {pointer: {x: Milli; y: Milli}; altKey: boolean}) => void,
-  args: {pointer: {x: Milli; y: Milli}; altKey: boolean}
+  fn: (args: { pointer: { x: Milli; y: Milli }; altKey: boolean }) => void,
+  args: { pointer: { x: Milli; y: Milli }; altKey: boolean },
 ) {
   rafGroupResize.lastArgs = args;
   if (rafGroupResize.pending) return;
@@ -86,13 +443,89 @@ function snapTo10mm(x: number): number {
 function normDeg(d: number): Deg {
   // normalise en {0,90,180,270} via modulo 360
   const n = ((Math.round(d) % 360) + 360) % 360;
-  return (n === 0 || n === 90 || n === 180 || n === 270 ? n : (Math.round(n / 90) * 90) % 360) as Deg;
+  return (
+    n === 0 || n === 90 || n === 180 || n === 270 ? n : (Math.round(n / 90) * 90) % 360
+  ) as Deg;
 }
 function add90(d: Deg): Deg {
   return normDeg((d + 90) % 360);
 }
 function sub90(d: Deg): Deg {
   return normDeg((d + 270) % 360);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helper: ensure fixedLayerIds (idempotent, backward compatible)
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Garantit que scene.fixedLayerIds est défini avec des IDs valides pour C1/C2/C3.
+ * Idempotent: ne modifie rien si déjà cohérent.
+ * Compat ascendante: tente de retrouver par noms existants, créé au besoin sans changer layerOrder.
+ * Initialise aussi layerVisibility et layerLocked pour les couches créées.
+ */
+function ensureFixedLayerIds(draft: SceneState) {
+  const scene = draft.scene;
+
+  // Vérifier si déjà prêt et valide
+  if (
+    scene.fixedLayerIds &&
+    scene.layers[scene.fixedLayerIds.C1] &&
+    scene.layers[scene.fixedLayerIds.C2] &&
+    scene.layers[scene.fixedLayerIds.C3]
+  ) {
+    return; // déjà cohérent
+  }
+
+  // 1) Tenter de retrouver par noms existants
+  const byName: Partial<Record<LayerName, ID>> = {};
+  for (const id of scene.layerOrder) {
+    const nm = scene.layers[id]?.name;
+    if (nm && isLayerName(nm) && !byName[nm]) {
+      byName[nm as LayerName] = id;
+    }
+  }
+
+  // 2) Si manquant, créer au besoin (sans toucher à l'ordre)
+  // Initialize layerVisibility and layerLocked if not present
+  if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
+  if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
+
+  for (const nm of FIXED_LAYER_NAMES) {
+    if (!byName[nm]) {
+      const id = genId('layer');
+      const z = scene.layerOrder.length;
+      scene.layers[id] = { id, name: nm, z, pieces: [] };
+      scene.layerOrder.push(id);
+      byName[nm] = id;
+
+      // Initialize visibility and lock state for newly created layers
+      draft.ui.layerVisibility[id] = true; // Default: visible
+      draft.ui.layerLocked[id] = false; // Default: unlocked
+    }
+  }
+
+  scene.fixedLayerIds = { C1: byName.C1!, C2: byName.C2!, C3: byName.C3! };
+}
+
+/**
+ * canonicalizeLayerOrder
+ * Ensures layerOrder always starts with [C1, C2, C3] in that order,
+ * followed by any legacy layers (for backward compatibility).
+ * This enforces immutable painter's order: C1 bottom → C3 top.
+ */
+function canonicalizeLayerOrder(draft: SceneState) {
+  const scene = draft.scene;
+  if (!scene.fixedLayerIds) return; // Should not happen after ensureFixedLayerIds
+
+  const { C1, C2, C3 } = scene.fixedLayerIds;
+  const keep = new Set([C1, C2, C3]);
+
+  // Legacy layers (if any) are preserved after C1/C2/C3
+  const tail = scene.layerOrder.filter((id) => !keep.has(id));
+
+  // Canonical order: [C1, C2, C3, ...legacy]
+  scene.layerOrder = [C1, C2, C3, ...tail];
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -106,7 +539,7 @@ function sub90(d: Deg): Deg {
 function rotatePoint90Deg(
   p: { x: Milli; y: Milli },
   pivot: { x: Milli; y: Milli },
-  deltaDeg: 0 | 90 | -90 | 180
+  deltaDeg: 0 | 90 | -90 | 180,
 ): { x: Milli; y: Milli } {
   const dx = (p.x - pivot.x) as Milli;
   const dy = (p.y - pivot.y) as Milli;
@@ -167,7 +600,7 @@ function groupPivot(scene: SceneDraft, ids: ID[]): { x: Milli; y: Milli } {
 function buildRigidRotationCandidate(
   scene: SceneDraft,
   ids: ID[],
-  opts: { deltaDeg?: 90 | -90; targetDeg?: Deg }
+  opts: { deltaDeg?: 90 | -90; targetDeg?: Deg },
 ): SceneDraft {
   const pivot = groupPivot(scene, ids);
   const next: SceneDraft = { ...scene, pieces: { ...scene.pieces } };
@@ -181,14 +614,14 @@ function buildRigidRotationCandidate(
       opts.targetDeg != null
         ? opts.targetDeg
         : opts.deltaDeg === 90
-        ? add90(curDeg)
-        : sub90(curDeg);
+          ? add90(curDeg)
+          : sub90(curDeg);
 
     // Calculer l'angle de rotation réel pour rotatePoint90Deg
     let actualDelta: 0 | 90 | -90 | 180;
     if (opts.targetDeg != null) {
-      const raw = ((nxtDeg - curDeg + 360) % 360);
-      actualDelta = raw === 270 ? -90 : raw as 0 | 90 | -90 | 180;
+      const raw = (nxtDeg - curDeg + 360) % 360;
+      actualDelta = raw === 270 ? -90 : (raw as 0 | 90 | -90 | 180);
     } else {
       actualDelta = opts.deltaDeg! as 0 | 90 | -90 | 180;
     }
@@ -203,7 +636,7 @@ function buildRigidRotationCandidate(
     const { w: w0, h: h0 } = p.size;
 
     // Extents AABB finaux selon nxtDeg (angles multiples de 90°)
-    const r = ((nxtDeg ?? 0) % 360 + 360) % 360;
+    const r = (((nxtDeg ?? 0) % 360) + 360) % 360;
     const AABBwFinal = (r === 90 || r === 270 ? h0 : w0) as Milli;
     const AABBhFinal = (r === 90 || r === 270 ? w0 : h0) as Milli;
 
@@ -236,7 +669,7 @@ function buildRigidRotationCandidate(
 function groupExtentsAroundPivot(
   scene: SceneDraft,
   ids: ID[],
-  pivot: { x: Milli; y: Milli }
+  pivot: { x: Milli; y: Milli },
 ): { L: Milli; R: Milli; T: Milli; B: Milli } {
   let minX = Infinity;
   let maxX = -Infinity;
@@ -281,10 +714,7 @@ function distance(a: { x: Milli; y: Milli }, b: { x: Milli; y: Milli }): Milli {
  * Calcule les extents AABB d'une pièce en fonction de son angle de rotation.
  * Pour 90°/270°, les dimensions w/h sont swappées.
  */
-function aabbExtentsFromIntrinsic(
-  size: { w: Milli; h: Milli },
-  deg: Deg
-): { w: Milli; h: Milli } {
+function aabbExtentsFromIntrinsic(size: { w: Milli; h: Milli }, deg: Deg): { w: Milli; h: Milli } {
   const r = ((deg % 360) + 360) % 360;
   return r === 90 || r === 270
     ? { w: size.h as Milli, h: size.w as Milli }
@@ -306,7 +736,7 @@ function buildGroupScaleCandidate(
   scene: SceneDraft,
   ids: ID[],
   pivot: { x: Milli; y: Milli },
-  scale: number
+  scale: number,
 ): SceneDraft {
   const next: SceneDraft = { ...scene, pieces: { ...scene.pieces } };
 
@@ -357,7 +787,10 @@ function handleToMoved(handle: ResizeHandle): ResizeContext['moved'] {
 }
 
 // Helper functions for resize baseline tracking
-function aabbGapLocal(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
+function aabbGapLocal(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number },
+): number {
   const dx = Math.max(0, Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w)));
   const dy = Math.max(0, Math.max(b.y - (a.y + a.h), a.y - (b.y + b.h)));
   if (dx === 0 && dy === 0) {
@@ -370,7 +803,10 @@ function aabbGapLocal(a: { x: number; y: number; w: number; h: number }, b: { x:
   return Math.min(dx, dy);
 }
 
-function dominantSpacingAxisLocal(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): 'X' | 'Y' {
+function dominantSpacingAxisLocal(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number },
+): 'X' | 'Y' {
   const xOverlap = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
   const yOverlap = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
   const yOverlapRatio = yOverlap / Math.min(a.h, b.h);
@@ -444,7 +880,7 @@ type SceneStateSnapshot = {
   };
 };
 
-type SceneState = {
+export type SceneState = {
   scene: SceneDraft;
   ui: {
     selectedId?: ID;
@@ -454,7 +890,7 @@ type SceneState = {
     dragging?: {
       id: ID;
       start: { x: number; y: number };
-      candidate?: { x: number; y: number; valid: boolean };
+      candidate?: { x: number; y: number; w?: number; h?: number; valid: boolean };
       groupOffsets?: Record<ID, { dx: number; dy: number }>;
       /**
        * True si le drag en cours concerne la sélection courante
@@ -534,6 +970,45 @@ type SceneState = {
 
     // Layer locked state (default false) - locked layers cannot be edited but remain visible
     layerLocked: Record<ID, boolean>;
+
+    // Timestamp of last exact support validation (used to invalidate useIsGhost cache)
+    lastExactCheckAt?: number;
+
+    // Exact support results cache (pieceId → isSupported)
+    // Updated by recalculateExactSupport after drag/resize commit
+    exactSupportResults?: Record<ID, boolean>;
+
+    // Revision counter for exact support calculation (incremented on each recalculation)
+    // Used to detect stale results and prevent applying obsolete async validation
+    exactSupportRevision?: number;
+
+    // Spatial indexing configuration
+    spatialEngine?: 'global' | 'rbush' | 'auto';
+    spatialThreshold?: number; // Piece count threshold for auto-enable
+
+    // Spatial indexing metrics
+    spatialStats?: {
+      itemsByLayer: Record<ID, number>;
+      rebuilds: number;
+      queries: {
+        GLOBAL: number;
+        RBUSH: number;
+        FALLBACK: number;
+      };
+      // Performance metrics (sliding window of last 100 samples)
+      perf?: {
+        global?: {
+          samples: number[];
+          avg: number;
+          p95: number;
+        };
+        rbush?: {
+          samples: number[];
+          avg: number;
+          p95: number;
+        };
+      };
+    };
   };
 };
 
@@ -546,7 +1021,15 @@ type SceneActions = {
   setActiveLayer: (layerId: ID) => void;
   toggleLayerVisibility: (layerId: ID) => void;
   toggleLayerLock: (layerId: ID) => void;
-  addRectPiece: (layerId: ID, materialId: ID, w: Milli, h: Milli, x: Milli, y: Milli, rotationDeg?: Deg) => ID;
+  addRectPiece: (
+    layerId: ID,
+    materialId: ID,
+    w: Milli,
+    h: Milli,
+    x: Milli,
+    y: Milli,
+    rotationDeg?: Deg,
+  ) => ID;
   movePiece: (pieceId: ID, x: Milli, y: Milli) => void;
   rotatePiece: (pieceId: ID, rotationDeg: Deg) => void;
   initSceneWithDefaults: (w: Milli, h: Milli) => void;
@@ -571,12 +1054,8 @@ type SceneActions = {
   setSnap10mm: (on: boolean) => void;
   setMaterialOriented: (materialId: ID, oriented: boolean) => void;
   rotateSelected: (deltaDeg: 90 | -90) => void;
-  setSelectedRotation: (deg: 0 | 90) => void;
+  setSelectedRotation: (deg: 0 | 90 | 180 | 270) => void;
   duplicateSelected: () => void;
-  moveLayerForward: (layerId: ID) => void;
-  moveLayerBackward: (layerId: ID) => void;
-  moveLayerToFront: (layerId: ID) => void;
-  moveLayerToBack: (layerId: ID) => void;
   undo: () => void;
   redo: () => void;
   toSceneFileV1: () => SceneFileV1;
@@ -591,14 +1070,26 @@ type SceneActions = {
   endResize: (commit: boolean) => void;
   startGroupResize: (handle: ResizeHandle, startPointerMm?: { x: Milli; y: Milli }) => void;
   updateGroupResize: (pointerMm: { x: Milli; y: Milli }, altKey?: boolean) => void;
-  _updateGroupResizeRafSafe: (args: {pointer: {x: Milli; y: Milli}; altKey: boolean}) => void;
+  _updateGroupResizeRafSafe: (args: { pointer: { x: Milli; y: Milli }; altKey: boolean }) => void;
+  validateGroupResize: () => void;
+  updateGroupResizeGhost: (
+    problems: Problem[] | null,
+    groupBBox: { x: Milli; y: Milli; w: Milli; h: Milli },
+  ) => void;
   endGroupResize: (commit: boolean) => void;
   cancelGroupResize: () => void;
   setLockEdge: (on: boolean) => void;
   focusPiece: (id: ID) => void;
   flashOutline: (id: ID) => void;
   findFreeSpot: (w: number, h: number) => Promise<{ x: number; y: number } | null>;
-  insertRect: (opts: { w: number; h: number; x?: number; y?: number; layerId?: ID; materialId?: ID }) => Promise<ID | null>;
+  insertRect: (opts: {
+    w: number;
+    h: number;
+    x?: number;
+    y?: number;
+    layerId?: ID;
+    materialId?: ID;
+  }) => Promise<ID | null>;
   startGhostInsert: (opts: { w: number; h: number; layerId?: ID; materialId?: ID }) => Promise<ID>;
   commitGhost: () => void;
   cancelGhost: () => void;
@@ -627,7 +1118,7 @@ function takeSnapshot(s: SceneState): SceneStateSnapshot {
 function rotationWouldBeValid(
   sceneDraft: SceneDraft,
   candidateIds: ID[],
-  nextDegById: Record<ID, Deg>
+  nextDegById: Record<ID, Deg>,
 ): boolean {
   // Construire une scène candidate pour validation (deep copy pour sécurité)
   const sceneCandidate: SceneDraft = JSON.parse(JSON.stringify(sceneDraft));
@@ -698,6 +1189,108 @@ function restoreFromAutosave(): SceneStateSnapshot | null {
   }
 }
 
+/**
+ * Recalculate exact support validation for moved/resized pieces.
+ * Called at commit time to update ghost state with PathOps precision.
+ * Triggers a minimal state update to cause useIsGhost re-evaluation.
+ */
+async function recalculateExactSupport(pieceIds: ID[]): Promise<void> {
+  // Phase 1: SYNC - Increment revision to track calculation epoch
+  let currentRevision: number;
+  useSceneStore.setState((s) => {
+    currentRevision = (s.ui.exactSupportRevision ?? 0) + 1;
+    return {
+      ui: { ...s.ui, exactSupportRevision: currentRevision },
+    };
+  });
+
+  // Phase 2: ASYNC validation (avoid any draft references by only storing IDs)
+  Promise.resolve().then(async () => {
+    const exactResults: Record<ID, boolean> = {};
+    const piecesToRemove: ID[] = [];
+
+    for (const pieceId of pieceIds) {
+      // Re-fetch state freshly for each piece to avoid stale/revoked references
+      const state = useSceneStore.getState();
+      const piece = state.scene.pieces[pieceId];
+
+      if (!piece) continue;
+
+      // Only check C2/C3 pieces (C1 always supported)
+      const belowLayerId = getBelowLayerId(state, piece.layerId);
+      if (!belowLayerId) {
+        // C1 pieces are always supported - remove from ghost state if present
+        piecesToRemove.push(pieceId);
+        continue;
+      }
+
+      // Run exact validation (re-fetch state for validation to ensure freshness)
+      const validationState = useSceneStore.getState();
+      const isSupported = await isPieceFullySupportedAsync(validationState, pieceId, 'exact');
+
+      if (isSupported) {
+        // Piece is now fully supported - mark for removal from ghost state
+        piecesToRemove.push(pieceId);
+      } else {
+        // Piece is NOT supported - mark as ghost
+        exactResults[pieceId] = false;
+      }
+
+      // DEV: Log support check with full diagnostic format
+      if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+        console.log('[SUPPORT_CHECK]', {
+          op: 'support_exact',
+          pieceId: pieceId,
+          layerId: piece.layerId,
+          reasons: {
+            collision: false,
+            spacing: false,
+            bounds: false,
+            supportFast: 'n/a',
+            supportExact: isSupported ? 'ok' : 'missing',
+          },
+          setHasBlockFrom: 'none', // Support NEVER blocks
+          ghost: isSupported ? '0' : '1',
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // Phase 3: Final SYNC set (check revision to avoid stale results)
+    const finalState = useSceneStore.getState();
+    if (finalState.ui.exactSupportRevision !== currentRevision) {
+      // Revision changed → results obsolete, abort
+      if (import.meta.env.DEV) {
+        console.warn('[recalculateExactSupport] Revision mismatch, aborting stale results', {
+          expected: currentRevision,
+          current: finalState.ui.exactSupportRevision,
+        });
+      }
+      return;
+    }
+
+    useSceneStore.setState((s) => {
+      const mergedResults = {
+        ...(s.ui.exactSupportResults ?? {}),
+        ...exactResults,
+      };
+
+      // Remove pieces that are now fully supported
+      for (const pieceId of piecesToRemove) {
+        delete mergedResults[pieceId];
+      }
+
+      return {
+        ui: {
+          ...s.ui,
+          exactSupportResults: mergedResults,
+          lastExactCheckAt: Date.now(),
+        },
+      };
+    });
+  });
+}
+
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   // État initial minimal
   scene: {
@@ -732,762 +1325,493 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   // Actions
   initScene: (w, h) =>
-    set(produce((draft: SceneState) => {
-      draft.scene = {
-        id: genId('scene'),
-        createdAt: new Date().toISOString(),
-        size: { w, h },
-        materials: {},
-        layers: {},
-        pieces: {},
-        layerOrder: [],
-      };
-      draft.ui.activeLayer = undefined; // Reset active layer
-      draft.ui.layerVisibility = {}; // Reset layer visibility
-      draft.ui.layerLocked = {}; // Reset layer lock state
-    })),
+    set(
+      produce((draft: SceneState) => {
+        draft.scene = {
+          id: genId('scene'),
+          createdAt: new Date().toISOString(),
+          size: { w, h },
+          materials: {},
+          layers: {},
+          pieces: {},
+          layerOrder: [],
+          revision: 0,
+        };
+        draft.ui.activeLayer = undefined; // Reset active layer
+        draft.ui.layerVisibility = {}; // Reset layer visibility
+        draft.ui.layerLocked = {}; // Reset layer lock state
+
+        // Initialize spatial indexing defaults (AUTO mode with threshold 120)
+        draft.ui.spatialEngine = 'auto';
+        draft.ui.spatialThreshold = 120;
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
+      }),
+    ),
 
   addMaterial: (m) =>
-    set(produce((draft: SceneState) => {
-      const id = m.id ?? genId('mat');
-      draft.scene.materials[id] = { id, name: m.name, oriented: m.oriented, orientationDeg: m.orientationDeg };
-    })) as unknown as ID,
+    set(
+      produce((draft: SceneState) => {
+        const id = m.id ?? genId('mat');
+        draft.scene.materials[id] = {
+          id,
+          name: m.name,
+          oriented: m.oriented,
+          orientationDeg: m.orientationDeg,
+        };
+      }),
+    ) as unknown as ID,
 
   setMaterialOrientation: (materialId, orientationDeg) =>
-    set(produce((draft: SceneState) => {
-      const mat = draft.scene.materials[materialId];
-      if (mat && mat.oriented) {
-        const snap = takeSnapshot(draft);
-        mat.orientationDeg = orientationDeg;
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }
-    })),
+    set(
+      produce((draft: SceneState) => {
+        const mat = draft.scene.materials[materialId];
+        if (mat && mat.oriented) {
+          const snap = takeSnapshot(draft);
+          mat.orientationDeg = orientationDeg;
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+        }
+      }),
+    ),
 
   addLayer: (name) => {
     // MAX_LAYERS guard - check before mutation
     const currentState = useSceneStore.getState();
     if (currentState.scene.layerOrder.length >= MAX_LAYERS) {
-      set(produce((draft: SceneState) => {
-        draft.ui.toast = {
-          message: `Maximum de ${MAX_LAYERS} couches atteint. Impossible d'ajouter une nouvelle couche.`,
-          until: Date.now() + 3000,
-        };
-      }));
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `Maximum de ${MAX_LAYERS} couches atteint. Impossible d'ajouter une nouvelle couche.`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
       return '' as ID; // Return empty ID when blocked
     }
 
     const id = genId('layer');
-    set(produce((draft: SceneState) => {
-      const z = draft.scene.layerOrder.length;
-      const layer: Layer = { id, name, z, pieces: [] };
-      draft.scene.layers[id] = layer;
-      draft.scene.layerOrder.push(id);
-      // Initialize layer visibility and lock state
-      if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
-      if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
-      draft.ui.layerVisibility[id] = true; // Default: visible
-      draft.ui.layerLocked[id] = false; // Default: unlocked
-    }));
+    set(
+      produce((draft: SceneState) => {
+        const z = draft.scene.layerOrder.length;
+        const layer: Layer = { id, name, z, pieces: [] };
+        draft.scene.layers[id] = layer;
+        draft.scene.layerOrder.push(id);
+        // Initialize layer visibility and lock state
+        if (!draft.ui.layerVisibility) draft.ui.layerVisibility = {};
+        if (!draft.ui.layerLocked) draft.ui.layerLocked = {};
+        draft.ui.layerVisibility[id] = true; // Default: visible
+        draft.ui.layerLocked[id] = false; // Default: unlocked
+      }),
+    );
     return id;
   },
 
   setActiveLayer: (layerId) =>
-    set(produce((draft: SceneState) => {
-      if (draft.scene.layers[layerId]) {
-        draft.ui.activeLayer = layerId;
-      }
-    })),
+    set(
+      produce((draft: SceneState) => {
+        if (draft.scene.layers[layerId]) {
+          draft.ui.activeLayer = layerId;
+        }
+      }),
+    ),
 
   toggleLayerVisibility: (layerId) =>
-    set(produce((draft: SceneState) => {
-      if (draft.scene.layers[layerId]) {
-        const current = draft.ui.layerVisibility[layerId] ?? true;
-        draft.ui.layerVisibility[layerId] = !current;
-      }
-    })),
+    set(
+      produce((draft: SceneState) => {
+        if (draft.scene.layers[layerId]) {
+          const current = draft.ui.layerVisibility[layerId] ?? true;
+          draft.ui.layerVisibility[layerId] = !current;
+        }
+      }),
+    ),
 
   toggleLayerLock: (layerId) =>
-    set(produce((draft: SceneState) => {
-      if (draft.scene.layers[layerId]) {
-        const current = draft.ui.layerLocked[layerId] ?? false;
-        draft.ui.layerLocked[layerId] = !current;
-      }
-    })),
+    set(
+      produce((draft: SceneState) => {
+        if (draft.scene.layers[layerId]) {
+          const current = draft.ui.layerLocked[layerId] ?? false;
+          draft.ui.layerLocked[layerId] = !current;
+        }
+      }),
+    ),
 
   addRectPiece: (layerId, materialId, w, h, x, y, rotationDeg = 0) => {
-    const id = genId('piece');
-    set(produce((draft: SceneState) => {
-      const piece: Piece = {
-        id,
-        layerId,
-        materialId,
-        position: { x, y },
-        rotationDeg,
-        scale: { x: 1, y: 1 },
-        kind: 'rect',
-        size: { w, h },
-      };
-      draft.scene.pieces[id] = piece;
-      draft.scene.layers[layerId]?.pieces.push(id);
+    // Check if layer is locked (progressive unlock gating)
+    const currentState = useSceneStore.getState();
+    const fixedIds = currentState.scene.fixedLayerIds;
+    let targetLayerName: LayerName | null = null;
+    if (fixedIds) {
+      if (layerId === fixedIds.C2) targetLayerName = 'C2';
+      else if (layerId === fixedIds.C3) targetLayerName = 'C3';
+    }
 
-      // Sync to spatial index if flag enabled
-      if (window.__flags?.USE_GLOBAL_SPATIAL) {
-        syncPieceToIndex(id, { x, y, w, h });
-      }
-    }));
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return '' as ID; // Return empty ID when blocked
+    }
+
+    const id = genId('piece');
+    set(
+      produce((draft: SceneState) => {
+        const piece: Piece = {
+          id,
+          layerId,
+          materialId,
+          position: { x, y },
+          rotationDeg,
+          scale: { x: 1, y: 1 },
+          kind: 'rect',
+          size: { w, h },
+        };
+        draft.scene.pieces[id] = piece;
+        draft.scene.layers[layerId]?.pieces.push(id);
+
+        // Sync to spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          syncPieceToIndex(id, { x, y, w, h });
+        }
+
+        // Update RBush spatial index
+        updatePieceInIndex(piece);
+        if (draft.ui.spatialStats) {
+          draft.ui.spatialStats.itemsByLayer[layerId] =
+            (draft.ui.spatialStats.itemsByLayer[layerId] || 0) + 1;
+        }
+      }),
+    );
     return id;
   },
 
   movePiece: (pieceId, x, y) =>
-    set(produce((draft: SceneState) => {
-      const p = draft.scene.pieces[pieceId];
-      if (p) {
-        p.position = { x, y };
+    set(
+      produce((draft: SceneState) => {
+        const p = draft.scene.pieces[pieceId];
+        if (p) {
+          p.position = { x, y };
 
-        // Sync to spatial index if flag enabled
-        if (window.__flags?.USE_GLOBAL_SPATIAL) {
-          syncPieceToIndex(pieceId, { x, y, w: p.size.w, h: p.size.h });
+          // Sync to spatial index if flag enabled
+          if (window.__flags?.USE_GLOBAL_SPATIAL) {
+            syncPieceToIndex(pieceId, { x, y, w: p.size.w, h: p.size.h });
+          }
         }
-      }
-    })),
+      }),
+    ),
 
   rotatePiece: (pieceId, rotationDeg) =>
-    set(produce((draft: SceneState) => {
-      const p = draft.scene.pieces[pieceId];
-      if (p) p.rotationDeg = rotationDeg;
-    })),
+    set(
+      produce((draft: SceneState) => {
+        const p = draft.scene.pieces[pieceId];
+        if (p) {
+          p.rotationDeg = rotationDeg;
+          // Schedule RBush rebuild for this layer (rotation changes AABB)
+          scheduleLayerRebuild(p.layerId);
+        }
+      }),
+    ),
 
   initSceneWithDefaults: (w, h) =>
-    set(produce((draft: SceneState) => {
-      // Try to restore from autosave (skip in test mode)
-      const isTest = typeof import.meta !== 'undefined' && (import.meta as any).vitest === true;
-      if (!isTest) {
-        const restored = restoreFromAutosave();
-        if (restored && restored.scene.layerOrder.length > 0) {
-          applySnapshot(draft, restored);
-          return;
+    set(
+      produce((draft: SceneState) => {
+        // Try to restore from autosave (skip in test mode)
+        const isTest = typeof import.meta !== 'undefined' && (import.meta as any).vitest === true;
+        if (!isTest) {
+          const restored = restoreFromAutosave();
+          if (restored && restored.scene.layerOrder.length > 0) {
+            applySnapshot(draft, restored);
+            // Ensure fixedLayerIds after restore
+            ensureFixedLayerIds(draft);
+            // Canonicalize layer order to [C1, C2, C3, ...legacy]
+            canonicalizeLayerOrder(draft);
+            // Migrate to 3 fixed layers (idempotent)
+            const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+            if (migrated) {
+              draft.ui.toast = {
+                message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+                until: Date.now() + 3000,
+              };
+            }
+            // Set activeLayer to C1 if undefined
+            if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+              draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+            }
+            return;
+          }
         }
-      }
 
-      // Reset scène
-      draft.scene = {
-        id: genId('scene'),
-        createdAt: new Date().toISOString(),
-        size: { w, h },
-        materials: {},
-        layers: {},
-        pieces: {},
-        layerOrder: [],
-        revision: 0,
-      };
+        // Reset scène
+        draft.scene = {
+          id: genId('scene'),
+          createdAt: new Date().toISOString(),
+          size: { w, h },
+          materials: {},
+          layers: {},
+          pieces: {},
+          layerOrder: [],
+          revision: 0,
+        };
 
-      // Créer layer, material, piece atomiquement
-      const layerId = genId('layer');
-      const materialId = genId('mat');
-      const pieceId = genId('piece');
+        // Créer layer, material, piece atomiquement
+        const layerId = genId('layer');
+        const materialId = genId('mat');
+        const pieceId = genId('piece');
 
-      draft.scene.layers[layerId] = { id: layerId, name: 'C1', z: 0, pieces: [pieceId] };
-      draft.scene.layerOrder.push(layerId);
-      draft.ui.activeLayer = layerId; // Set C1 as default active layer
-      draft.scene.materials[materialId] = { id: materialId, name: 'Paper White 200gsm', oriented: false };
-      draft.scene.pieces[pieceId] = {
-        id: pieceId, layerId, materialId, position: { x: 40, y: 40 }, rotationDeg: 0, scale: { x: 1, y: 1 }, kind: 'rect', size: { w: 120, h: 80 },
-      };
-    })),
+        draft.scene.layers[layerId] = { id: layerId, name: 'C1', z: 0, pieces: [pieceId] };
+        draft.scene.layerOrder.push(layerId);
+        draft.scene.materials[materialId] = {
+          id: materialId,
+          name: 'Paper White 200gsm',
+          oriented: false,
+        };
+        draft.scene.pieces[pieceId] = {
+          id: pieceId,
+          layerId,
+          materialId,
+          position: { x: 40, y: 40 },
+          rotationDeg: 0,
+          scale: { x: 1, y: 1 },
+          kind: 'rect',
+          size: { w: 120, h: 80 },
+        };
+
+        // Ensure fixedLayerIds after scene creation
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
+        // Set C1 as default active layer
+        draft.ui.activeLayer = draft.scene.fixedLayerIds!.C1;
+
+        // Initialize spatial engine configuration and metrics
+        draft.ui.spatialEngine = draft.ui.spatialEngine ?? 'auto';
+        draft.ui.spatialThreshold = draft.ui.spatialThreshold ?? 120;
+        draft.ui.spatialStats = {
+          itemsByLayer: {},
+          rebuilds: 0,
+          queries: { GLOBAL: 0, RBUSH: 0, FALLBACK: 0 },
+        };
+
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
+        }
+      }),
+    ),
 
   selectPiece: (id) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.selectedId = id;
-      draft.ui.selectedIds = id ? [id] : undefined;
-      draft.ui.primaryId = id;
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.selectedId = id;
+        draft.ui.selectedIds = id ? [id] : undefined;
+        draft.ui.primaryId = id;
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
+
+        // Clear transient ghost when changing selection (prevents ghost state leak)
+        if (draft.ui.ghost && draft.ui.ghost.pieceId !== id) {
+          draft.ui.ghost = undefined;
+        }
+      }),
+    ),
 
   selectOnly: (id) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.selectedId = id;
-      draft.ui.selectedIds = [id];
-      draft.ui.primaryId = id;
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
-
-  toggleSelect: (id) =>
-    set(produce((draft: SceneState) => {
-      const current = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (current.includes(id)) {
-        const newIds = current.filter((x) => x !== id);
-        draft.ui.selectedIds = newIds.length > 0 ? newIds : undefined;
-        draft.ui.selectedId = newIds[0];
-        draft.ui.primaryId = newIds[0];
-      } else {
-        draft.ui.selectedIds = uniqueIds([...current, id]);
-        draft.ui.selectedId = id;
-        draft.ui.primaryId = id;
-      }
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
-
-  clearSelection: () =>
-    set(produce((draft: SceneState) => {
-      draft.ui.selectedId = undefined;
-      draft.ui.selectedIds = undefined;
-      draft.ui.primaryId = undefined;
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
-
-  selectAll: () =>
-    set(produce((draft: SceneState) => {
-      const allIds = Object.keys(draft.scene.pieces);
-      draft.ui.selectedIds = allIds;
-      draft.ui.selectedId = allIds[0];
-      draft.ui.primaryId = allIds[0];
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
-
-  setSelection: (ids) =>
-    set(produce((draft: SceneState) => {
-      const validIds = uniqueIds(ids.filter((id) => draft.scene.pieces[id]));
-      draft.ui.selectedIds = validIds.length > 0 ? validIds : undefined;
-      draft.ui.selectedId = validIds[0];
-      draft.ui.primaryId = validIds[0];
-      computeGroupBBox(draft);
-      bumpHandlesEpoch(draft);
-    })),
-
-  startMarquee: (x, y) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.marquee = { x0: x, y0: y, x1: x, y1: y };
-    })),
-
-  updateMarquee: (x, y) =>
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.marquee) return;
-      draft.ui.marquee.x1 = x;
-      draft.ui.marquee.y1 = y;
-    })),
-
-  endMarquee: () =>
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.marquee) return;
-      const { x0, y0, x1, y1 } = draft.ui.marquee;
-      const minX = Math.min(x0, x1);
-      const maxX = Math.max(x0, x1);
-      const minY = Math.min(y0, y1);
-      const maxY = Math.max(y0, y1);
-
-      const intersected = Object.values(draft.scene.pieces)
-        .filter((p) => {
-          const bbox = pieceBBox(p); // Use rotation-aware AABB
-          const pRight = bbox.x + bbox.w;
-          const pBottom = bbox.y + bbox.h;
-          return !(pRight < minX || bbox.x > maxX || pBottom < minY || bbox.y > minY);
-        })
-        .map((p) => p.id);
-
-      draft.ui.selectedIds = intersected.length > 0 ? intersected : undefined;
-      draft.ui.selectedId = intersected[0];
-      draft.ui.primaryId = intersected[0];
-      draft.ui.marquee = undefined;
-      computeGroupBBox(draft);
-    })),
-
-  nudgeSelected: (dx, dy) =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length === 0) return;
-
-      const snap = takeSnapshot(draft);
-
-      // Nudge de groupe : calculer bbox du groupe (AABB rotation-aware)
-      const bbox = groupBBox(draft.scene, selectedIds);
-
-      // Clamp group AABB to scene
-      const candidateAABB = { x: bbox.x + dx, y: bbox.y + dy, w: bbox.w, h: bbox.h };
-      const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
-
-      const actualDx = clamped.x - bbox.x;
-      const actualDy = clamped.y - bbox.y;
-
-      // Appliquer snap grille si activé (sur AABB)
-      let finalDx = actualDx;
-      let finalDy = actualDy;
-      if (draft.ui.snap10mm) {
-        const snappedX = snapTo10mm(bbox.x + actualDx);
-        const snappedY = snapTo10mm(bbox.y + actualDy);
-        finalDx = snappedX - bbox.x;
-        finalDy = snappedY - bbox.y;
-      }
-
-      // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
-      // Calculer prevGap pour directionnalité (ne coller que si on s'approche)
-      const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
-      const candidateWithSnap = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
-
-      // Récupérer voisins externes (exclure membres groupe)
-      const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
-      const prevGap = computeMinGap(currentBBox, neighbors);
-
-      const collageResult = snapEdgeCollage(
-        candidateWithSnap,
-        draft.scene,
-        selectedIds,
-        SNAP_EDGE_THRESHOLD_MM,
-        prevGap
-      );
-      finalDx = collageResult.x - bbox.x;
-      finalDy = collageResult.y - bbox.y;
-
-      // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
-      // Indépendant des toggles snap, appliqué juste avant commit
-      let finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
-      const guardResult = finalizeCollageGuard({
-        subjectBBox: finalBBox,
-        neighbors,
-        maxGapMm: MIN_GAP_MM,
-      });
-
-      if (guardResult.didSnap) {
-        finalDx += guardResult.dx;
-        finalDy += guardResult.dy;
-        finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
-      }
-
-      // NORMALIZATION: Normalize gap to exact 1.00mm if in [1.00, 1.00+ε] window
-      if (ENABLE_GAP_NORMALIZATION) {
-        const normalizeResult = normalizeGapToThreshold({
-          subjectBBox: finalBBox,
-          neighbors,
-          targetMm: NORMALIZE_GAP_TARGET_MM,
-          epsilonMm: EPSILON_GAP_NORMALIZE_MM,
-          sceneBounds: { w: draft.scene.size.w, h: draft.scene.size.h },
-        });
-
-        if (normalizeResult.didNormalize) {
-          finalDx += normalizeResult.dx;
-          finalDy += normalizeResult.dy;
-        }
-      }
-
-      // For each piece, compute new AABB position with final clamp, then convert to piece.position
-      // This ensures rotation-aware nudge and prevents escaping scene after snaps
-      const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-      for (const id of selectedIds) {
-        const p = draft.scene.pieces[id];
-        if (!p) continue;
-        const pBBox = pieceBBox(p);
-        let newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy, w: pBBox.w, h: pBBox.h };
-        // Clamp final pour garantir que la pièce reste dans la scène
-        newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
-        const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
-        testScene.pieces[id] = { ...p, position: newPiecePos };
-      }
-
-      // Use validateNoOverlapForCandidate to avoid rollback from internal group collisions
-      const validation = selectedIds.length > 1
-        ? validateNoOverlapForCandidateDraft(testScene, selectedIds)
-        : validateNoOverlap(testScene);
-
-      if (!validation.ok) {
-        draft.ui.flashInvalidAt = Date.now();
-      } else {
-        if (finalDx !== 0 || finalDy !== 0) {
-          for (const id of selectedIds) {
-            const p = draft.scene.pieces[id];
-            if (!p) continue;
-            const pBBox = pieceBBox(p);
-            let newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy, w: pBBox.w, h: pBBox.h };
-            // Clamp final pour garantir que la pièce reste dans la scène
-            newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
-            const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
-            p.position.x = newPiecePos.x;
-            p.position.y = newPiecePos.y;
-          }
-          draft.scene.revision++;
-          pushHistory(draft, snap);
-          autosave(takeSnapshot(draft));
-        }
-      }
-    })),
-
-  beginDrag: (id) =>
-    set(produce((draft: SceneState) => {
-      const piece = draft.scene.pieces[id];
-      if (!piece) return;
-
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-
-      // Déterminer si le drag concerne la sélection courante
-      const selId = draft.ui.selectedId ?? null;
-      const selIds = draft.ui.selectedIds ?? null;
-      let affectsSelection = false;
-
-      if (selIds && selIds.length > 0) {
-        affectsSelection = selIds.includes(id);
-      } else if (selId) {
-        affectsSelection = selId === id;
-      } else {
-        // Aucune sélection : auto-select la pièce, donc affecte la sélection
-        affectsSelection = true;
-      }
-
-      // Si la pièce n'est pas dans la sélection, selectOnly
-      if (!selectedIds.includes(id)) {
+    set(
+      produce((draft: SceneState) => {
         draft.ui.selectedId = id;
         draft.ui.selectedIds = [id];
         draft.ui.primaryId = id;
-      }
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
 
-      const finalSelectedIds = draft.ui.selectedIds ?? [id];
+        // Clear transient ghost when changing selection (prevents ghost state leak)
+        if (draft.ui.ghost && draft.ui.ghost.pieceId !== id) {
+          draft.ui.ghost = undefined;
+        }
+      }),
+    ),
 
-      // CRITICAL: Store AABB position (not piece.position) for rotation-aware drag
-      // For rotated pieces, AABB position differs from piece.position
-      const primaryBBox = pieceBBox(piece);
-
-      // Stocker les offsets pour le groupe (AABB-based for rotation awareness)
-      const groupOffsets: Record<ID, { dx: number; dy: number }> = {};
-      for (const sid of finalSelectedIds) {
-        const sp = draft.scene.pieces[sid];
-        if (!sp) continue;
-        const spBBox = pieceBBox(sp);
-        groupOffsets[sid] = {
-          dx: spBBox.x - primaryBBox.x,
-          dy: spBBox.y - primaryBBox.y,
-        };
-      }
-
-      draft.ui.dragging = {
-        id,
-        start: { x: primaryBBox.x, y: primaryBBox.y }, // AABB position, not piece.position
-        candidate: undefined,
-        groupOffsets,
-        affectsSelection,
-      };
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-    })),
-
-  updateDrag: (dx, dy) =>
-    set(produce((draft: SceneState) => {
-      const dragging = draft.ui.dragging;
-      if (!dragging) return;
-
-      const piece = draft.scene.pieces[dragging.id];
-      if (!piece) return;
-
-      const selectedIds = draft.ui.selectedIds ?? [dragging.id];
-      const isGroupDrag = selectedIds.length > 1;
-
-      // Drag de groupe : désactiver snap entre pièces
-      const candidateX = dragging.start.x + dx;
-      const candidateY = dragging.start.y + dy;
-
-      let finalX = candidateX;
-      let finalY = candidateY;
-
-      if (isGroupDrag) {
-        // Clamp de groupe
-        const offsets = dragging.groupOffsets ?? {};
-        const groupRects = selectedIds
-          .map((sid) => {
-            const off = offsets[sid] ?? { dx: 0, dy: 0 };
-            const sp = draft.scene.pieces[sid];
-            if (!sp) return null;
-            const bbox = pieceBBox(sp); // Use rotation-aware AABB
-            return {
-              x: candidateX + off.dx,
-              y: candidateY + off.dy,
-              w: bbox.w,
-              h: bbox.h,
-            };
-          })
-          .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
-
-        if (groupRects.length > 0) {
-          const gMinX = Math.min(...groupRects.map((r) => r.x));
-          const gMinY = Math.min(...groupRects.map((r) => r.y));
-          const gMaxX = Math.max(...groupRects.map((r) => r.x + r.w));
-          const gMaxY = Math.max(...groupRects.map((r) => r.y + r.h));
-          const gW = gMaxX - gMinX;
-          const gH = gMaxY - gMinY;
-
-          // Clamp group AABB to scene
-          const groupAABB = { x: gMinX, y: gMinY, w: gW, h: gH };
-          const clamped = clampAABBToScene(groupAABB, draft.scene.size.w, draft.scene.size.h);
-          const clampDx = clamped.x - gMinX;
-          const clampDy = clamped.y - gMinY;
-          const clampedX = candidateX + clampDx;
-          const clampedY = candidateY + clampDy;
-
-          // Snap groupe à pièces
-          const snapResult = snapGroupToPieces(draft.scene, clamped, 5, selectedIds);
-          draft.ui.guides = snapResult.guides;
-
-          // Appliquer le delta de snap uniformément
-          const snapDx = snapResult.x - clamped.x;
-          const snapDy = snapResult.y - clamped.y;
-          finalX = clampedX + snapDx;
-          finalY = clampedY + snapDy;
+  toggleSelect: (id) =>
+    set(
+      produce((draft: SceneState) => {
+        const current = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (current.includes(id)) {
+          const newIds = current.filter((x) => x !== id);
+          draft.ui.selectedIds = newIds.length > 0 ? newIds : undefined;
+          draft.ui.selectedId = newIds[0];
+          draft.ui.primaryId = newIds[0];
         } else {
-          draft.ui.guides = undefined;
+          draft.ui.selectedIds = uniqueIds([...current, id]);
+          draft.ui.selectedId = id;
+          draft.ui.primaryId = id;
         }
-      } else {
-        // Drag simple : clamp AABB + snap entre pièces
-        const bbox = pieceBBox(piece); // Use rotation-aware AABB
-        const candidateAABB = { x: candidateX, y: candidateY, w: bbox.w, h: bbox.h };
-        const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
-        const snapResult = snapToPieces(draft.scene, clamped, 5, dragging.id);
-        draft.ui.guides = snapResult.guides;
-        finalX = snapResult.x;
-        finalY = snapResult.y;
-      }
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
+      }),
+    ),
 
-      // Snap grille optionnel
-      if (draft.ui.snap10mm) {
-        finalX = snapTo10mm(finalX);
-        finalY = snapTo10mm(finalY);
-      }
+  clearSelection: () =>
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.selectedId = undefined;
+        draft.ui.selectedIds = undefined;
+        draft.ui.primaryId = undefined;
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
+      }),
+    ),
 
-      // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
-      const bbox = pieceBBox(piece);
-      const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
-      const candidateForCollage = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+  selectAll: () =>
+    set(
+      produce((draft: SceneState) => {
+        const allIds = Object.keys(draft.scene.pieces);
+        draft.ui.selectedIds = allIds;
+        draft.ui.selectedId = allIds[0];
+        draft.ui.primaryId = allIds[0];
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
+      }),
+    ),
 
-      // Calculer prevGap pour directionnalité
-      const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
-      const prevGap = computeMinGap(currentBBox, neighbors);
+  setSelection: (ids) =>
+    set(
+      produce((draft: SceneState) => {
+        const validIds = uniqueIds(ids.filter((id) => draft.scene.pieces[id]));
+        draft.ui.selectedIds = validIds.length > 0 ? validIds : undefined;
+        draft.ui.selectedId = validIds[0];
+        draft.ui.primaryId = validIds[0];
+        computeGroupBBox(draft);
+        bumpHandlesEpoch(draft);
+      }),
+    ),
 
-      const collageResult = snapEdgeCollage(
-        candidateForCollage,
-        draft.scene,
-        selectedIds,
-        SNAP_EDGE_THRESHOLD_MM,
-        prevGap
-      );
-      finalX = collageResult.x;
-      finalY = collageResult.y;
+  startMarquee: (x, y) =>
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.marquee = { x0: x, y0: y, x1: x, y1: y };
+      }),
+    ),
 
-      // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
-      // Indépendant des toggles snap, appliqué avant commit
-      const finalBBoxBeforeClamp = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
-      const guardResult = finalizeCollageGuard({
-        subjectBBox: finalBBoxBeforeClamp,
-        neighbors,
-        maxGapMm: MIN_GAP_MM,
-      });
+  updateMarquee: (x, y) =>
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.marquee) return;
+        draft.ui.marquee.x1 = x;
+        draft.ui.marquee.y1 = y;
+      }),
+    ),
 
-      if (guardResult.didSnap) {
-        finalX += guardResult.dx;
-        finalY += guardResult.dy;
-      }
+  endMarquee: () =>
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.marquee) return;
+        const { x0, y0, x1, y1 } = draft.ui.marquee;
+        const minX = Math.min(x0, x1);
+        const maxX = Math.max(x0, x1);
+        const minY = Math.min(y0, y1);
+        const maxY = Math.max(y0, y1);
 
-      // Clamp final après tous les snaps (garantit qu'on ne dépasse jamais la scène)
-      const finalAABB = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
-      const finalClamped = clampAABBToScene(finalAABB, draft.scene.size.w, draft.scene.size.h);
-      finalX = finalClamped.x;
-      finalY = finalClamped.y;
-
-      // Simuler et valider
-      const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
-
-      if (isGroupDrag) {
-        const offsets = dragging.groupOffsets ?? {};
-        for (const sid of selectedIds) {
-          const off = offsets[sid] ?? { dx: 0, dy: 0 };
-          const sp = draft.scene.pieces[sid];
-          if (!sp) continue;
-          // Convert AABB position to piece.position for validation
-          const aabbPos = { x: finalX + off.dx, y: finalY + off.dy };
-          const piecePos = aabbToPiecePosition(aabbPos.x, aabbPos.y, sp);
-          testScene.pieces[sid] = { ...sp, position: piecePos };
-        }
-      } else {
-        // Convert AABB position to piece.position for validation
-        const piecePos = aabbToPiecePosition(finalX, finalY, piece);
-        testScene.pieces[dragging.id] = { ...piece, position: piecePos };
-      }
-
-      const validation = validateNoOverlap(testScene);
-
-      dragging.candidate = {
-        x: finalX,
-        y: finalY,
-        valid: validation.ok,
-      };
-
-      // Calculer transientBBox pour tooltip temps réel
-      if (isGroupDrag) {
-        // Groupe : calculer bbox union rotation-aware
-        const offsets = dragging.groupOffsets ?? {};
-        const groupBBoxes = selectedIds
-          .map((sid) => {
-            const off = offsets[sid] ?? { dx: 0, dy: 0 };
-            const sp = draft.scene.pieces[sid];
-            if (!sp) return null;
-            const spBBox = pieceBBox(sp);
-            return {
-              x: finalX + off.dx,
-              y: finalY + off.dy,
-              w: spBBox.w,
-              h: spBBox.h,
-            };
+        const intersected = Object.values(draft.scene.pieces)
+          .filter((p) => {
+            const bbox = pieceBBox(p); // Use rotation-aware AABB
+            const pRight = bbox.x + bbox.w;
+            const pBottom = bbox.y + bbox.h;
+            return !(pRight < minX || bbox.x > maxX || pBottom < minY || bbox.y > minY);
           })
-          .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+          .map((p) => p.id);
 
-        if (groupBBoxes.length > 0) {
-          const minX = Math.min(...groupBBoxes.map((r) => r.x));
-          const minY = Math.min(...groupBBoxes.map((r) => r.y));
-          const maxX = Math.max(...groupBBoxes.map((r) => r.x + r.w));
-          const maxY = Math.max(...groupBBoxes.map((r) => r.y + r.h));
-          draft.ui.transientBBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-          draft.ui.isTransientActive = true;
+        draft.ui.selectedIds = intersected.length > 0 ? intersected : undefined;
+        draft.ui.selectedId = intersected[0];
+        draft.ui.primaryId = intersected[0];
+        draft.ui.marquee = undefined;
+        computeGroupBBox(draft);
+      }),
+    ),
 
-          // Calculer delta entre bbox commit et bbox transitoire pour les ghosts
-          const commitBBoxes = selectedIds
-            .map((sid) => {
-              const sp = draft.scene.pieces[sid];
-              if (!sp) return null;
-              const spBBox = pieceBBox(sp);
-              return spBBox;
-            })
-            .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+  nudgeSelected: (dx, dy) =>
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length === 0) return;
 
-          if (commitBBoxes.length > 0) {
-            const commitMinX = Math.min(...commitBBoxes.map((r) => r.x));
-            const commitMinY = Math.min(...commitBBoxes.map((r) => r.y));
-            draft.ui.transientDelta = {
-              dx: minX - commitMinX,
-              dy: minY - commitMinY,
-            };
-          }
+        const snap = takeSnapshot(draft);
+
+        // Nudge de groupe : calculer bbox du groupe (AABB rotation-aware)
+        const bbox = groupBBox(draft.scene, selectedIds);
+
+        // Clamp group AABB to scene
+        const candidateAABB = { x: bbox.x + dx, y: bbox.y + dy, w: bbox.w, h: bbox.h };
+        const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
+
+        const actualDx = clamped.x - bbox.x;
+        const actualDy = clamped.y - bbox.y;
+
+        // Appliquer snap grille si activé (sur AABB)
+        let finalDx = actualDx;
+        let finalDy = actualDy;
+        if (draft.ui.snap10mm) {
+          const snappedX = snapTo10mm(bbox.x + actualDx);
+          const snappedY = snapTo10mm(bbox.y + actualDy);
+          finalDx = snappedX - bbox.x;
+          finalDy = snappedY - bbox.y;
         }
-      } else {
-        // Solo : utiliser la bbox rotation-aware
-        draft.ui.transientBBox = { x: finalX, y: finalY, w: bbox.w, h: bbox.h, rotationDeg: piece.rotationDeg };
-        draft.ui.isTransientActive = true;
 
-        // Calculer delta pour solo
-        const commitBBox = pieceBBox(piece);
-        draft.ui.transientDelta = {
-          dx: finalX - commitBBox.x,
-          dy: finalY - commitBBox.y,
+        // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
+        // Calculer prevGap pour directionnalité (ne coller que si on s'approche)
+        const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
+        const candidateWithSnap = {
+          x: bbox.x + finalDx,
+          y: bbox.y + finalDy,
+          w: bbox.w,
+          h: bbox.h,
         };
-      }
-    })),
 
-  endDrag: () =>
-    set(produce((draft: SceneState) => {
-      const dragging = draft.ui.dragging;
-      if (!dragging || !dragging.candidate) {
-        draft.ui.dragging = undefined;
-        draft.ui.guides = undefined;
-        clearTransientUI(draft.ui);
-        return;
-      }
+        // Récupérer voisins externes (exclure membres groupe)
+        const neighbors = Object.values(draft.scene.pieces).filter(
+          (p) => !selectedIds.includes(p.id),
+        );
+        const prevGap = computeMinGap(currentBBox, neighbors);
 
-      const snap = takeSnapshot(draft);
-      const selectedIds = draft.ui.selectedIds ?? [dragging.id];
-      const isGroupDrag = selectedIds.length > 1;
+        const collageResult = snapEdgeCollage(
+          candidateWithSnap,
+          draft.scene,
+          selectedIds,
+          SNAP_EDGE_THRESHOLD_MM,
+          prevGap,
+        );
+        finalDx = collageResult.x - bbox.x;
+        finalDy = collageResult.y - bbox.y;
 
-      // Store commit positions before any changes
-      const commitPositions: Record<ID, { x: Milli; y: Milli }> = {};
-      for (const id of selectedIds) {
-        const p = draft.scene.pieces[id];
-        if (p) {
-          commitPositions[id] = { x: p.position.x, y: p.position.y };
-        }
-      }
+        // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
+        // Indépendant des toggles snap, appliqué juste avant commit
+        let finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
+        const guardResult = finalizeCollageGuard({
+          subjectBBox: finalBBox,
+          neighbors,
+          maxGapMm: MIN_GAP_MM,
+        });
 
-      if (isGroupDrag) {
-        // ─────────────────────────────────────────────────────────────
-        // CONSTRUCTION D'UNE SCÈNE CANDIDATE AVANT VALIDATION
-        // On applique le delta (dx,dy) à CHAQUE pièce sélectionnée,
-        // puis on valide la scène candidate contre les voisins externes.
-        // ─────────────────────────────────────────────────────────────
-        const sceneCandidate: SceneDraft = JSON.parse(JSON.stringify(draft.scene));
-
-        // Récupérer le delta uniforme issu du drag
-        const dx = draft.ui.transientDelta?.dx ?? (0 as Milli);
-        const dy = draft.ui.transientDelta?.dy ?? (0 as Milli);
-
-        // Appliquer le delta aux positions commit des membres du groupe
-        for (const id of selectedIds) {
-          const p = sceneCandidate.pieces[id];
-          if (!p) continue;
-          const commitPos = commitPositions[id];
-          if (!commitPos) continue;
-          p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+        if (guardResult.didSnap) {
+          finalDx += guardResult.dx;
+          finalDy += guardResult.dy;
+          finalBBox = { x: bbox.x + finalDx, y: bbox.y + finalDy, w: bbox.w, h: bbox.h };
         }
 
-        // Valider chevauchements: ignorer auto-collisions internes au groupe
-        const overlapResult = validateNoOverlapForCandidateDraft(sceneCandidate, selectedIds);
-
-        // Autres validations sur la scène candidate
-        const insideResult = validateInsideScene(sceneCandidate);
-
-        const allProblems = [
-          ...(overlapResult.conflicts.map(([a, b]) => ({
-            code: 'overlap_same_layer' as const,
-            severity: 'BLOCK' as const,
-            pieceIds: [a, b],
-            message: 'Overlap detected'
-          }))),
-          ...(insideResult.outside.map(id => ({
-            code: 'outside_scene' as const,
-            severity: 'BLOCK' as const,
-            pieceIds: [id],
-            message: 'Outside scene bounds'
-          }))),
-        ];
-
-        const hasBlock = allProblems.length > 0;
-
-        if (hasBlock) {
-          // Rollback: restaurer positions commit
-          selectedIds.forEach((id) => {
-            if (commitPositions[id] && draft.scene.pieces[id]) {
-              draft.scene.pieces[id].position = commitPositions[id];
-            }
-          });
-
-          draft.scene.validation = {
-            ok: false,
-            problems: allProblems
-          };
-          clearTransientUI(draft.ui);
-          draft.ui.dragging = undefined;
-          draft.ui.guides = undefined;
-          draft.ui.flashInvalidAt = Date.now();
-          return;
-        }
-
-        // Succès: commit des positions translatées
-        for (const id of selectedIds) {
-          const p = draft.scene.pieces[id];
-          if (!p) continue;
-          const commitPos = commitPositions[id];
-          if (!commitPos) continue;
-          p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
-        }
-        draft.scene.validation = { ok: true, problems: [] };
-        draft.scene.revision++;
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      } else {
-        // Solo drag: existing logic
-        let finalX = dragging.candidate.x;
-        let finalY = dragging.candidate.y;
-
-        if (ENABLE_GAP_NORMALIZATION && dragging.candidate.valid) {
-          const candidateBBox = { x: finalX, y: finalY, w: dragging.candidate.w, h: dragging.candidate.h };
-          const neighbors = Object.values(draft.scene.pieces).filter(p => !selectedIds.includes(p.id));
-
+        // NORMALIZATION: Normalize gap to exact 1.00mm if in [1.00, 1.00+ε] window
+        if (ENABLE_GAP_NORMALIZATION) {
           const normalizeResult = normalizeGapToThreshold({
-            subjectBBox: candidateBBox,
+            subjectBBox: finalBBox,
             neighbors,
             targetMm: NORMALIZE_GAP_TARGET_MM,
             epsilonMm: EPSILON_GAP_NORMALIZE_MM,
@@ -1495,481 +1819,1175 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           });
 
           if (normalizeResult.didNormalize) {
-            finalX += normalizeResult.dx;
-            finalY += normalizeResult.dy;
+            finalDx += normalizeResult.dx;
+            finalDy += normalizeResult.dy;
           }
         }
 
-        if (dragging.candidate.valid) {
-          const piece = draft.scene.pieces[dragging.id];
-          if (piece) {
-            const piecePos = aabbToPiecePosition(finalX, finalY, piece);
-            piece.position.x = piecePos.x;
-            piece.position.y = piecePos.y;
+        // For each piece, compute new AABB position with final clamp, then convert to piece.position
+        // This ensures rotation-aware nudge and prevents escaping scene after snaps
+        const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
+          const pBBox = pieceBBox(p);
+          let newAABBPos = { x: pBBox.x + finalDx, y: pBBox.y + finalDy, w: pBBox.w, h: pBBox.h };
+          // Clamp final pour garantir que la pièce reste dans la scène
+          newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
+          const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
+          testScene.pieces[id] = { ...p, position: newPiecePos };
+        }
+
+        // Use validateNoOverlapForCandidate to avoid rollback from internal group collisions
+        const validation =
+          selectedIds.length > 1
+            ? validateNoOverlapForCandidateDraft(testScene, selectedIds)
+            : validateNoOverlap(testScene);
+
+        if (!validation.ok) {
+          draft.ui.flashInvalidAt = Date.now();
+        } else {
+          if (finalDx !== 0 || finalDy !== 0) {
+            for (const id of selectedIds) {
+              const p = draft.scene.pieces[id];
+              if (!p) continue;
+              const pBBox = pieceBBox(p);
+              let newAABBPos = {
+                x: pBBox.x + finalDx,
+                y: pBBox.y + finalDy,
+                w: pBBox.w,
+                h: pBBox.h,
+              };
+              // Clamp final pour garantir que la pièce reste dans la scène
+              newAABBPos = clampAABBToScene(newAABBPos, draft.scene.size.w, draft.scene.size.h);
+              const newPiecePos = aabbToPiecePosition(newAABBPos.x, newAABBPos.y, p);
+              p.position.x = newPiecePos.x;
+              p.position.y = newPiecePos.y;
+            }
+            draft.scene.revision++;
+            pushHistory(draft, snap);
+            autosave(takeSnapshot(draft));
           }
+        }
+      }),
+    ),
+
+  beginDrag: (id) =>
+    set(
+      produce((draft: SceneState) => {
+        const piece = draft.scene.pieces[id];
+        if (!piece) return;
+
+        // DEV: Log begin drag to diagnose blocking
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          const allGhostPieceIds = Object.entries(draft.ui.exactSupportResults ?? {})
+            .filter(([_, supported]) => !supported)
+            .map(([pieceId, _]) => pieceId);
+          console.log('[DRAG_GUARD] beginDrag called', {
+            targetId: id,
+            targetLayerId: piece.layerId,
+            committedGhostPieceIds: allGhostPieceIds,
+            isTargetInCommittedGhost: allGhostPieceIds.includes(id),
+            applyingGlobalGuard: false, // No global guard in current implementation
+          });
+        }
+
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+
+        // Déterminer si le drag concerne la sélection courante
+        const selId = draft.ui.selectedId ?? null;
+        const selIds = draft.ui.selectedIds ?? null;
+        let affectsSelection = false;
+
+        if (selIds && selIds.length > 0) {
+          affectsSelection = selIds.includes(id);
+        } else if (selId) {
+          affectsSelection = selId === id;
+        } else {
+          // Aucune sélection : auto-select la pièce, donc affecte la sélection
+          affectsSelection = true;
+        }
+
+        // Si la pièce n'est pas dans la sélection, selectOnly
+        if (!selectedIds.includes(id)) {
+          draft.ui.selectedId = id;
+          draft.ui.selectedIds = [id];
+          draft.ui.primaryId = id;
+        }
+
+        const finalSelectedIds = draft.ui.selectedIds ?? [id];
+
+        // CRITICAL: Store AABB position (not piece.position) for rotation-aware drag
+        // For rotated pieces, AABB position differs from piece.position
+        const primaryBBox = pieceBBox(piece);
+
+        // Stocker les offsets pour le groupe (AABB-based for rotation awareness)
+        const groupOffsets: Record<ID, { dx: number; dy: number }> = {};
+        for (const sid of finalSelectedIds) {
+          const sp = draft.scene.pieces[sid];
+          if (!sp) continue;
+          const spBBox = pieceBBox(sp);
+          groupOffsets[sid] = {
+            dx: spBBox.x - primaryBBox.x,
+            dy: spBBox.y - primaryBBox.y,
+          };
+        }
+
+        draft.ui.dragging = {
+          id,
+          start: { x: primaryBBox.x, y: primaryBBox.y }, // AABB position, not piece.position
+          candidate: undefined,
+          groupOffsets,
+          affectsSelection,
+        };
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+
+        // DEV: Log drag start with ghost context
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          console.log('[DRAG_START]', {
+            pieceId: id,
+            layerId: piece.layerId,
+            selectedIds: finalSelectedIds,
+            currentGhost: draft.ui.ghost
+              ? {
+                  ghostPieceId: draft.ui.ghost.pieceId,
+                  problems: draft.ui.ghost.problems.length,
+                  affectsThisDrag: finalSelectedIds.includes(draft.ui.ghost.pieceId),
+                }
+              : null,
+          });
+        }
+      }),
+    ),
+
+  updateDrag: (dx, dy) =>
+    set(
+      produce((draft: SceneState) => {
+        const dragging = draft.ui.dragging;
+        if (!dragging) return;
+
+        const piece = draft.scene.pieces[dragging.id];
+        if (!piece) return;
+
+        const selectedIds = draft.ui.selectedIds ?? [dragging.id];
+        const isGroupDrag = selectedIds.length > 1;
+
+        // Drag de groupe : désactiver snap entre pièces
+        const candidateX = dragging.start.x + dx;
+        const candidateY = dragging.start.y + dy;
+
+        let finalX = candidateX;
+        let finalY = candidateY;
+
+        if (isGroupDrag) {
+          // Clamp de groupe
+          const offsets = dragging.groupOffsets ?? {};
+          const groupRects = selectedIds
+            .map((sid) => {
+              const off = offsets[sid] ?? { dx: 0, dy: 0 };
+              const sp = draft.scene.pieces[sid];
+              if (!sp) return null;
+              const bbox = pieceBBox(sp); // Use rotation-aware AABB
+              return {
+                x: candidateX + off.dx,
+                y: candidateY + off.dy,
+                w: bbox.w,
+                h: bbox.h,
+              };
+            })
+            .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+
+          if (groupRects.length > 0) {
+            const gMinX = Math.min(...groupRects.map((r) => r.x));
+            const gMinY = Math.min(...groupRects.map((r) => r.y));
+            const gMaxX = Math.max(...groupRects.map((r) => r.x + r.w));
+            const gMaxY = Math.max(...groupRects.map((r) => r.y + r.h));
+            const gW = gMaxX - gMinX;
+            const gH = gMaxY - gMinY;
+
+            // Clamp group AABB to scene
+            const groupAABB = { x: gMinX, y: gMinY, w: gW, h: gH };
+            const clamped = clampAABBToScene(groupAABB, draft.scene.size.w, draft.scene.size.h);
+            const clampDx = clamped.x - gMinX;
+            const clampDy = clamped.y - gMinY;
+            const clampedX = candidateX + clampDx;
+            const clampedY = candidateY + clampDy;
+
+            // Snap groupe à pièces
+            const snapResult = snapGroupToPieces(draft.scene, clamped, 5, selectedIds);
+            draft.ui.guides = snapResult.guides;
+
+            // Appliquer le delta de snap uniformément
+            const snapDx = snapResult.x - clamped.x;
+            const snapDy = snapResult.y - clamped.y;
+            finalX = clampedX + snapDx;
+            finalY = clampedY + snapDy;
+          } else {
+            draft.ui.guides = undefined;
+          }
+        } else {
+          // Drag simple : clamp AABB + snap entre pièces
+          const bbox = pieceBBox(piece); // Use rotation-aware AABB
+          const candidateAABB = { x: candidateX, y: candidateY, w: bbox.w, h: bbox.h };
+          const clamped = clampAABBToScene(candidateAABB, draft.scene.size.w, draft.scene.size.h);
+          const snapResult = snapToPieces(draft.scene, clamped, 5, dragging.id);
+          draft.ui.guides = snapResult.guides;
+          finalX = snapResult.x;
+          finalY = snapResult.y;
+        }
+
+        // Snap grille optionnel
+        if (draft.ui.snap10mm) {
+          finalX = snapTo10mm(finalX);
+          finalY = snapTo10mm(finalY);
+        }
+
+        // FEAT_GAP_COLLAGE: Appliquer snap collage bord-à-bord si gap < 1,0mm
+        const bbox = pieceBBox(piece);
+        const currentBBox = { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h };
+        const candidateForCollage = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+
+        // Calculer prevGap pour directionnalité
+        const neighbors = Object.values(draft.scene.pieces).filter(
+          (p) => !selectedIds.includes(p.id),
+        );
+        const prevGap = computeMinGap(currentBBox, neighbors);
+
+        const collageResult = snapEdgeCollage(
+          candidateForCollage,
+          draft.scene,
+          selectedIds,
+          SNAP_EDGE_THRESHOLD_MM,
+          prevGap,
+        );
+        finalX = collageResult.x;
+        finalY = collageResult.y;
+
+        // GARDE-FOU FINAL: Force collage à gap=0 si gap ∈ (0 ; MIN_GAP_MM)
+        // Indépendant des toggles snap, appliqué avant commit
+        const finalBBoxBeforeClamp = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+        const guardResult = finalizeCollageGuard({
+          subjectBBox: finalBBoxBeforeClamp,
+          neighbors,
+          maxGapMm: MIN_GAP_MM,
+        });
+
+        if (guardResult.didSnap) {
+          finalX += guardResult.dx;
+          finalY += guardResult.dy;
+        }
+
+        // Clamp final après tous les snaps (garantit qu'on ne dépasse jamais la scène)
+        const finalAABB = { x: finalX, y: finalY, w: bbox.w, h: bbox.h };
+        const finalClamped = clampAABBToScene(finalAABB, draft.scene.size.w, draft.scene.size.h);
+        finalX = finalClamped.x;
+        finalY = finalClamped.y;
+
+        // Simuler et valider
+        const testScene = { ...draft.scene, pieces: { ...draft.scene.pieces } };
+
+        if (isGroupDrag) {
+          const offsets = dragging.groupOffsets ?? {};
+          for (const sid of selectedIds) {
+            const off = offsets[sid] ?? { dx: 0, dy: 0 };
+            const sp = draft.scene.pieces[sid];
+            if (!sp) continue;
+            // Convert AABB position to piece.position for validation
+            const aabbPos = { x: finalX + off.dx, y: finalY + off.dy };
+            const piecePos = aabbToPiecePosition(aabbPos.x, aabbPos.y, sp);
+            testScene.pieces[sid] = { ...sp, position: piecePos };
+          }
+        } else {
+          // Convert AABB position to piece.position for validation
+          const piecePos = aabbToPiecePosition(finalX, finalY, piece);
+          testScene.pieces[dragging.id] = { ...piece, position: piecePos };
+        }
+
+        // DEV: Log validation input with ghost context
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          console.log('[DRAG_VALIDATE_INPUT]', {
+            selectedIds,
+            isGroupDrag,
+            candidatePosition: { x: finalX, y: finalY },
+            currentGhost: draft.ui.ghost
+              ? {
+                  ghostPieceId: draft.ui.ghost.pieceId,
+                  affects: selectedIds.includes(draft.ui.ghost.pieceId),
+                }
+              : null,
+          });
+        }
+
+        // KEY FIX: Use same-layer validation for drag (no cross-layer blocking)
+        const validation = validateNoOverlapSameLayer(testScene, selectedIds);
+
+        // Dev logging: log blockers with their layer IDs
+        if (import.meta.env.DEV && !validation.ok && (window as any).__DBG_DRAG__) {
+          const blockerInfo = validation.conflicts.map(([a, b]) => ({
+            conflict: [a, b],
+            layerA: testScene.pieces[a]?.layerId,
+            layerB: testScene.pieces[b]?.layerId,
+          }));
+          console.log('[drag] BLOCK detected:', { blockerInfo, selectedIds });
+        }
+
+        dragging.candidate = {
+          x: finalX,
+          y: finalY,
+          w: bbox.w,
+          h: bbox.h,
+          valid: validation.ok,
+        };
+
+        // Calculer transientBBox pour tooltip temps réel
+        if (isGroupDrag) {
+          // Groupe : calculer bbox union rotation-aware
+          const offsets = dragging.groupOffsets ?? {};
+          const groupBBoxes = selectedIds
+            .map((sid) => {
+              const off = offsets[sid] ?? { dx: 0, dy: 0 };
+              const sp = draft.scene.pieces[sid];
+              if (!sp) return null;
+              const spBBox = pieceBBox(sp);
+              return {
+                x: finalX + off.dx,
+                y: finalY + off.dy,
+                w: spBBox.w,
+                h: spBBox.h,
+              };
+            })
+            .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+
+          if (groupBBoxes.length > 0) {
+            const minX = Math.min(...groupBBoxes.map((r) => r.x));
+            const minY = Math.min(...groupBBoxes.map((r) => r.y));
+            const maxX = Math.max(...groupBBoxes.map((r) => r.x + r.w));
+            const maxY = Math.max(...groupBBoxes.map((r) => r.y + r.h));
+            draft.ui.transientBBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+            draft.ui.isTransientActive = true;
+
+            // Calculer delta entre bbox commit et bbox transitoire pour les ghosts
+            const commitBBoxes = selectedIds
+              .map((sid) => {
+                const sp = draft.scene.pieces[sid];
+                if (!sp) return null;
+                const spBBox = pieceBBox(sp);
+                return spBBox;
+              })
+              .filter(Boolean) as Array<{ x: number; y: number; w: number; h: number }>;
+
+            if (commitBBoxes.length > 0) {
+              const commitMinX = Math.min(...commitBBoxes.map((r) => r.x));
+              const commitMinY = Math.min(...commitBBoxes.map((r) => r.y));
+              draft.ui.transientDelta = {
+                dx: minX - commitMinX,
+                dy: minY - commitMinY,
+              };
+            }
+          }
+        } else {
+          // Solo : utiliser la bbox rotation-aware
+          draft.ui.transientBBox = {
+            x: finalX,
+            y: finalY,
+            w: bbox.w,
+            h: bbox.h,
+            rotationDeg: piece.rotationDeg,
+          };
+          draft.ui.isTransientActive = true;
+
+          // Calculer delta pour solo
+          const commitBBox = pieceBBox(piece);
+          draft.ui.transientDelta = {
+            dx: finalX - commitBBox.x,
+            dy: finalY - commitBBox.y,
+          };
+        }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
+      }),
+    ),
+
+  endDrag: () =>
+    set(
+      produce((draft: SceneState) => {
+        const dragging = draft.ui.dragging;
+        if (!dragging || !dragging.candidate) {
+          draft.ui.dragging = undefined;
+          draft.ui.guides = undefined;
+          clearTransientUI(draft.ui);
+          return;
+        }
+
+        const snap = takeSnapshot(draft);
+        const selectedIds = draft.ui.selectedIds ?? [dragging.id];
+        const isGroupDrag = selectedIds.length > 1;
+
+        // Store commit positions before any changes
+        const commitPositions: Record<ID, { x: Milli; y: Milli }> = {};
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (p) {
+            commitPositions[id] = { x: p.position.x, y: p.position.y };
+          }
+        }
+
+        if (isGroupDrag) {
+          // ─────────────────────────────────────────────────────────────
+          // CONSTRUCTION D'UNE SCÈNE CANDIDATE AVANT VALIDATION
+          // On applique le delta (dx,dy) à CHAQUE pièce sélectionnée,
+          // puis on valide la scène candidate contre les voisins externes.
+          // ─────────────────────────────────────────────────────────────
+          const sceneCandidate: SceneDraft = JSON.parse(JSON.stringify(draft.scene));
+
+          // Récupérer le delta uniforme issu du drag
+          const dx = draft.ui.transientDelta?.dx ?? (0 as Milli);
+          const dy = draft.ui.transientDelta?.dy ?? (0 as Milli);
+
+          // Appliquer le delta aux positions commit des membres du groupe
+          for (const id of selectedIds) {
+            const p = sceneCandidate.pieces[id];
+            if (!p) continue;
+            const commitPos = commitPositions[id];
+            if (!commitPos) continue;
+            p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+          }
+
+          // KEY FIX: Use same-layer validation (no cross-layer blocking)
+          const overlapResult = validateNoOverlapSameLayer(sceneCandidate, selectedIds);
+
+          // Autres validations sur la scène candidate
+          const insideResult = validateInsideScene(sceneCandidate);
+
+          const allProblems = [
+            ...overlapResult.conflicts.map(([a, b]) => ({
+              code: 'overlap_same_layer' as const,
+              severity: 'BLOCK' as const,
+              pieceIds: [a, b],
+              message: 'Overlap detected',
+            })),
+            ...insideResult.outside.map((id) => ({
+              code: 'outside_scene' as const,
+              severity: 'BLOCK' as const,
+              pieceIds: [id],
+              message: 'Outside scene bounds',
+            })),
+          ];
+
+          const hasBlock = allProblems.length > 0;
+
+          // Dev logging: log blockers with their layer IDs
+          if (import.meta.env.DEV && hasBlock && (window as any).__DBG_DRAG__) {
+            const blockerInfo = overlapResult.conflicts.map(([a, b]) => ({
+              conflict: [a, b],
+              layerA: sceneCandidate.pieces[a]?.layerId,
+              layerB: sceneCandidate.pieces[b]?.layerId,
+            }));
+            console.log('[endDrag] BLOCK detected:', { blockerInfo, selectedIds, allProblems });
+          }
+
+          if (hasBlock) {
+            // Rollback: restaurer positions commit
+            selectedIds.forEach((id) => {
+              if (commitPositions[id] && draft.scene.pieces[id]) {
+                draft.scene.pieces[id].position = commitPositions[id];
+              }
+            });
+
+            // Validation problems tracked via UI state, not scene state
+            clearTransientUI(draft.ui);
+            draft.ui.dragging = undefined;
+            draft.ui.guides = undefined;
+            draft.ui.flashInvalidAt = Date.now();
+            return;
+          }
+
+          // Succès: commit des positions translatées
+          const affectedLayers = new Set<ID>();
+          for (const id of selectedIds) {
+            const p = draft.scene.pieces[id];
+            if (!p) continue;
+            const commitPos = commitPositions[id];
+            if (!commitPos) continue;
+            p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
+            affectedLayers.add(p.layerId);
+          }
+          // Schedule RBush rebuild for affected layers
+          for (const layerId of affectedLayers) {
+            scheduleLayerRebuild(layerId);
+          }
+          // Validation problems tracked via UI state, not scene state
           draft.scene.revision++;
           pushHistory(draft, snap);
           autosave(takeSnapshot(draft));
         } else {
-          draft.ui.flashInvalidAt = Date.now();
-        }
-      }
+          // Solo drag: existing logic
+          let finalX = dragging.candidate.x;
+          let finalY = dragging.candidate.y;
 
-      draft.ui.dragging = undefined;
-      draft.ui.guides = undefined;
-      draft.ui.isTransientActive = false;
-      draft.ui.transientBBox = undefined;
-      draft.ui.transientDelta = undefined;
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-      bumpHandlesEpoch(draft);
+          if (
+            ENABLE_GAP_NORMALIZATION &&
+            dragging.candidate.valid &&
+            dragging.candidate.w != null &&
+            dragging.candidate.h != null
+          ) {
+            const candidateBBox = {
+              x: finalX,
+              y: finalY,
+              w: dragging.candidate.w,
+              h: dragging.candidate.h,
+            };
+            const neighbors = Object.values(draft.scene.pieces).filter(
+              (p) => !selectedIds.includes(p.id),
+            );
 
-      // If ghost is active, validate after drag
-      const hasGhost = draft.ui.ghost !== undefined;
-      if (hasGhost) {
-        // Trigger validation async (after state update)
-        Promise.resolve().then(() => {
-          useSceneStore.getState().validateGhost().then(() => {
-            // Auto-commit if no BLOCK problems
-            const state = useSceneStore.getState();
-            if (state.ui.ghost) {
-              const hasBlock = state.ui.ghost.problems.some(p => p.severity === 'BLOCK');
-              if (!hasBlock) {
-                useSceneStore.getState().commitGhost();
-              }
+            const normalizeResult = normalizeGapToThreshold({
+              subjectBBox: candidateBBox,
+              neighbors,
+              targetMm: NORMALIZE_GAP_TARGET_MM,
+              epsilonMm: EPSILON_GAP_NORMALIZE_MM,
+              sceneBounds: { w: draft.scene.size.w, h: draft.scene.size.h },
+            });
+
+            if (normalizeResult.didNormalize) {
+              finalX += normalizeResult.dx;
+              finalY += normalizeResult.dy;
             }
-          });
+          }
+
+          if (dragging.candidate.valid) {
+            const piece = draft.scene.pieces[dragging.id];
+            if (piece) {
+              const piecePos = aabbToPiecePosition(finalX, finalY, piece);
+              piece.position.x = piecePos.x;
+              piece.position.y = piecePos.y;
+              // Schedule RBush rebuild for this layer
+              scheduleLayerRebuild(piece.layerId);
+            }
+            draft.scene.revision++;
+            pushHistory(draft, snap);
+            autosave(takeSnapshot(draft));
+          } else {
+            draft.ui.flashInvalidAt = Date.now();
+          }
+        }
+
+        draft.ui.dragging = undefined;
+        draft.ui.guides = undefined;
+        draft.ui.isTransientActive = false;
+        draft.ui.transientBBox = undefined;
+        draft.ui.transientDelta = undefined;
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+        bumpHandlesEpoch(draft);
+
+        // After drag commit, trigger exact validation for support-driven ghosts
+        // Clone IDs before passing to async function to avoid revoked proxy references
+        const movedIds = isGroupDrag ? [...selectedIds] : [dragging.id];
+        Promise.resolve().then(async () => {
+          await recalculateExactSupport(movedIds);
         });
-      }
-    })),
+
+        // If ghost is active, validate after drag
+        const hasGhost = draft.ui.ghost !== undefined;
+        if (hasGhost) {
+          // Trigger validation async (after state update)
+          Promise.resolve().then(() => {
+            useSceneStore
+              .getState()
+              .validateGhost()
+              .then(() => {
+                // Auto-commit if no BLOCK problems
+                const state = useSceneStore.getState();
+                if (state.ui.ghost) {
+                  const hasBlock = state.ui.ghost.problems.some(
+                    (p: Problem) => p.severity === 'BLOCK',
+                  );
+                  if (!hasBlock) {
+                    useSceneStore.getState().commitGhost();
+                  }
+                }
+              });
+          });
+        }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
+      }),
+    ),
 
   cancelDrag: () =>
-    set(produce((draft: SceneState) => {
-      draft.ui.dragging = undefined;
-      draft.ui.guides = undefined;
-      draft.ui.isTransientActive = false;
-      draft.ui.transientBBox = undefined;
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-      bumpHandlesEpoch(draft);
-    })),
-
-  addRectAtCenter: (w, h) =>
-    set(produce((draft: SceneState) => {
-      const snap = takeSnapshot(draft);
-
-      // Utiliser le premier layer (pour l'instant)
-      let layerId = draft.scene.layerOrder[0];
-      if (!layerId) {
-        // Créer un layer si absent
-        layerId = genId('layer');
-        draft.scene.layers[layerId] = {
-          id: layerId,
-          name: 'Calque 1',
-          z: 0,
-          pieces: [],
-        };
-        draft.scene.layerOrder.push(layerId);
-      }
-
-      // Utiliser le premier matériau
-      let materialId = Object.keys(draft.scene.materials)[0];
-      if (!materialId) {
-        // Créer un matériau si absent
-        materialId = genId('mat');
-        draft.scene.materials[materialId] = {
-          id: materialId,
-          name: 'Matériau 1',
-          oriented: false,
-        };
-      }
-
-      // Créer la nouvelle pièce au centre
-      const pieceId = genId('piece');
-      const centerX = (draft.scene.size.w - w) / 2;
-      const centerY = (draft.scene.size.h - h) / 2;
-
-      const newPiece: Piece = {
-        id: pieceId,
-        layerId,
-        materialId,
-        position: { x: centerX, y: centerY },
-        rotationDeg: 0,
-        scale: { x: 1, y: 1 },
-        kind: 'rect',
-        size: { w, h },
-      };
-
-      draft.scene.pieces[pieceId] = newPiece;
-      draft.scene.layers[layerId].pieces.push(pieceId);
-
-      // Auto-sélectionner la nouvelle pièce
-      draft.ui.selectedId = pieceId;
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-      notifyAutoSpatial();
-    })),
-
-  deleteSelected: () =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length === 0) return;
-
-      const snap = takeSnapshot(draft);
-
-      for (const selectedId of selectedIds) {
-        const piece = draft.scene.pieces[selectedId];
-        if (!piece) continue;
-
-        const layer = draft.scene.layers[piece.layerId];
-        if (layer) {
-          layer.pieces = layer.pieces.filter((id) => id !== selectedId);
-        }
-
-        delete draft.scene.pieces[selectedId];
-
-        // Remove from spatial index if flag enabled
-        if (window.__flags?.USE_GLOBAL_SPATIAL) {
-          removePieceFromIndex(selectedId);
-        }
-      }
-
-      // Clear transient UI before clearing selection
-      clearTransientUI(draft.ui);
-
-      draft.ui.selectedId = undefined;
-      draft.ui.selectedIds = undefined;
-      draft.ui.primaryId = undefined;
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-      notifyAutoSpatial();
-    })),
-
-  setPieceMaterial: (pieceId, materialId) =>
-    set(produce((draft: SceneState) => {
-      const p = draft.scene.pieces[pieceId];
-      if (p && draft.scene.materials[materialId]) {
-        const snap = takeSnapshot(draft);
-        p.materialId = materialId;
-        // Clear transient UI after material change
-        clearTransientUI(draft.ui);
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }
-    })),
-
-  toggleJoined: (pieceId) =>
-    set(produce((draft: SceneState) => {
-      const p = draft.scene.pieces[pieceId];
-      if (p) {
-        p.joined = !p.joined;
-        autosave(takeSnapshot(draft));
-      }
-    })),
-
-  setSnap10mm: (on) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.snap10mm = on;
-    })),
-
-  setMaterialOriented: (materialId, oriented) =>
-    set(produce((draft: SceneState) => {
-      const m = draft.scene.materials[materialId];
-      if (m) {
-        const snap = takeSnapshot(draft);
-        m.oriented = oriented;
-        if (!oriented) {
-          // Retirer orientationDeg si on désactive oriented
-          delete m.orientationDeg;
-        } else if (m.orientationDeg === undefined) {
-          // Initialiser à 0 par défaut
-          m.orientationDeg = 0;
-        }
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-      }
-    })),
-
-  rotateSelected: (deltaDeg) =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length === 0) return;
-
-      // Groupe (>1 pièce) → rotation rigide autour du pivot commun
-      if (selectedIds.length > 1) {
-        const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
-          deltaDeg: deltaDeg as 90 | -90,
-        });
-        const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
-        const inside = validateInsideScene(candidate);
-
-        if (!overlap.ok || !inside.ok) {
-          draft.ui.flashInvalidAt = Date.now();
-          return; // NO-OP
-        }
-
-        const snap = takeSnapshot(draft);
-        draft.scene = candidate;
-        clearTransientUI(draft.ui);
-        draft.scene.revision++;
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.dragging = undefined;
+        draft.ui.guides = undefined;
+        draft.ui.isTransientActive = false;
+        draft.ui.transientBBox = undefined;
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
         bumpHandlesEpoch(draft);
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-        return;
-      }
+      }),
+    ),
 
-      // Solo → rotation simple (pré-validation déjà en place)
-      const nextDegById: Record<ID, Deg> = {};
-      for (const id of selectedIds) {
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
-        const cur = (piece.rotationDeg ?? 0) as Deg;
-        nextDegById[id] = (deltaDeg === 90 ? add90(cur) : sub90(cur)) as Deg;
-      }
+  addRectAtCenter: (w, h) => {
+    // Check if active layer is locked (progressive unlock gating)
+    const state = useSceneStore.getState();
+    const targetLayerId = getActiveOrDefaultLayerId(state);
+    const targetLayerName = layerNameFromId(state, targetLayerId);
 
-      const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
-      if (!ok) {
-        draft.ui.flashInvalidAt = Date.now();
-        return; // NO-OP
-      }
+    if (targetLayerName && !isLayerUnlocked(state, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return;
+    }
 
-      const snap = takeSnapshot(draft);
-      for (const id of selectedIds) {
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
-        piece.rotationDeg = nextDegById[id]!;
-      }
+    set(
+      produce((draft: SceneState) => {
+        const snap = takeSnapshot(draft);
 
-      clearTransientUI(draft.ui);
-      draft.scene.revision++;
-      bumpHandlesEpoch(draft);
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  setSelectedRotation: (deg) =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length === 0) return;
-
-      // Groupe (>1 pièce) → rotation rigide autour du pivot commun
-      if (selectedIds.length > 1) {
-        const target = normDeg(deg) as Deg;
-        const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
-          targetDeg: target,
-        });
-        const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
-        const inside = validateInsideScene(candidate);
-
-        if (!overlap.ok || !inside.ok) {
-          draft.ui.flashInvalidAt = Date.now();
-          return; // NO-OP
+        // Use active layer or first layer
+        let layerId = draft.ui.activeLayer ?? draft.scene.layerOrder[0];
+        if (!layerId) {
+          // Créer un layer si absent
+          layerId = genId('layer');
+          draft.scene.layers[layerId] = {
+            id: layerId,
+            name: 'Calque 1',
+            z: 0,
+            pieces: [],
+          };
+          draft.scene.layerOrder.push(layerId);
         }
 
-        const snap = takeSnapshot(draft);
-        draft.scene = candidate;
-        clearTransientUI(draft.ui);
-        draft.scene.revision++;
-        bumpHandlesEpoch(draft);
-        pushHistory(draft, snap);
-        autosave(takeSnapshot(draft));
-        return;
-      }
+        // Utiliser le premier matériau
+        let materialId = Object.keys(draft.scene.materials)[0];
+        if (!materialId) {
+          // Créer un matériau si absent
+          materialId = genId('mat');
+          draft.scene.materials[materialId] = {
+            id: materialId,
+            name: 'Matériau 1',
+            oriented: false,
+          };
+        }
 
-      // Solo → rotation simple (pré-validation déjà en place)
-      const target = normDeg(deg) as Deg;
-      const nextDegById: Record<ID, Deg> = {};
-      for (const id of selectedIds) {
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
-        nextDegById[id] = target;
-      }
-
-      const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
-      if (!ok) {
-        draft.ui.flashInvalidAt = Date.now();
-        return; // NO-OP
-      }
-
-      const snap = takeSnapshot(draft);
-      for (const id of selectedIds) {
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
-        piece.rotationDeg = target;
-      }
-
-      clearTransientUI(draft.ui);
-      draft.scene.revision++;
-      bumpHandlesEpoch(draft);
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  duplicateSelected: () =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length === 0) return;
-
-      const snap = takeSnapshot(draft);
-
-      const offsetX = 20;
-      const offsetY = 20;
-      const newIds: ID[] = [];
-
-      if (selectedIds.length === 1) {
-        // Duplication simple
-        const originalPiece = draft.scene.pieces[selectedIds[0]];
-        if (!originalPiece) return;
-
-        const newId = genId('piece');
-        const bbox = pieceBBox(originalPiece); // Use rotation-aware AABB
-        const clamped = clampToScene(
-          originalPiece.position.x + offsetX,
-          originalPiece.position.y + offsetY,
-          bbox.w,
-          bbox.h,
-          draft.scene.size.w,
-          draft.scene.size.h,
-        );
+        // Créer la nouvelle pièce au centre
+        const pieceId = genId('piece');
+        const centerX = (draft.scene.size.w - w) / 2;
+        const centerY = (draft.scene.size.h - h) / 2;
 
         const newPiece: Piece = {
-          ...originalPiece,
-          id: newId,
-          position: { x: clamped.x, y: clamped.y },
+          id: pieceId,
+          layerId,
+          materialId,
+          position: { x: centerX, y: centerY },
+          rotationDeg: 0,
+          scale: { x: 1, y: 1 },
+          kind: 'rect',
+          size: { w, h },
         };
 
-        draft.scene.pieces[newId] = newPiece;
-        draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
-        newIds.push(newId);
-      } else {
-        // Duplication de groupe
-        const bbox = groupBBox(draft.scene, selectedIds);
-        const clamped = clampToScene(bbox.x + offsetX, bbox.y + offsetY, bbox.w, bbox.h, draft.scene.size.w, draft.scene.size.h);
-        const groupDx = clamped.x - bbox.x;
-        const groupDy = clamped.y - bbox.y;
+        draft.scene.pieces[pieceId] = newPiece;
+        draft.scene.layers[layerId].pieces.push(pieceId);
+
+        // Auto-sélectionner la nouvelle pièce
+        draft.ui.selectedId = pieceId;
+
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+        notifyAutoSpatial();
+      }),
+    );
+  },
+
+  deleteSelected: () =>
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length === 0) return;
+
+        const snap = takeSnapshot(draft);
 
         for (const selectedId of selectedIds) {
-          const originalPiece = draft.scene.pieces[selectedId];
-          if (!originalPiece) continue;
+          const piece = draft.scene.pieces[selectedId];
+          if (!piece) continue;
+
+          // Remove from RBush spatial index before deletion
+          removePieceFromRBushIndex(selectedId, piece.layerId);
+          if (draft.ui.spatialStats) {
+            const count = draft.ui.spatialStats.itemsByLayer[piece.layerId] || 0;
+            draft.ui.spatialStats.itemsByLayer[piece.layerId] = Math.max(0, count - 1);
+          }
+
+          const layer = draft.scene.layers[piece.layerId];
+          if (layer) {
+            layer.pieces = layer.pieces.filter((id) => id !== selectedId);
+          }
+
+          delete draft.scene.pieces[selectedId];
+
+          // Remove from spatial index if flag enabled
+          if (window.__flags?.USE_GLOBAL_SPATIAL) {
+            removePieceFromIndex(selectedId);
+          }
+        }
+
+        // Clear transient UI before clearing selection
+        clearTransientUI(draft.ui);
+
+        draft.ui.selectedId = undefined;
+        draft.ui.selectedIds = undefined;
+        draft.ui.primaryId = undefined;
+
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+        notifyAutoSpatial();
+      }),
+    ),
+
+  setPieceMaterial: (pieceId, materialId) =>
+    set(
+      produce((draft: SceneState) => {
+        const p = draft.scene.pieces[pieceId];
+        if (p && draft.scene.materials[materialId]) {
+          const snap = takeSnapshot(draft);
+          p.materialId = materialId;
+          // Clear transient UI after material change
+          clearTransientUI(draft.ui);
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+        }
+      }),
+    ),
+
+  toggleJoined: (pieceId) =>
+    set(
+      produce((draft: SceneState) => {
+        const p = draft.scene.pieces[pieceId];
+        if (p) {
+          p.joined = !p.joined;
+          autosave(takeSnapshot(draft));
+        }
+      }),
+    ),
+
+  setSnap10mm: (on) =>
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.snap10mm = on;
+      }),
+    ),
+
+  setMaterialOriented: (materialId, oriented) =>
+    set(
+      produce((draft: SceneState) => {
+        const m = draft.scene.materials[materialId];
+        if (m) {
+          const snap = takeSnapshot(draft);
+          m.oriented = oriented;
+          if (!oriented) {
+            // Retirer orientationDeg si on désactive oriented
+            delete m.orientationDeg;
+          } else if (m.orientationDeg === undefined) {
+            // Initialiser à 0 par défaut
+            m.orientationDeg = 0;
+          }
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+        }
+      }),
+    ),
+
+  rotateSelected: (deltaDeg) =>
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length === 0) return;
+
+        // Groupe (>1 pièce) → rotation rigide autour du pivot commun
+        if (selectedIds.length > 1) {
+          const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
+            deltaDeg: deltaDeg as 90 | -90,
+          });
+          const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
+          const inside = validateInsideScene(candidate);
+
+          if (!overlap.ok || !inside.ok) {
+            draft.ui.flashInvalidAt = Date.now();
+            return; // NO-OP
+          }
+
+          const snap = takeSnapshot(draft);
+          draft.scene = candidate;
+          clearTransientUI(draft.ui);
+          draft.scene.revision++;
+          bumpHandlesEpoch(draft);
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+          // Schedule RBush rebuild for all affected layers
+          const affectedLayers = new Set<ID>();
+          for (const id of selectedIds) {
+            const piece = draft.scene.pieces[id];
+            if (piece) affectedLayers.add(piece.layerId);
+          }
+          for (const layerId of affectedLayers) {
+            scheduleLayerRebuild(layerId);
+          }
+          return;
+        }
+
+        // Solo → rotation simple (pré-validation déjà en place)
+        const nextDegById: Record<ID, Deg> = {};
+        for (const id of selectedIds) {
+          const piece = draft.scene.pieces[id];
+          if (!piece) continue;
+          const cur = (piece.rotationDeg ?? 0) as Deg;
+          nextDegById[id] = (deltaDeg === 90 ? add90(cur) : sub90(cur)) as Deg;
+        }
+
+        const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
+        if (!ok) {
+          draft.ui.flashInvalidAt = Date.now();
+          return; // NO-OP
+        }
+
+        const snap = takeSnapshot(draft);
+        const affectedLayers = new Set<ID>();
+        for (const id of selectedIds) {
+          const piece = draft.scene.pieces[id];
+          if (!piece) continue;
+          piece.rotationDeg = nextDegById[id]!;
+          affectedLayers.add(piece.layerId);
+        }
+
+        clearTransientUI(draft.ui);
+        draft.scene.revision++;
+        bumpHandlesEpoch(draft);
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+        // Schedule RBush rebuild for all affected layers
+        for (const layerId of affectedLayers) {
+          scheduleLayerRebuild(layerId);
+        }
+      }),
+    ),
+
+  setSelectedRotation: (deg) =>
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length === 0) return;
+
+        // Groupe (>1 pièce) → rotation rigide autour du pivot commun
+        if (selectedIds.length > 1) {
+          const target = normDeg(deg) as Deg;
+          const candidate = buildRigidRotationCandidate(draft.scene, selectedIds, {
+            targetDeg: target,
+          });
+          const overlap = validateNoOverlapForCandidateDraft(candidate, selectedIds);
+          const inside = validateInsideScene(candidate);
+
+          if (!overlap.ok || !inside.ok) {
+            draft.ui.flashInvalidAt = Date.now();
+            return; // NO-OP
+          }
+
+          const snap = takeSnapshot(draft);
+          draft.scene = candidate;
+          clearTransientUI(draft.ui);
+          draft.scene.revision++;
+          bumpHandlesEpoch(draft);
+          pushHistory(draft, snap);
+          autosave(takeSnapshot(draft));
+          return;
+        }
+
+        // Solo → rotation simple (pré-validation déjà en place)
+        const target = normDeg(deg) as Deg;
+        const nextDegById: Record<ID, Deg> = {};
+        for (const id of selectedIds) {
+          const piece = draft.scene.pieces[id];
+          if (!piece) continue;
+          nextDegById[id] = target;
+        }
+
+        const ok = rotationWouldBeValid(draft.scene, selectedIds, nextDegById);
+        if (!ok) {
+          draft.ui.flashInvalidAt = Date.now();
+          return; // NO-OP
+        }
+
+        const snap = takeSnapshot(draft);
+        for (const id of selectedIds) {
+          const piece = draft.scene.pieces[id];
+          if (!piece) continue;
+          piece.rotationDeg = target;
+        }
+
+        clearTransientUI(draft.ui);
+        draft.scene.revision++;
+        bumpHandlesEpoch(draft);
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }),
+    ),
+
+  duplicateSelected: () => {
+    // Check if target layer(s) are locked (progressive unlock gating)
+    const currentState = useSceneStore.getState();
+    const selectedIds =
+      currentState.ui.selectedIds ??
+      (currentState.ui.selectedId ? [currentState.ui.selectedId] : []);
+    if (selectedIds.length === 0) return;
+
+    const fixedIds = currentState.scene.fixedLayerIds;
+    if (fixedIds) {
+      // Check if any selected piece is on a locked layer
+      for (const id of selectedIds) {
+        const piece = currentState.scene.pieces[id];
+        if (!piece) continue;
+
+        let targetLayerName: LayerName | null = null;
+        if (piece.layerId === fixedIds.C2) targetLayerName = 'C2';
+        else if (piece.layerId === fixedIds.C3) targetLayerName = 'C3';
+
+        if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+          const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+          set(
+            produce((draft: SceneState) => {
+              draft.ui.toast = {
+                message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+                until: Date.now() + 3000,
+              };
+            }),
+          );
+          return;
+        }
+      }
+    }
+
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length === 0) return;
+
+        const snap = takeSnapshot(draft);
+
+        const newIds: ID[] = [];
+
+        if (selectedIds.length === 1) {
+          // Duplication simple
+          const originalPiece = draft.scene.pieces[selectedIds[0]];
+          if (!originalPiece) return;
 
           const newId = genId('piece');
+          const bbox = pieceBBox(originalPiece); // Use rotation-aware AABB
+
+          // Try to find collision-free position with escape mechanism
+          const maxEscapeAttempts = 5;
+          let finalX = originalPiece.position.x + DUPLICATE_OFFSET_MM;
+          let finalY = originalPiece.position.y + DUPLICATE_OFFSET_MM;
+
+          for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
+            const testX =
+              originalPiece.position.x + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+            const testY =
+              originalPiece.position.y + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+
+            const clamped = clampToScene(
+              testX,
+              testY,
+              bbox.w,
+              bbox.h,
+              draft.scene.size.w,
+              draft.scene.size.h,
+            );
+
+            // Check if this position collides with same-layer pieces
+            const testPiece: Piece = {
+              ...originalPiece,
+              id: newId,
+              position: { x: clamped.x, y: clamped.y },
+            };
+
+            const testBBox = pieceBBox(testPiece);
+            let hasCollision = false;
+
+            // Check collision with same-layer pieces only
+            for (const [pid, p] of Object.entries(draft.scene.pieces)) {
+              if (p.layerId !== originalPiece.layerId) continue;
+              const pBBox = pieceBBox(p);
+              if (rectsOverlap(testBBox, pBBox)) {
+                hasCollision = true;
+                break;
+              }
+            }
+
+            if (!hasCollision) {
+              // Found collision-free position
+              finalX = clamped.x;
+              finalY = clamped.y;
+              break;
+            }
+
+            // Continue to next attempt
+            finalX = clamped.x;
+            finalY = clamped.y;
+          }
+
           const newPiece: Piece = {
             ...originalPiece,
             id: newId,
-            position: {
-              x: originalPiece.position.x + groupDx,
-              y: originalPiece.position.y + groupDy,
-            },
+            position: { x: finalX, y: finalY },
           };
 
           draft.scene.pieces[newId] = newPiece;
           draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
           newIds.push(newId);
+        } else {
+          // Duplication de groupe with escape mechanism
+          const bbox = groupBBox(draft.scene, selectedIds);
+
+          // Try to find collision-free position for group
+          const maxEscapeAttempts = 5;
+          let finalGroupDx = DUPLICATE_OFFSET_MM;
+          let finalGroupDy = DUPLICATE_OFFSET_MM;
+
+          for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
+            const testGroupX = bbox.x + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+            const testGroupY = bbox.y + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+
+            const clamped = clampToScene(
+              testGroupX,
+              testGroupY,
+              bbox.w,
+              bbox.h,
+              draft.scene.size.w,
+              draft.scene.size.h,
+            );
+            const groupDx = clamped.x - bbox.x;
+            const groupDy = clamped.y - bbox.y;
+
+            // Check if any piece in the group would collide
+            let hasCollision = false;
+
+            for (const selectedId of selectedIds) {
+              const originalPiece = draft.scene.pieces[selectedId];
+              if (!originalPiece) continue;
+
+              const testPiece: Piece = {
+                ...originalPiece,
+                id: genId('piece'),
+                position: {
+                  x: originalPiece.position.x + groupDx,
+                  y: originalPiece.position.y + groupDy,
+                },
+              };
+
+              const testBBox = pieceBBox(testPiece);
+
+              // Check collision with same-layer pieces only (excluding other group members)
+              for (const [pid, p] of Object.entries(draft.scene.pieces)) {
+                if (selectedIds.includes(pid)) continue; // Skip other group members
+                if (p.layerId !== originalPiece.layerId) continue; // Same-layer only
+                const pBBox = pieceBBox(p);
+                if (rectsOverlap(testBBox, pBBox)) {
+                  hasCollision = true;
+                  break;
+                }
+              }
+
+              if (hasCollision) break;
+            }
+
+            if (!hasCollision) {
+              // Found collision-free position
+              finalGroupDx = groupDx;
+              finalGroupDy = groupDy;
+              break;
+            }
+
+            // Continue to next attempt
+            finalGroupDx = groupDx;
+            finalGroupDy = groupDy;
+          }
+
+          // Create duplicated group with final position
+          for (const selectedId of selectedIds) {
+            const originalPiece = draft.scene.pieces[selectedId];
+            if (!originalPiece) continue;
+
+            const newId = genId('piece');
+            const newPiece: Piece = {
+              ...originalPiece,
+              id: newId,
+              position: {
+                x: originalPiece.position.x + finalGroupDx,
+                y: originalPiece.position.y + finalGroupDy,
+              },
+            };
+
+            draft.scene.pieces[newId] = newPiece;
+            draft.scene.layers[originalPiece.layerId]?.pieces.push(newId);
+            newIds.push(newId);
+          }
         }
-      }
 
-      // Clear transient UI before changing selection
-      clearTransientUI(draft.ui);
+        // Clear transient UI before changing selection
+        clearTransientUI(draft.ui);
 
-      draft.ui.selectedIds = newIds;
-      draft.ui.selectedId = newIds[0];
-      draft.ui.primaryId = newIds[0];
+        draft.ui.selectedIds = newIds;
+        draft.ui.selectedId = newIds[0];
+        draft.ui.primaryId = newIds[0];
 
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  moveLayerForward: (layerId) =>
-    set(produce((draft: SceneState) => {
-      const idx = draft.scene.layerOrder.indexOf(layerId);
-      if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
-
-      const snap = takeSnapshot(draft);
-
-      // Swap with next
-      [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx + 1]] = [
-        draft.scene.layerOrder[idx + 1],
-        draft.scene.layerOrder[idx],
-      ];
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  moveLayerBackward: (layerId) =>
-    set(produce((draft: SceneState) => {
-      const idx = draft.scene.layerOrder.indexOf(layerId);
-      if (idx === -1 || idx === 0) return;
-
-      const snap = takeSnapshot(draft);
-
-      // Swap with previous
-      [draft.scene.layerOrder[idx], draft.scene.layerOrder[idx - 1]] = [
-        draft.scene.layerOrder[idx - 1],
-        draft.scene.layerOrder[idx],
-      ];
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  moveLayerToFront: (layerId) =>
-    set(produce((draft: SceneState) => {
-      const idx = draft.scene.layerOrder.indexOf(layerId);
-      if (idx === -1 || idx === draft.scene.layerOrder.length - 1) return;
-
-      const snap = takeSnapshot(draft);
-
-      // Remove and push to end
-      draft.scene.layerOrder.splice(idx, 1);
-      draft.scene.layerOrder.push(layerId);
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  moveLayerToBack: (layerId) =>
-    set(produce((draft: SceneState) => {
-      const idx = draft.scene.layerOrder.indexOf(layerId);
-      if (idx === -1 || idx === 0) return;
-
-      const snap = takeSnapshot(draft);
-
-      // Remove and unshift to beginning
-      draft.scene.layerOrder.splice(idx, 1);
-      draft.scene.layerOrder.unshift(layerId);
-
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }),
+    );
+  },
 
   undo: () =>
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.history || draft.ui.history.past.length === 0) return;
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.history || draft.ui.history.past.length === 0) return;
 
-      const currentSnap = takeSnapshot(draft);
-      const prevSnap = draft.ui.history.past.pop();
-      if (!prevSnap) return;
+        const currentSnap = takeSnapshot(draft);
+        const prevSnap = draft.ui.history.past.pop();
+        if (!prevSnap) return;
 
-      draft.ui.history.future.push(currentSnap);
-      applySnapshot(draft, prevSnap);
-      draft.scene.revision++;
-      autosave(prevSnap);
-    })),
+        draft.ui.history.future.push(currentSnap);
+        applySnapshot(draft, prevSnap);
+        draft.scene.revision++;
+        autosave(prevSnap);
+      }),
+    ),
 
   redo: () =>
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.history || draft.ui.history.future.length === 0) return;
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.history || draft.ui.history.future.length === 0) return;
 
-      const currentSnap = takeSnapshot(draft);
-      const nextSnap = draft.ui.history.future.pop();
-      if (!nextSnap) return;
+        const currentSnap = takeSnapshot(draft);
+        const nextSnap = draft.ui.history.future.pop();
+        if (!nextSnap) return;
 
-      draft.ui.history.past.push(currentSnap);
-      applySnapshot(draft, nextSnap);
-      draft.scene.revision++;
-      autosave(nextSnap);
-    })),
+        draft.ui.history.past.push(currentSnap);
+        applySnapshot(draft, nextSnap);
+        draft.scene.revision++;
+        autosave(nextSnap);
+      }),
+    ),
 
   toSceneFileV1: () => {
     const state = useSceneStore.getState();
@@ -1982,703 +3000,944 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
   },
 
   importSceneFileV1: (file) =>
-    set(produce((draft: SceneState) => {
-      // Validate file format
-      if (!isSceneFileV1(file)) {
-        throw new Error('Invalid scene file format (version non supportée ou structure invalide)');
-      }
+    set(
+      produce((draft: SceneState) => {
+        // Validate file format
+        if (!isSceneFileV1(file)) {
+          throw new Error(
+            'Invalid scene file format (version non supportée ou structure invalide)',
+          );
+        }
 
-      // Normalize the file
-      const normalized = normalizeSceneFileV1(file);
+        // Normalize the file
+        const normalized = normalizeSceneFileV1(file);
 
-      // Take snapshot before import for history
-      const snap = takeSnapshot(draft);
+        // Take snapshot before import for history
+        const snap = takeSnapshot(draft);
 
-      // Apply the imported scene
-      applySnapshot(draft, {
-        scene: normalized.scene,
-        ui: normalized.ui ?? {},
-      });
+        // Apply the imported scene (ensure revision is set for SceneDraft compatibility)
+        applySnapshot(draft, {
+          scene: { ...normalized.scene, revision: 0 } as any, // SceneFileV1 → SceneDraft: add revision
+          ui: normalized.ui ?? {},
+        });
 
-      // Clear transient UI after scene replacement
-      clearTransientUI(draft.ui);
+        // Ensure fixedLayerIds after import
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
+        // Migrate to 3 fixed layers (idempotent)
+        const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+        if (migrated) {
+          draft.ui.toast = {
+            message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+            until: Date.now() + 3000,
+          };
+        }
 
-      draft.scene.revision++;
-      // Push to history and autosave
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
+        // Clear transient UI after scene replacement
+        clearTransientUI(draft.ui);
+
+        // Set activeLayer to C1 if undefined
+        if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+          draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+        }
+
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
+        }
+
+        draft.scene.revision++;
+        // Push to history and autosave
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }),
+    ),
 
   createDraft: () =>
-    set(produce((draft: SceneState) => {
-      const id = genId('draft');
-      const name = newDraftName();
-      const data = useSceneStore.getState().toSceneFileV1();
-      const jsonString = JSON.stringify(data);
+    set(
+      produce((draft: SceneState) => {
+        const id = genId('draft');
+        const name = newDraftName();
+        const data = useSceneStore.getState().toSceneFileV1();
+        const jsonString = JSON.stringify(data);
 
-      const meta: DraftMeta = {
-        id,
-        name,
-        updatedAt: new Date().toISOString(),
-        bytes: jsonString.length,
-      };
-
-      saveDraft(meta, data);
-    })),
-
-  saveToDraft: (id) =>
-    set(produce((draft: SceneState) => {
-      const data = useSceneStore.getState().toSceneFileV1();
-      const jsonString = JSON.stringify(data);
-
-      const existing = loadDraft(id);
-      if (!existing) return;
-
-      const meta: DraftMeta = {
-        id,
-        name: existing.meta.name,
-        updatedAt: new Date().toISOString(),
-        bytes: jsonString.length,
-      };
-
-      saveDraft(meta, data);
-    })),
-
-  loadDraftById: (id) =>
-    set(produce((draft: SceneState) => {
-      const loaded = loadDraft(id);
-      if (!loaded) {
-        console.warn(`[drafts] Draft ${id} not found`);
-        return;
-      }
-
-      // Validate loaded data
-      if (!isSceneFileV1(loaded.data)) {
-        console.warn(`[drafts] Draft ${id} has invalid format`);
-        return;
-      }
-
-      // Normalize the file
-      const normalized = normalizeSceneFileV1(loaded.data);
-
-      // Take snapshot before load for history
-      const snap = takeSnapshot(draft);
-
-      // Apply the loaded scene
-      applySnapshot(draft, {
-        scene: normalized.scene,
-        ui: normalized.ui ?? {},
-      });
-
-      // Clear transient UI after scene replacement
-      clearTransientUI(draft.ui);
-
-      draft.scene.revision++;
-      // Push to history and autosave
-      pushHistory(draft, snap);
-      autosave(takeSnapshot(draft));
-    })),
-
-  renameDraft: (id, name) =>
-    set(produce((draft: SceneState) => {
-      upsertDraftName(id, name);
-    })),
-
-  deleteDraftById: (id) =>
-    set(produce((draft: SceneState) => {
-      deleteDraftFromStorage(id);
-    })),
-
-  startResize: (pieceId, handle, startPointerMm) =>
-    set(produce((draft: SceneState) => {
-      const piece = draft.scene.pieces[pieceId];
-      if (!piece) return;
-
-      // Capture pre-resize state for history
-      const snapshot = takeSnapshot(draft);
-
-      // Use center of piece as default start pointer if not provided
-      const defaultStart = {
-        x: piece.position.x + piece.size.w / 2,
-        y: piece.position.y + piece.size.h / 2,
-      };
-
-      // Calculate baseline gaps for neighboring pieces (for orthogonal filtering)
-      const baseline: Record<string, { axis: 'X' | 'Y'; gap: number }> = {};
-      const sceneV1 = projectDraftToV1({ scene: draft.scene });
-      const pieceAABB = getRotatedAABB({
-        id: pieceId,
-        x: piece.position.x,
-        y: piece.position.y,
-        w: piece.size.w,
-        h: piece.size.h,
-        rot: piece.rotationDeg ?? 0,
-        layerId: piece.layerId,
-        materialId: piece.materialId,
-        joined: piece.joined,
-      });
-
-      // Find all pieces on same layer (excluding self)
-      const neighbors = sceneV1.pieces.filter(p => p.id !== pieceId && p.layerId === piece.layerId);
-
-      for (const neighbor of neighbors) {
-        const neighborAABB = getRotatedAABB(neighbor);
-        const gap = aabbGapLocal(pieceAABB, neighborAABB);
-        const axis = dominantSpacingAxisLocal(pieceAABB, neighborAABB);
-        baseline[neighbor.id] = { axis, gap };
-      }
-
-      draft.ui.resizing = {
-        pieceId,
-        handle,
-        origin: {
-          x: piece.position.x,
-          y: piece.position.y,
-          w: piece.size.w,
-          h: piece.size.h,
-        },
-        startPointerMm: startPointerMm || defaultStart,
-        rotationDeg: piece.rotationDeg,
-        snapshot,
-        baseline,
-      };
-    })),
-
-  updateResize: (pointerMm) =>
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.resizing;
-      if (!resizing) return;
-
-      const piece = draft.scene.pieces[resizing.pieceId];
-      if (!piece) return;
-
-      const lockEdge = draft.ui.lockEdge ?? false;
-
-      // Apply handle with rotation support
-      const newRect = applyHandleWithRotation(
-        resizing.origin,
-        resizing.handle,
-        resizing.startPointerMm,
-        pointerMm,
-        resizing.rotationDeg,
-        { minW: 5, minH: 5, lockEdge }
-      );
-
-      // Clamp to scene bounds
-      const sceneW = draft.scene.size.w;
-      const sceneH = draft.scene.size.h;
-
-      let { x, y, w, h } = newRect;
-
-      // Ensure rect stays within scene
-      if (x < 0) {
-        w += x; // Reduce width by amount outside
-        x = 0;
-      }
-      if (y < 0) {
-        h += y; // Reduce height by amount outside
-        y = 0;
-      }
-      if (x + w > sceneW) {
-        w = sceneW - x;
-      }
-      if (y + h > sceneH) {
-        h = sceneH - y;
-      }
-
-      // Reapply min size after clamping
-      w = Math.max(5, w);
-      h = Math.max(5, h);
-
-      // Snap to pieces (edges and centers)
-      const candidateRect = { x, y, w, h };
-      const snapResult = snapToPieces(draft.scene, candidateRect, 5, resizing.pieceId);
-      draft.ui.guides = snapResult.guides;
-
-      x = snapResult.x;
-      y = snapResult.y;
-
-      // Snap to grid if enabled
-      if (draft.ui.snap10mm) {
-        x = snapTo10mm(x);
-        y = snapTo10mm(y);
-        w = snapTo10mm(w);
-        h = snapTo10mm(h);
-      }
-
-      // Final minSize enforcement (5mm always, regardless of snap state)
-      // Must respect lockEdge: the opposite edge should stay fixed
-      const MIN_SIZE = 5;
-
-      if (w < MIN_SIZE) {
-        const deficit = MIN_SIZE - w;
-        w = MIN_SIZE;
-
-        // Adjust position to keep locked edge fixed
-        if (lockEdge) {
-          // If handle includes 'w' (moving left edge), adjust x left
-          if (resizing.handle.includes('w')) {
-            x -= deficit;
-          }
-          // If handle includes 'e' (moving right edge), x stays (right edge moved)
-          // No adjustment needed - locked left edge stays at x
-        }
-      }
-
-      if (h < MIN_SIZE) {
-        const deficit = MIN_SIZE - h;
-        h = MIN_SIZE;
-
-        // Adjust position to keep locked edge fixed
-        if (lockEdge) {
-          // If handle includes 'n' (moving top edge), adjust y up
-          if (resizing.handle.includes('n')) {
-            y -= deficit;
-          }
-          // If handle includes 's' (moving bottom edge), y stays (bottom edge moved)
-          // No adjustment needed - locked top edge stays at y
-        }
-      }
-
-      // Update piece (without history - preview only)
-      piece.position.x = x;
-      piece.position.y = y;
-      piece.size.w = w;
-      piece.size.h = h;
-
-      // Sync to spatial index if flag enabled
-      if (window.__flags?.USE_GLOBAL_SPATIAL) {
-        syncPieceToIndex(resizing.pieceId, { x, y, w, h });
-      }
-
-      // Calculer transientBBox pour tooltip temps réel pendant resize
-      draft.ui.transientBBox = { x, y, w, h, rotationDeg: piece.rotationDeg };
-      draft.ui.isTransientActive = true;
-
-      // Capture resizing piece ID and candidate geometry before async operation
-      // (Immer proxy becomes invalid after produce)
-      const resizingPieceId = resizing.pieceId;
-      const candidateGeometry = {
-        x,
-        y,
-        w,
-        h,
-        rotationDeg: piece.rotationDeg ?? 0,
-      };
-
-      // EPS throttle: only validate if cursor moved ≥ EPS_UI_MM since last validation
-      // First update (no last validation) always validates
-      const lastValidateMm = resizing._lastResizeValidateMm;
-      const shouldValidate = !lastValidateMm || distance(pointerMm, lastValidateMm) >= EPS_UI_MM;
-
-      if (shouldValidate) {
-        // Update last validation position
-        draft.ui.resizing!._lastResizeValidateMm = { x: pointerMm.x, y: pointerMm.y };
-      }
-
-      // Validate resize preview asynchronously (don't block UI)
-      // Skip validation if cursor movement below EPS threshold
-      if (shouldValidate) {
-        Promise.resolve().then(async () => {
-          const currentState = useSceneStore.getState();
-
-          // Only validate if still resizing the same piece
-          if (currentState.ui.resizing?.pieceId !== resizingPieceId) return;
-
-        // Project current scene to V1 for validation
-        const sceneV1 = projectDraftToV1({ scene: currentState.scene });
-
-        // Build ResizeContext for filtering false positives
-        const resizeContext: ResizeContext = {
-          moved: handleToMoved(currentState.ui.resizing!.handle),
-          eps: 0.10,
-          baseline: currentState.ui.resizing!.baseline,
+        const meta: DraftMeta = {
+          id,
+          name,
+          updatedAt: new Date().toISOString(),
+          bytes: jsonString.length,
         };
 
-        // Validate candidate geometry (not store state) with resize context
-        const collisionResult = collisionsForCandidate(resizingPieceId, candidateGeometry, sceneV1, resizeContext);
-        const spacingProblems = spacingForCandidate(resizingPieceId, candidateGeometry, sceneV1, resizeContext);
+        saveDraft(meta, data);
+      }),
+    ),
 
-        // Combine problems
-        const pieceProblems: Problem[] = [];
+  saveToDraft: (id) =>
+    set(
+      produce((draft: SceneState) => {
+        const data = useSceneStore.getState().toSceneFileV1();
+        const jsonString = JSON.stringify(data);
 
-        if (collisionResult.overlap) {
-          // Add overlap problems for each colliding neighbor
-          for (const neighborId of collisionResult.neighbors) {
-            pieceProblems.push({
-              code: 'overlap_same_layer',
-              severity: 'BLOCK',
-              pieceId: resizingPieceId,
-              message: 'Pieces overlap on the same layer',
-              meta: { otherPieceId: neighborId },
-            });
+        const existing = loadDraft(id);
+        if (!existing) return;
+
+        const meta: DraftMeta = {
+          id,
+          name: existing.meta.name,
+          updatedAt: new Date().toISOString(),
+          bytes: jsonString.length,
+        };
+
+        saveDraft(meta, data);
+      }),
+    ),
+
+  loadDraftById: (id) =>
+    set(
+      produce((draft: SceneState) => {
+        const loaded = loadDraft(id);
+        if (!loaded) {
+          console.warn(`[drafts] Draft ${id} not found`);
+          return;
+        }
+
+        // Validate loaded data
+        if (!isSceneFileV1(loaded.data)) {
+          console.warn(`[drafts] Draft ${id} has invalid format`);
+          return;
+        }
+
+        // Normalize the file
+        const normalized = normalizeSceneFileV1(loaded.data);
+
+        // Take snapshot before load for history
+        const snap = takeSnapshot(draft);
+
+        // Apply the loaded scene (ensure revision is set for SceneDraft compatibility)
+        applySnapshot(draft, {
+          scene: { ...normalized.scene, revision: 0 } as any, // SceneFileV1 → SceneDraft: add revision
+          ui: normalized.ui ?? {},
+        });
+
+        // Ensure fixedLayerIds after load
+        ensureFixedLayerIds(draft);
+        // Canonicalize layer order to [C1, C2, C3, ...legacy]
+        canonicalizeLayerOrder(draft);
+        // Migrate to 3 fixed layers (idempotent)
+        const migrated = migrateSceneToThreeFixedLayers(draft.scene, new Date().toISOString());
+        if (migrated) {
+          draft.ui.toast = {
+            message: 'Scène héritée : pièces des couches C4+ regroupées sur C3 (migration v1)',
+            until: Date.now() + 3000,
+          };
+        }
+
+        // Clear transient UI after scene replacement
+        clearTransientUI(draft.ui);
+
+        // Set activeLayer to C1 if undefined
+        if (!draft.ui.activeLayer && draft.scene.fixedLayerIds) {
+          draft.ui.activeLayer = draft.scene.fixedLayerIds.C1;
+        }
+
+        // Rebuild RBush index for all layers
+        layeredRBush.clear();
+        for (const layer of Object.values(draft.scene.layers)) {
+          rebuildLayerIndex(layer.id, draft.scene.pieces);
+        }
+
+        draft.scene.revision++;
+        // Push to history and autosave
+        pushHistory(draft, snap);
+        autosave(takeSnapshot(draft));
+      }),
+    ),
+
+  renameDraft: (id, name) =>
+    set(
+      produce((draft: SceneState) => {
+        upsertDraftName(id, name);
+      }),
+    ),
+
+  deleteDraftById: (id) =>
+    set(
+      produce((draft: SceneState) => {
+        deleteDraftFromStorage(id);
+      }),
+    ),
+
+  startResize: (pieceId, handle, startPointerMm) =>
+    set(
+      produce((draft: SceneState) => {
+        const piece = draft.scene.pieces[pieceId];
+        if (!piece) return;
+
+        // GUARD: Only allow resize if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) return;
+        if (draft.ui.layerLocked?.[piece.layerId]) return;
+
+        // Capture pre-resize state for history
+        const snapshot = takeSnapshot(draft);
+
+        // Use center of piece as default start pointer if not provided
+        const defaultStart = {
+          x: piece.position.x + piece.size.w / 2,
+          y: piece.position.y + piece.size.h / 2,
+        };
+
+        // Calculate baseline gaps for neighboring pieces (for orthogonal filtering)
+        const baseline: Record<string, { axis: 'X' | 'Y'; gap: number }> = {};
+        const sceneV1 = projectDraftToV1({ scene: draft.scene });
+        const pieceV1 = sceneV1.pieces.find((p) => p.id === pieceId)!; // Convert to V1 format for getRotatedAABB
+        const pieceAABB = getRotatedAABB(pieceV1);
+
+        // Find all pieces on same layer (excluding self)
+        const neighbors = sceneV1.pieces.filter(
+          (p) => p.id !== pieceId && p.layerId === piece.layerId,
+        );
+
+        for (const neighbor of neighbors) {
+          const neighborAABB = getRotatedAABB(neighbor);
+          const gap = aabbGapLocal(pieceAABB, neighborAABB);
+          const axis = dominantSpacingAxisLocal(pieceAABB, neighborAABB);
+          baseline[neighbor.id] = { axis, gap };
+        }
+
+        draft.ui.resizing = {
+          pieceId,
+          handle,
+          origin: {
+            x: piece.position.x,
+            y: piece.position.y,
+            w: piece.size.w,
+            h: piece.size.h,
+          },
+          startPointerMm: startPointerMm || defaultStart,
+          rotationDeg: piece.rotationDeg,
+          snapshot,
+          baseline,
+        };
+      }),
+    ),
+
+  updateResize: (pointerMm) =>
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.resizing;
+        if (!resizing) return;
+
+        const piece = draft.scene.pieces[resizing.pieceId];
+        if (!piece) return;
+
+        // DEV: Log resize guard checks
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          const willBlockLayer = draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer;
+          const willBlockLocked = draft.ui.layerLocked?.[piece.layerId] ?? false;
+          console.log('[RESIZE_GUARD]', {
+            pieceId: resizing.pieceId,
+            activeLayer: draft.ui.activeLayer,
+            pieceLayer: piece.layerId,
+            locked: willBlockLocked,
+            willBlock: willBlockLayer || willBlockLocked,
+          });
+        }
+
+        // GUARD: Only allow resize if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) return;
+        if (draft.ui.layerLocked?.[piece.layerId]) return;
+
+        const lockEdge = draft.ui.lockEdge ?? false;
+
+        // Apply handle with rotation support
+        const newRect = applyHandleWithRotation(
+          resizing.origin,
+          resizing.handle,
+          resizing.startPointerMm,
+          pointerMm,
+          resizing.rotationDeg,
+          { minW: 5, minH: 5, lockEdge },
+        );
+
+        // Clamp to scene bounds
+        const sceneW = draft.scene.size.w;
+        const sceneH = draft.scene.size.h;
+
+        let { x, y, w, h } = newRect;
+
+        // Ensure rect stays within scene
+        if (x < 0) {
+          w += x; // Reduce width by amount outside
+          x = 0;
+        }
+        if (y < 0) {
+          h += y; // Reduce height by amount outside
+          y = 0;
+        }
+        if (x + w > sceneW) {
+          w = sceneW - x;
+        }
+        if (y + h > sceneH) {
+          h = sceneH - y;
+        }
+
+        // Reapply min size after clamping
+        w = Math.max(5, w);
+        h = Math.max(5, h);
+
+        // Snap to pieces (edges and centers)
+        const candidateRect = { x, y, w, h };
+        const snapResult = snapToPieces(draft.scene, candidateRect, 5, resizing.pieceId);
+        draft.ui.guides = snapResult.guides;
+
+        x = snapResult.x;
+        y = snapResult.y;
+
+        // Snap to grid if enabled
+        if (draft.ui.snap10mm) {
+          x = snapTo10mm(x);
+          y = snapTo10mm(y);
+          w = snapTo10mm(w);
+          h = snapTo10mm(h);
+        }
+
+        // Final minSize enforcement (5mm always, regardless of snap state)
+        // Must respect lockEdge: the opposite edge should stay fixed
+        const MIN_SIZE = 5;
+
+        if (w < MIN_SIZE) {
+          const deficit = MIN_SIZE - w;
+          w = MIN_SIZE;
+
+          // Adjust position to keep locked edge fixed
+          if (lockEdge) {
+            // If handle includes 'w' (moving left edge), adjust x left
+            if (resizing.handle.includes('w')) {
+              x -= deficit;
+            }
+            // If handle includes 'e' (moving right edge), x stays (right edge moved)
+            // No adjustment needed - locked left edge stays at x
           }
         }
 
-        // Add spacing problems
-        pieceProblems.push(...spacingProblems);
+        if (h < MIN_SIZE) {
+          const deficit = MIN_SIZE - h;
+          h = MIN_SIZE;
 
-        const hasBlock = pieceProblems.some(p => p.severity === 'BLOCK');
-
-        // Update ghost state
-        useSceneStore.setState(
-          produce((draft: SceneState) => {
-            // Only update if still resizing the same piece
-            if (draft.ui.resizing?.pieceId !== resizingPieceId) return;
-
-            if (hasBlock) {
-              // Activate ghost mode with problems
-              draft.ui.ghost = {
-                pieceId: resizingPieceId,
-                problems: pieceProblems,
-                startedAt: Date.now(),
-              };
-              incResizeBlockPreview();
-            } else {
-              // Clear ghost if no blocking problems
-              if (draft.ui.ghost?.pieceId === resizingPieceId) {
-                draft.ui.ghost = undefined;
-              }
+          // Adjust position to keep locked edge fixed
+          if (lockEdge) {
+            // If handle includes 'n' (moving top edge), adjust y up
+            if (resizing.handle.includes('n')) {
+              y -= deficit;
             }
-          })
-        );
-        });
-      }
-    })),
+            // If handle includes 's' (moving bottom edge), y stays (bottom edge moved)
+            // No adjustment needed - locked top edge stays at y
+          }
+        }
 
-  endResize: (commit) =>
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.resizing;
-      if (!resizing) return;
+        // Update piece (without history - preview only)
+        piece.position.x = x;
+        piece.position.y = y;
+        piece.size.w = w;
+        piece.size.h = h;
 
-      const piece = draft.scene.pieces[resizing.pieceId];
+        // Sync to spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          syncPieceToIndex(resizing.pieceId, { x, y, w, h });
+        }
 
-      if (commit && piece) {
-        // Check if dimensions actually changed
-        const changed =
-          piece.position.x !== resizing.origin.x ||
-          piece.position.y !== resizing.origin.y ||
-          piece.size.w !== resizing.origin.w ||
-          piece.size.h !== resizing.origin.h;
+        // Calculer transientBBox pour tooltip temps réel pendant resize
+        draft.ui.transientBBox = { x, y, w, h, rotationDeg: piece.rotationDeg };
+        draft.ui.isTransientActive = true;
 
-        // Revalidate candidate geometry before committing
-        // (in case snap or other operations changed the geometry after last async validation)
-        const candidateRect = {
-          x: piece.position.x,
-          y: piece.position.y,
-          w: piece.size.w,
-          h: piece.size.h,
+        // Capture resizing piece ID and candidate geometry before async operation
+        // (Immer proxy becomes invalid after produce)
+        const resizingPieceId = resizing.pieceId;
+        const candidateGeometry = {
+          x,
+          y,
+          w,
+          h,
           rotationDeg: piece.rotationDeg ?? 0,
         };
 
-        // Project scene to V1 for validation
-        const sceneV1 = projectDraftToV1({ scene: draft.scene });
+        // EPS throttle: only validate if cursor moved ≥ EPS_UI_MM since last validation
+        // First update (no last validation) always validates
+        const lastValidateMm = resizing._lastResizeValidateMm;
+        const shouldValidate = !lastValidateMm || distance(pointerMm, lastValidateMm) >= EPS_UI_MM;
 
-        // Build ResizeContext for validation (same as updateResize)
-        const resizeContext: ResizeContext = {
-          moved: handleToMoved(resizing.handle),
-          eps: 0.10,
-          baseline: resizing.baseline,
-        };
+        if (shouldValidate) {
+          // Update last validation position
+          draft.ui.resizing!._lastResizeValidateMm = { x: pointerMm.x, y: pointerMm.y };
+        }
 
-        // Synchronous validation at commit time with resize context
-        const collisionResult = collisionsForCandidate(resizing.pieceId, candidateRect, sceneV1, resizeContext);
-        const spacingProblems = spacingForCandidate(resizing.pieceId, candidateRect, sceneV1, resizeContext);
+        // Validate resize preview asynchronously (don't block UI)
+        // Skip validation if cursor movement below EPS threshold
+        if (shouldValidate) {
+          Promise.resolve().then(async () => {
+            const currentState = useSceneStore.getState();
 
-        // NEW POLICY: Only block on actual overlap (gap < 0), not on spacing WARN
-        // Border-to-border (gap = 0) is allowed during resize
-        const hasOverlap = collisionResult.overlap;
-        // spacingProblems with context should only contain WARN (not BLOCK) for gap >= 0
-        // But check for other BLOCK problems (outside_scene, min_size, etc.)
-        const hasBlock = hasOverlap;
+            // Only validate if still resizing the same piece
+            if (currentState.ui.resizing?.pieceId !== resizingPieceId) return;
 
-        if (hasBlock) {
-          // Don't commit - rollback to origin
-          // User must resize again to valid position
+            // Project current scene to V1 for validation
+            const sceneV1 = projectDraftToV1({ scene: currentState.scene });
+
+            // Build ResizeContext for filtering false positives
+            const resizeContext: ResizeContext = {
+              moved: handleToMoved(currentState.ui.resizing!.handle),
+              eps: 0.1,
+              baseline: currentState.ui.resizing!.baseline,
+            };
+
+            // DEV: Log resize validation input with ghost context
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              console.log('[RESIZE_VALIDATE_INPUT]', {
+                pieceId: resizingPieceId,
+                candidateGeometry,
+                handle: currentState.ui.resizing!.handle,
+                currentGhost: currentState.ui.ghost
+                  ? {
+                      ghostPieceId: currentState.ui.ghost.pieceId,
+                      affects: currentState.ui.ghost.pieceId === resizingPieceId,
+                    }
+                  : null,
+              });
+            }
+
+            // Validate candidate geometry (not store state) with resize context
+            const collisionResult = collisionsForCandidate(
+              resizingPieceId,
+              candidateGeometry,
+              sceneV1,
+              resizeContext,
+            );
+            const spacingProblems = spacingForCandidate(
+              resizingPieceId,
+              candidateGeometry,
+              sceneV1,
+              resizeContext,
+            );
+
+            // Combine problems
+            const pieceProblems: Problem[] = [];
+
+            if (collisionResult.overlap) {
+              // Add overlap problems for each colliding neighbor
+              for (const neighborId of collisionResult.neighbors) {
+                pieceProblems.push({
+                  code: ProblemCode.overlap_same_layer,
+                  severity: 'BLOCK',
+                  pieceId: resizingPieceId,
+                  message: 'Pieces overlap on the same layer',
+                  meta: { otherPieceId: neighborId },
+                });
+              }
+            }
+
+            // Add spacing problems
+            pieceProblems.push(...spacingProblems);
+
+            const hasBlock = pieceProblems.some((p) => p.severity === 'BLOCK');
+            const hasWarn = pieceProblems.some((p) => p.severity === 'WARN');
+
+            // DEV: Comprehensive validation log
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              const piece = sceneV1.pieces.find((p) => p.id === resizingPieceId);
+              const hasCollision = collisionResult.overlap;
+              const hasSpacing = spacingProblems.length > 0;
+
+              console.log('[RESIZE_VALIDATE]', {
+                op: 'resize',
+                pieceId: resizingPieceId,
+                layerId: piece?.layerId,
+                reasons: {
+                  collision: hasCollision,
+                  spacing: hasSpacing,
+                  bounds: false, // Already clamped
+                  supportFast: 'n/a', // No support during resize
+                  supportExact: 'n/a',
+                },
+                setHasBlockFrom: hasBlock
+                  ? hasCollision
+                    ? 'collision'
+                    : hasSpacing
+                      ? 'spacing'
+                      : 'unknown'
+                  : 'none',
+                ghost: hasBlock || hasWarn ? '1' : '0',
+                blockers: hasCollision
+                  ? collisionResult.neighbors.map((nId) => {
+                      const neighbor = sceneV1.pieces.find((p) => p.id === nId);
+                      return {
+                        neighborId: nId,
+                        pieceLayer: piece?.layerId,
+                        neighborLayer: neighbor?.layerId,
+                      };
+                    })
+                  : [],
+                timestamp: Date.now(),
+              });
+            }
+
+            // Update ghost state
+            useSceneStore.setState(
+              produce((draft: SceneState) => {
+                // Only update if still resizing the same piece
+                if (draft.ui.resizing?.pieceId !== resizingPieceId) return;
+
+                if (hasBlock) {
+                  // Activate ghost mode with problems
+                  draft.ui.ghost = {
+                    pieceId: resizingPieceId,
+                    problems: pieceProblems,
+                    startedAt: Date.now(),
+                  };
+                  incResizeBlockPreview();
+                } else {
+                  // Clear ghost if no blocking problems
+                  if (draft.ui.ghost?.pieceId === resizingPieceId) {
+                    draft.ui.ghost = undefined;
+                  }
+                }
+              }),
+            );
+          });
+        }
+
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
+      }),
+    ),
+
+  endResize: (commit) =>
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.resizing;
+        if (!resizing) return;
+
+        const piece = draft.scene.pieces[resizing.pieceId];
+
+        // GUARD: Only allow resize commit if piece is on activeLayer and layer is not locked
+        // If activeLayer is undefined, allow resize (for tests and simple scenes)
+        if (piece && commit) {
+          if (draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer) {
+            commit = false; // Force rollback
+          }
+          if (draft.ui.layerLocked?.[piece.layerId]) {
+            commit = false; // Force rollback
+          }
+        }
+
+        if (commit && piece) {
+          // Check if dimensions actually changed
+          const changed =
+            piece.position.x !== resizing.origin.x ||
+            piece.position.y !== resizing.origin.y ||
+            piece.size.w !== resizing.origin.w ||
+            piece.size.h !== resizing.origin.h;
+
+          // Revalidate candidate geometry before committing
+          // (in case snap or other operations changed the geometry after last async validation)
+          const candidateRect = {
+            x: piece.position.x,
+            y: piece.position.y,
+            w: piece.size.w,
+            h: piece.size.h,
+            rotationDeg: piece.rotationDeg ?? 0,
+          };
+
+          // Project scene to V1 for validation
+          const sceneV1 = projectDraftToV1({ scene: draft.scene });
+
+          // Build ResizeContext for validation (same as updateResize)
+          const resizeContext: ResizeContext = {
+            moved: handleToMoved(resizing.handle),
+            eps: 0.1,
+            baseline: resizing.baseline,
+          };
+
+          // Synchronous validation at commit time with resize context
+          const collisionResult = collisionsForCandidate(
+            resizing.pieceId,
+            candidateRect,
+            sceneV1,
+            resizeContext,
+          );
+          const spacingProblems = spacingForCandidate(
+            resizing.pieceId,
+            candidateRect,
+            sceneV1,
+            resizeContext,
+          );
+
+          // NEW POLICY: Only block on actual overlap (gap < 0), not on spacing WARN
+          // Border-to-border (gap = 0) is allowed during resize
+          const hasOverlap = collisionResult.overlap;
+          // spacingProblems with context should only contain WARN (not BLOCK) for gap >= 0
+          // But check for other BLOCK problems (outside_scene, min_size, etc.)
+          const hasBlock = hasOverlap;
+
+          // Dev logging: log blockers with their layer IDs
+          if (import.meta.env.DEV && hasBlock && (window as any).__DBG_DRAG__) {
+            const piece = sceneV1.pieces.find((p) => p.id === resizing.pieceId);
+            const blockerInfo = collisionResult.neighbors.map((nId) => {
+              const neighbor = sceneV1.pieces.find((p) => p.id === nId);
+              return {
+                neighborId: nId,
+                pieceLayer: piece?.layerId,
+                neighborLayer: neighbor?.layerId,
+              };
+            });
+            console.log('[resize] BLOCK detected at commit:', {
+              pieceId: resizing.pieceId,
+              blockers: blockerInfo,
+              source: 'endResize',
+            });
+          }
+
+          if (hasBlock) {
+            // Don't commit - rollback to origin
+            // User must resize again to valid position
+            piece.position.x = resizing.origin.x;
+            piece.position.y = resizing.origin.y;
+            piece.size.w = resizing.origin.w;
+            piece.size.h = resizing.origin.h;
+
+            draft.ui.toast = {
+              message:
+                'Resize bloqué : chevauchement détecté. Les pièces ne peuvent pas se chevaucher.',
+              until: Date.now() + 3000,
+            };
+
+            // Clear ghost and resizing state
+            draft.ui.ghost = undefined;
+            draft.ui.resizing = undefined;
+            draft.ui.guides = undefined;
+
+            incResizeBlockCommitBlocked();
+            return;
+          }
+
+          if (changed) {
+            // No BLOCK problems - commit normally
+            // Push pre-resize snapshot to history
+            draft.scene.revision++;
+            pushHistory(draft, resizing.snapshot);
+            autosave(takeSnapshot(draft));
+
+            // Clear ghost if present
+            if (draft.ui.ghost?.pieceId === resizing.pieceId) {
+              draft.ui.ghost = undefined;
+            }
+
+            incResizeBlockCommitSuccess();
+
+            // Schedule RBush rebuild for this layer
+            scheduleLayerRebuild(piece.layerId);
+
+            // Trigger exact support recalculation for resized piece
+            // Clone ID to avoid revoked proxy issues
+            const committedIds = [resizing.pieceId];
+
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              console.log('[RESIZE_COMMIT]', { committedIds });
+            }
+
+            // Use queueMicrotask to ensure post-resize state is visible to snapshot
+            queueMicrotask(() => recalculateExactSupport(committedIds));
+          }
+        } else if (!commit && piece) {
+          // Rollback to origin (Escape pressed)
           piece.position.x = resizing.origin.x;
           piece.position.y = resizing.origin.y;
           piece.size.w = resizing.origin.w;
           piece.size.h = resizing.origin.h;
 
-          draft.ui.toast = {
-            message: 'Resize bloqué : chevauchement détecté. Les pièces ne peuvent pas se chevaucher.',
-            until: Date.now() + 3000,
-          };
-
-          // Clear ghost and resizing state
-          draft.ui.ghost = undefined;
-          draft.ui.resizing = undefined;
-          draft.ui.guides = undefined;
-
-          incResizeBlockCommitBlocked();
-          return;
-        }
-
-        if (changed) {
-          // No BLOCK problems - commit normally
-          // Push pre-resize snapshot to history
-          draft.scene.revision++;
-          pushHistory(draft, resizing.snapshot);
-          autosave(takeSnapshot(draft));
-
-          // Clear ghost if present
+          // Clear ghost on rollback
           if (draft.ui.ghost?.pieceId === resizing.pieceId) {
             draft.ui.ghost = undefined;
           }
-
-          incResizeBlockCommitSuccess();
         }
-      } else if (!commit && piece) {
-        // Rollback to origin (Escape pressed)
-        piece.position.x = resizing.origin.x;
-        piece.position.y = resizing.origin.y;
-        piece.size.w = resizing.origin.w;
-        piece.size.h = resizing.origin.h;
 
-        // Clear ghost on rollback
-        if (draft.ui.ghost?.pieceId === resizing.pieceId) {
-          draft.ui.ghost = undefined;
-        }
-      }
+        draft.ui.resizing = undefined;
+        draft.ui.guides = undefined;
+        draft.ui.isTransientActive = false;
+        draft.ui.transientBBox = undefined;
+        // Baseline is cleared with resizing state
 
-      draft.ui.resizing = undefined;
-      draft.ui.guides = undefined;
-      draft.ui.isTransientActive = false;
-      draft.ui.transientBBox = undefined;
-      // Baseline is cleared with resizing state
-    })),
+        // Flush pending spatial query counts
+        flushQueryCounters(draft);
+      }),
+    ),
 
   setLockEdge: (on) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.lockEdge = on;
-    })),
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.lockEdge = on;
+      }),
+    ),
 
   focusPiece: (id) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.effects = draft.ui.effects || {};
-      draft.ui.effects.focusId = id;
-    })),
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.effects = draft.ui.effects || {};
+        draft.ui.effects.focusId = id;
+      }),
+    ),
 
   flashOutline: (id) =>
-    set(produce((draft: SceneState) => {
-      draft.ui.effects = draft.ui.effects || {};
-      draft.ui.effects.flashId = id;
-      draft.ui.effects.flashUntil = Date.now() + 500;
-    })),
+    set(
+      produce((draft: SceneState) => {
+        draft.ui.effects = draft.ui.effects || {};
+        draft.ui.effects.flashId = id;
+        draft.ui.effects.flashUntil = Date.now() + 500;
+      }),
+    ),
 
   startGroupResize: (handle, startPointerMm) =>
-    set(produce((draft: SceneState) => {
-      const selectedIds = draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
-      if (selectedIds.length < 2) return;
+    set(
+      produce((draft: SceneState) => {
+        const selectedIds =
+          draft.ui.selectedIds ?? (draft.ui.selectedId ? [draft.ui.selectedId] : []);
+        if (selectedIds.length < 2) return;
 
-      // Calcul du pivot (centre de la bbox union)
-      const pivot = groupPivot(draft.scene, selectedIds);
+        // Calcul du pivot (centre de la bbox union)
+        const pivot = groupPivot(draft.scene, selectedIds);
 
-      // Snapshot pour rollback possible
-      const startSnapshot = takeSnapshot(draft);
+        // Snapshot pour rollback possible
+        const startSnapshot = takeSnapshot(draft);
 
-      // Point de départ du curseur (ou centre du groupe par défaut)
-      const defaultStart = {
-        x: pivot.x,
-        y: pivot.y,
-      };
-      const startPointer = startPointerMm || defaultStart;
+        // Point de départ du curseur (ou centre du groupe par défaut)
+        const defaultStart = {
+          x: pivot.x,
+          y: pivot.y,
+        };
+        const startPointer = startPointerMm || defaultStart;
 
-      // Rayon initial (distance pivot → curseur)
-      const startRadius = distance(pivot, startPointer);
+        // Rayon initial (distance pivot → curseur)
+        const startRadius = distance(pivot, startPointer);
 
-      // Calculer bbox initiale et diagonale pour precision dynamique
-      const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
-      const groupW = L + R;
-      const groupH = T + B;
-      const groupDiagMm = Math.hypot(groupW, groupH);
-      const bbox: { x: Milli; y: Milli; w: Milli; h: Milli } = {
-        x: (pivot.x - L) as Milli,
-        y: (pivot.y - T) as Milli,
-        w: groupW as Milli,
-        h: groupH as Milli,
-      };
+        // Calculer bbox initiale et diagonale pour precision dynamique
+        const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
+        const groupW = L + R;
+        const groupH = T + B;
+        const groupDiagMm = Math.hypot(groupW, groupH);
+        const bbox: { x: Milli; y: Milli; w: Milli; h: Milli } = {
+          x: (pivot.x - L) as Milli,
+          y: (pivot.y - T) as Milli,
+          w: groupW as Milli,
+          h: groupH as Milli,
+        };
 
-      draft.ui.groupResizing = {
-        isResizing: true,
-        pivot,
-        startSnapshot,
-        startPointer,
-        startRadius,
-        lastScale: 1,
-        preview: {
-          scale: 1,
-          bbox,
-          selectedIds,
-          groupDiagMm,
-        },
-      };
-      draft.ui.isTransientActive = true;
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-    })),
+        draft.ui.groupResizing = {
+          isResizing: true,
+          pivot,
+          startSnapshot,
+          startPointer,
+          startRadius,
+          lastScale: 1,
+          preview: {
+            scale: 1,
+            bbox,
+            selectedIds,
+            groupDiagMm,
+          },
+        };
+        draft.ui.isTransientActive = true;
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+      }),
+    ),
 
   updateGroupResize: (pointerMm, altKey = false) => {
-    // Schedule update via RAF to throttle pointermove events (1 update/frame)
-    scheduleGroupResize(
-      (args) => useSceneStore.getState()._updateGroupResizeRafSafe(args),
-      { pointer: pointerMm, altKey }
-    );
+    // In test: synchronous execution to avoid RAF race conditions
+    // In production: schedule update via RAF to throttle pointermove events (1 update/frame)
+    if (IS_TEST) {
+      useSceneStore.getState()._updateGroupResizeRafSafe({ pointer: pointerMm, altKey });
+    } else {
+      scheduleGroupResize((args) => useSceneStore.getState()._updateGroupResizeRafSafe(args), {
+        pointer: pointerMm,
+        altKey,
+      });
+    }
   },
 
   // RAF-safe internal update (called once per frame, mutates only preview)
-  _updateGroupResizeRafSafe: ({pointer, altKey}: {pointer: {x: Milli; y: Milli}; altKey: boolean}) =>
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.groupResizing;
-      if (!resizing?.isResizing || !resizing.preview) return;
+  _updateGroupResizeRafSafe: ({
+    pointer,
+    altKey,
+  }: {
+    pointer: { x: Milli; y: Milli };
+    altKey: boolean;
+  }) =>
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.groupResizing;
+        if (!resizing?.isResizing || !resizing.preview) return;
 
-      const selectedIds = resizing.preview.selectedIds;
-      if (selectedIds.length < 2) return;
+        const selectedIds = resizing.preview.selectedIds;
+        if (selectedIds.length < 2) return;
 
-      const { pivot, startRadius, preview } = resizing;
+        const { pivot, startRadius, preview } = resizing;
 
-      // Calcul du facteur de scale basé sur la distance radiale
-      const currentRadius = distance(pivot, pointer);
-      const sRaw = currentRadius / Math.max(1 as Milli, startRadius);
+        // Calcul du facteur de scale basé sur la distance radiale
+        const currentRadius = distance(pivot, pointer);
+        const sRaw = currentRadius / Math.max(1 as Milli, startRadius);
 
-      // Dynamic precision based on group size
-      // base = 0.25% of diagonal (min 0.5mm), Alt = 4× finer
-      const groupRadiusMm = startRadius;
-      const base = Math.max(0.5, 0.0025 * preview.groupDiagMm);
-      const precisionMm = altKey ? base * 0.25 : base;
-      const precisionScale = precisionMm / groupRadiusMm;
-      const sSmooth = Math.round(sRaw / precisionScale) * precisionScale;
+        // Dynamic precision based on group size
+        // base = 0.25% of diagonal (min 0.5mm), Alt = 4× finer
+        const groupRadiusMm = startRadius;
+        const base = Math.max(0.5, 0.0025 * preview.groupDiagMm);
+        const precisionMm = altKey ? base * 0.25 : base;
+        const precisionScale = precisionMm / groupRadiusMm;
+        const sSmooth = Math.round(sRaw / precisionScale) * precisionScale;
 
-      // Analytical clamp: calculate max scale to keep group inside scene bounds
-      const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
-      const sceneW = draft.scene.size.w;
-      const sceneH = draft.scene.size.h;
+        // Analytical clamp: calculate max scale to keep group inside scene bounds
+        const { L, R, T, B } = groupExtentsAroundPivot(draft.scene, selectedIds, pivot);
+        const sceneW = draft.scene.size.w;
+        const sceneH = draft.scene.size.h;
 
-      // Calculate max scale factors for each boundary
-      const sMaxLeft = L > 0 ? pivot.x / L : Infinity;
-      const sMaxRight = R > 0 ? (sceneW - pivot.x) / R : Infinity;
-      const sMaxTop = T > 0 ? pivot.y / T : Infinity;
-      const sMaxBottom = B > 0 ? (sceneH - pivot.y) / B : Infinity;
-      const sMaxScene = Math.min(sMaxLeft, sMaxRight, sMaxTop, sMaxBottom);
+        // Calculate max scale factors for each boundary
+        const sMaxLeft = L > 0 ? pivot.x / L : Infinity;
+        const sMaxRight = R > 0 ? (sceneW - pivot.x) / R : Infinity;
+        const sMaxTop = T > 0 ? pivot.y / T : Infinity;
+        const sMaxBottom = B > 0 ? (sceneH - pivot.y) / B : Infinity;
+        const sMaxScene = Math.min(sMaxLeft, sMaxRight, sMaxTop, sMaxBottom);
 
-      // Calculate min scale from piece min sizes (5mm)
-      const MIN_SIZE_MM = 5 as Milli;
-      let sMinPieces = 0;
-      for (const id of selectedIds) {
-        const p = draft.scene.pieces[id];
-        if (!p) continue;
-        const minDim = Math.min(p.size.w, p.size.h);
-        const sMin = MIN_SIZE_MM / minDim;
-        sMinPieces = Math.max(sMinPieces, sMin);
-      }
+        // Calculate min scale from piece min sizes (5mm)
+        const MIN_SIZE_MM = 5 as Milli;
+        let sMinPieces = 0;
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
+          const minDim = Math.min(p.size.w, p.size.h);
+          const sMin = MIN_SIZE_MM / minDim;
+          sMinPieces = Math.max(sMinPieces, sMin);
+        }
 
-      // Apply all clamps: clamp to [sMinPieces, sMaxScene]
-      const scale = Math.max(sMinPieces, Math.min(sMaxScene, sSmooth));
+        // Apply all clamps: clamp to [sMinPieces, sMaxScene]
+        const scale = Math.max(sMinPieces, Math.min(sMaxScene, sSmooth));
 
-      // Update ONLY the preview (no scene mutation during drag)
-      resizing.preview.scale = scale;
-      resizing.preview.bbox = {
-        x: (pivot.x - L * scale) as Milli,
-        y: (pivot.y - T * scale) as Milli,
-        w: ((L + R) * scale) as Milli,
-        h: ((T + B) * scale) as Milli,
-      };
-      resizing.lastScale = scale;
+        // Update ONLY the preview (no scene mutation during drag)
+        resizing.preview.scale = scale;
+        resizing.preview.bbox = {
+          x: (pivot.x - L * scale) as Milli,
+          y: (pivot.y - T * scale) as Milli,
+          w: ((L + R) * scale) as Milli,
+          h: ((T + B) * scale) as Milli,
+        };
+        resizing.lastScale = scale;
 
-      // Compute preview matrices for each piece (live visual transform)
-      // Matrix represents: translate(pivot) * scale(s) * translate(-pivot)
-      // This gives the visual transform without mutating scene.pieces
-      const previewPieces: Array<{
-        id: ID;
-        matrix: { a: number; b: number; c: number; d: number; e: number; f: number };
-      }> = [];
+        // Compute preview matrices for each piece (live visual transform)
+        // Matrix represents: translate(pivot) * scale(s) * translate(-pivot)
+        // This gives the visual transform without mutating scene.pieces
+        const previewPieces: Array<{
+          id: ID;
+          matrix: { a: number; b: number; c: number; d: number; e: number; f: number };
+        }> = [];
 
-      for (const id of selectedIds) {
-        const p = draft.scene.pieces[id];
-        if (!p) continue;
+        for (const id of selectedIds) {
+          const p = draft.scene.pieces[id];
+          if (!p) continue;
 
-        // Simple isotropic scale about pivot
-        // matrix = T(pivot) * S(scale) * T(-pivot)
-        const a = scale;
-        const d = scale;
-        const e = pivot.x * (1 - scale);
-        const f = pivot.y * (1 - scale);
+          // Simple isotropic scale about pivot
+          // matrix = T(pivot) * S(scale) * T(-pivot)
+          const a = scale;
+          const d = scale;
+          const e = pivot.x * (1 - scale);
+          const f = pivot.y * (1 - scale);
 
-        previewPieces.push({
-          id,
-          matrix: { a, b: 0, c: 0, d, e, f },
-        });
-      }
+          previewPieces.push({
+            id,
+            matrix: { a, b: 0, c: 0, d, e, f },
+          });
+        }
 
-      resizing.preview.previewPieces = previewPieces;
-    })),
+        resizing.preview.previewPieces = previewPieces;
+      }),
+    ),
 
   // Legacy implementation disabled
-  _updateGroupResize_disabled: (pointerMm) => {
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.groupResizing;
-      if (!resizing) return;
+  _updateGroupResize_disabled: (pointerMm: { x: Milli; y: Milli }) => {
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.groupResizing;
+        if (!resizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
-      if (selectedIds.length < 2) return;
+        const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as unknown as ID[]); // readonly never[] → ID[]
+        if (selectedIds.length < 2) return;
 
-      const { originBBox, startPointerMm, handle, pieceOrigins } = resizing;
+        // Type-safe access: properties guaranteed by startGroupResize (disabled feature)
+        const resizingExtended = resizing as any; // Legacy _updateGroupResize_disabled, properties not in current type
+        const { originBBox, startPointerMm, handle, pieceOrigins } = resizingExtended;
 
-      // Calculate delta
-      const dx = pointerMm.x - startPointerMm.x;
-      const dy = pointerMm.y - startPointerMm.y;
+        // Calculate delta
+        const dx = pointerMm.x - startPointerMm.x;
+        const dy = pointerMm.y - startPointerMm.y;
 
-      // Apply handle to bbox
-      let newW = originBBox.w;
-      let newH = originBBox.h;
-      let newX = originBBox.x;
-      let newY = originBBox.y;
+        // Apply handle to bbox
+        let newW = originBBox.w;
+        let newH = originBBox.h;
+        let newX = originBBox.x;
+        let newY = originBBox.y;
 
-      if (handle.includes('e')) newW = Math.max(10, originBBox.w + dx);
-      if (handle.includes('w')) { newW = Math.max(10, originBBox.w - dx); newX = originBBox.x + originBBox.w - newW; }
-      if (handle.includes('s')) newH = Math.max(10, originBBox.h + dy);
-      if (handle.includes('n')) { newH = Math.max(10, originBBox.h - dy); newY = originBBox.y + originBBox.h - newH; }
+        if (handle.includes('e')) newW = Math.max(10, originBBox.w + dx);
+        if (handle.includes('w')) {
+          newW = Math.max(10, originBBox.w - dx);
+          newX = originBBox.x + originBBox.w - newW;
+        }
+        if (handle.includes('s')) newH = Math.max(10, originBBox.h + dy);
+        if (handle.includes('n')) {
+          newH = Math.max(10, originBBox.h - dy);
+          newY = originBBox.y + originBBox.h - newH;
+        }
 
-      // Calculate scale factors
-      let sx = newW / Math.max(originBBox.w, 1);
-      let sy = newH / Math.max(originBBox.h, 1);
+        // Calculate scale factors
+        let sx = newW / Math.max(originBBox.w, 1);
+        let sy = newH / Math.max(originBBox.h, 1);
 
-      // Clamp scale factors to respect minSize (5mm) per piece
-      const MIN = 5;
-      for (const id of selectedIds) {
-        const orig = pieceOrigins[id];
-        if (!orig) continue;
-        const candW = orig.w * sx;
-        const candH = orig.h * sy;
-        if (candW < MIN) sx = Math.max(sx, MIN / orig.w);
-        if (candH < MIN) sy = Math.max(sy, MIN / orig.h);
-      }
+        // Clamp scale factors to respect minSize (5mm) per piece
+        const MIN = 5;
+        for (const id of selectedIds) {
+          const orig = pieceOrigins[id];
+          if (!orig) continue;
+          const candW = orig.w * sx;
+          const candH = orig.h * sy;
+          if (candW < MIN) sx = Math.max(sx, MIN / orig.w);
+          if (candH < MIN) sy = Math.max(sy, MIN / orig.h);
+        }
 
-      // Apply scale to each piece around bbox center
-      const cx = originBBox.x + originBBox.w / 2;
-      const cy = originBBox.y + originBBox.h / 2;
+        // Apply scale to each piece around bbox center
+        const cx = originBBox.x + originBBox.w / 2;
+        const cy = originBBox.y + originBBox.h / 2;
 
-      for (const id of selectedIds) {
-        const orig = pieceOrigins[id];
-        if (!orig) continue;
+        for (const id of selectedIds) {
+          const orig = pieceOrigins[id];
+          if (!orig) continue;
 
-        const piece = draft.scene.pieces[id];
-        if (!piece) continue;
+          const piece = draft.scene.pieces[id];
+          if (!piece) continue;
 
-        // Scale position and size around center
-        const nx = cx + (orig.x - cx) * sx;
-        const ny = cy + (orig.y - cy) * sy;
-        const nw = Math.max(MIN, orig.w * sx);
-        const nh = Math.max(MIN, orig.h * sy);
+          // Scale position and size around center
+          const nx = cx + (orig.x - cx) * sx;
+          const ny = cy + (orig.y - cy) * sy;
+          const nw = Math.max(MIN, orig.w * sx);
+          const nh = Math.max(MIN, orig.h * sy);
 
-        piece.position.x = nx;
-        piece.position.y = ny;
-        piece.size.w = nw;
-        piece.size.h = nh;
-      }
+          piece.position.x = nx;
+          piece.position.y = ny;
+          piece.size.w = nw;
+          piece.size.h = nh;
+        }
 
-      // Recompute bbox
-      computeGroupBBox(draft);
-    }));
+        // Recompute bbox
+        computeGroupBBox(draft);
+      }),
+    );
 
     // Trigger async validation after state update
     useSceneStore.getState().validateGroupResize();
@@ -2686,199 +3945,225 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
   // Async validation for group resize (separate function to avoid Immer proxy issues)
   validateGroupResize: () => {
-    Promise.resolve().then(() => {
-      const currentState = useSceneStore.getState();
-      if (!currentState.ui.groupResizing) return;
+    Promise.resolve()
+      .then(() => {
+        const currentState = useSceneStore.getState();
+        if (!currentState.ui.groupResizing) return;
 
-      const resizing = currentState.ui.groupResizing;
-      const selectedIds = currentState.ui.selectedIds ?? (EMPTY_ARR as ID[]);
+        const resizing = currentState.ui.groupResizing;
+        const selectedIds = currentState.ui.selectedIds ?? (EMPTY_ARR as unknown as ID[]); // readonly never[] → ID[]
 
-      // Project current scene to V1 for validation
-      const sceneV1 = projectDraftToV1({ scene: currentState.scene });
+        // Type-safe access: properties guaranteed by startGroupResize (disabled validation feature)
+        const resizingExtended = resizing as any; // Properties not in current groupResizing type
+        const { handle, memberIds, baseline } = resizingExtended;
 
-      // Build validation context
-      const ctx: ResizeContext = {
-        moved: handleToMoved(resizing.handle),
-        kind: 'group',
-        memberIds: resizing.memberIds,
-        baseline: resizing.baseline,
-        eps: 0.5,
-      };
+        // Project current scene to V1 for validation
+        const sceneV1 = projectDraftToV1({ scene: currentState.scene });
 
-      // Validate all members and aggregate problems
-      const allProblems: Problem[] = [];
-
-      for (const id of selectedIds) {
-        const piece = currentState.scene.pieces[id];
-        if (!piece) continue;
-
-        const candidateRect = {
-          x: piece.position.x,
-          y: piece.position.y,
-          w: piece.size.w,
-          h: piece.size.h,
-          rotationDeg: piece.rotationDeg ?? 0,
+        // Build validation context
+        const ctx: ResizeContext = {
+          moved: handleToMoved(handle),
+          kind: 'group',
+          memberIds,
+          baseline,
+          eps: 0.5,
         };
 
-        const collisionResult = collisionsForCandidate(id, candidateRect, sceneV1, ctx);
-        const spacingProblems = spacingForCandidate(id, candidateRect, sceneV1, ctx);
+        // Validate all members and aggregate problems
+        const allProblems: Problem[] = [];
 
-        // Add overlap problems
-        if (collisionResult.overlap) {
-          for (const neighborId of collisionResult.neighbors) {
-            allProblems.push({
-              code: 'overlap_same_layer',
-              level: 'BLOCK',
-              pieceId: id,
-              message: 'Pieces overlap on the same layer',
-              meta: { otherPieceId: neighborId },
-            });
+        for (const id of selectedIds) {
+          const piece = currentState.scene.pieces[id];
+          if (!piece) continue;
+
+          const candidateRect = {
+            x: piece.position.x,
+            y: piece.position.y,
+            w: piece.size.w,
+            h: piece.size.h,
+            rotationDeg: piece.rotationDeg ?? 0,
+          };
+
+          const collisionResult = collisionsForCandidate(id, candidateRect, sceneV1, ctx);
+          const spacingProblems = spacingForCandidate(id, candidateRect, sceneV1, ctx);
+
+          // Add overlap problems
+          if (collisionResult.overlap) {
+            for (const neighborId of collisionResult.neighbors) {
+              allProblems.push({
+                code: ProblemCode.overlap_same_layer,
+                severity: 'BLOCK', // Fixed: 'level' → 'severity' to match Problem type
+                pieceId: id,
+                message: 'Pieces overlap on the same layer',
+                meta: { otherPieceId: neighborId },
+              });
+            }
+          }
+
+          // Add spacing problems
+          allProblems.push(...spacingProblems);
+        }
+
+        const hasBlock = allProblems.some((p) => p.severity === 'BLOCK');
+        const currentGroupBBox = currentState.ui.groupBBox;
+        useSceneStore.getState().updateGroupResizeGhost(
+          hasBlock ? allProblems : null,
+          currentGroupBBox!, // Guaranteed by startGroupResize: groupBBox exists during resize validation
+        );
+      })
+      .catch((err) => {
+        console.warn('[validateGroupResize] error:', err);
+      });
+  },
+
+  updateGroupResizeGhost: (
+    problems: Problem[] | null,
+    groupBBox: { x: Milli; y: Milli; w: Milli; h: Milli },
+  ) =>
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.groupResizing) return;
+
+        const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as unknown as ID[]); // readonly never[] → ID[]
+        if (selectedIds.length < 2) return;
+
+        if (problems && problems.length > 0) {
+          // Set ghost for the first piece in group (for visualization purposes)
+          const firstPieceId = selectedIds[0];
+          draft.ui.ghost = {
+            pieceId: firstPieceId,
+            problems,
+            startedAt: Date.now(),
+          };
+
+          // Track metric for group resize blocking
+          incResizeBlockPreview();
+        } else {
+          // Clear ghost if no problems
+          if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+            draft.ui.ghost = undefined;
           }
         }
 
-        // Add spacing problems
-        allProblems.push(...spacingProblems);
-      }
-
-      const hasBlock = allProblems.some(p => p.level === 'BLOCK');
-      const currentGroupBBox = currentState.ui.groupBBox;
-      useSceneStore.getState().updateGroupResizeGhost(
-        hasBlock ? allProblems : null,
-        currentGroupBBox
-      );
-    }).catch(err => {
-      console.warn('[validateGroupResize] error:', err);
-    });
-  },
-
-  updateGroupResizeGhost: (problems: Problem[] | null, groupBBox: { x: Milli; y: Milli; w: Milli; h: Milli }) =>
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.groupResizing) return;
-
-      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
-      if (selectedIds.length < 2) return;
-
-      if (problems && problems.length > 0) {
-        // Set ghost for the first piece in group (for visualization purposes)
-        const firstPieceId = selectedIds[0];
-        draft.ui.ghost = {
-          pieceId: firstPieceId,
-          problems,
-          startedAt: Date.now(),
-        };
-
-        // Track metric for group resize blocking
-        incResizeBlockPreview();
-      } else {
-        // Clear ghost if no problems
-        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-          draft.ui.ghost = undefined;
-        }
-      }
-
-      // Update groupBBox to keep handles in sync
-      draft.ui.groupBBox = groupBBox;
-    })),
+        // Update groupBBox to keep handles in sync
+        draft.ui.groupBBox = groupBBox;
+      }),
+    ),
 
   endGroupResize: (commit) =>
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.groupResizing;
-      if (!resizing?.isResizing) return;
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.groupResizing;
+        if (!resizing?.isResizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
-      if (selectedIds.length < 2) {
-        draft.ui.groupResizing = undefined;
-        draft.ui.isTransientActive = false;
-        return;
-      }
+        const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as unknown as ID[]); // readonly never[] → ID[]
+        if (selectedIds.length < 2) {
+          draft.ui.groupResizing = undefined;
+          draft.ui.isTransientActive = false;
+          return;
+        }
 
-      if (!commit) {
-        // Cancel: restore from snapshot
-        draft.scene = resizing.startSnapshot.scene;
+        if (!commit) {
+          // Cancel: restore from snapshot
+          draft.scene = resizing.startSnapshot.scene;
+          draft.ui.groupResizing = undefined;
+          draft.ui.isTransientActive = false;
+          draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+          computeGroupBBox(draft);
+          return;
+        }
+
+        // Commit: recalculer avec le dernier scale pour refaire validation finale
+        const { pivot, lastScale } = resizing;
+        const scale = lastScale ?? 1;
+
+        const candidate = buildGroupScaleCandidate(draft.scene, selectedIds, pivot, scale);
+
+        // Validation finale (même logique que updateGroupResize)
+        const MIN_SIZE_MM = 5 as Milli;
+        let hasMinSizeViolation = false;
+        for (const id of selectedIds) {
+          const p = candidate.pieces[id];
+          if (!p) continue;
+          if (p.size.w < MIN_SIZE_MM || p.size.h < MIN_SIZE_MM) {
+            hasMinSizeViolation = true;
+            break;
+          }
+        }
+
+        const insideOk = validateInsideScene(candidate).ok;
+        const overlapOk = validateNoOverlapForCandidateDraft(candidate, selectedIds).ok;
+        const isValid = !hasMinSizeViolation && insideOk && overlapOk;
+
+        if (!isValid) {
+          // Rollback + flash
+          draft.scene = resizing.startSnapshot.scene;
+          draft.ui.flashInvalidAt = Date.now();
+        } else {
+          // Commit OK
+          draft.scene = candidate;
+          draft.scene.revision++;
+          pushHistory(draft, resizing.startSnapshot);
+          autosave(takeSnapshot(draft));
+
+          // Trigger exact support recalculation for all resized pieces in group
+          // Clone IDs to avoid revoked proxy issues
+          const committedIds = [...selectedIds];
+
+          if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+            console.log('[RESIZE_COMMIT]', { committedIds, source: 'groupResize' });
+          }
+
+          // Use queueMicrotask to ensure post-resize state is visible to snapshot
+          queueMicrotask(() => recalculateExactSupport(committedIds));
+        }
+
+        // Cancel any pending RAF callback to prevent late updates
+        cancelGroupResizeRaf();
+
+        // Clear all group resize UI state
         draft.ui.groupResizing = undefined;
         draft.ui.isTransientActive = false;
         draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-        computeGroupBBox(draft);
-        return;
-      }
 
-      // Commit: recalculer avec le dernier scale pour refaire validation finale
-      const { pivot, lastScale } = resizing;
-      const scale = lastScale ?? 1;
-
-      const candidate = buildGroupScaleCandidate(draft.scene, selectedIds, pivot, scale);
-
-      // Validation finale (même logique que updateGroupResize)
-      const MIN_SIZE_MM = 5 as Milli;
-      let hasMinSizeViolation = false;
-      for (const id of selectedIds) {
-        const p = candidate.pieces[id];
-        if (!p) continue;
-        if (p.size.w < MIN_SIZE_MM || p.size.h < MIN_SIZE_MM) {
-          hasMinSizeViolation = true;
-          break;
+        // Clear ghost if it was for any of the selected pieces
+        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+          draft.ui.ghost = undefined;
         }
-      }
 
-      const insideOk = validateInsideScene(candidate, selectedIds);
-      const overlapOk = validateNoOverlapForCandidateDraft(candidate, selectedIds).ok;
-      const isValid = !hasMinSizeViolation && insideOk && overlapOk;
-
-      if (!isValid) {
-        // Rollback + flash
-        draft.scene = resizing.startSnapshot.scene;
-        draft.ui.flashInvalidAt = Date.now();
-      } else {
-        // Commit OK
-        draft.scene = candidate;
-        draft.scene.revision++;
-        pushHistory(draft, resizing.startSnapshot);
-        autosave(takeSnapshot(draft));
-      }
-
-      // Cancel any pending RAF callback to prevent late updates
-      cancelGroupResizeRaf();
-
-      // Clear all group resize UI state
-      draft.ui.groupResizing = undefined;
-      draft.ui.isTransientActive = false;
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
-
-      // Clear ghost if it was for any of the selected pieces
-      if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-        draft.ui.ghost = undefined;
-      }
-
-      bumpHandlesEpoch(draft);
-      computeGroupBBox(draft);
-    })),
+        bumpHandlesEpoch(draft);
+        computeGroupBBox(draft);
+      }),
+    ),
 
   cancelGroupResize: () => {
     // Cancel any pending RAF callback immediately
     cancelGroupResizeRaf();
 
-    set(produce((draft: SceneState) => {
-      const resizing = draft.ui.groupResizing;
-      if (!resizing?.isResizing) return;
+    set(
+      produce((draft: SceneState) => {
+        const resizing = draft.ui.groupResizing;
+        if (!resizing?.isResizing) return;
 
-      const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as ID[]);
+        const selectedIds = draft.ui.selectedIds ?? (EMPTY_ARR as unknown as ID[]); // readonly never[] → ID[]
 
-      // Restore from snapshot
-      draft.scene = resizing.startSnapshot.scene;
+        // Restore from snapshot
+        draft.scene = resizing.startSnapshot.scene;
 
-      // Clear all group resize UI state
-      draft.ui.groupResizing = undefined;
-      draft.ui.isTransientActive = false;
-      draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
+        // Clear all group resize UI state
+        draft.ui.groupResizing = undefined;
+        draft.ui.isTransientActive = false;
+        draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
 
-      // Clear ghost if it was for any of the selected pieces
-      if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
-        draft.ui.ghost = undefined;
-      }
+        // Clear ghost if it was for any of the selected pieces
+        if (draft.ui.ghost && selectedIds.includes(draft.ui.ghost.pieceId)) {
+          draft.ui.ghost = undefined;
+        }
 
-      bumpHandlesEpoch(draft);
-      computeGroupBBox(draft);
-    }));
+        bumpHandlesEpoch(draft);
+        computeGroupBBox(draft);
+      }),
+    );
   },
 
   /**
@@ -2886,7 +4171,10 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
    * Returns {x, y, verdict} if found, null if no valid position exists.
    * Verdict: 'OK' (no problems), 'WARN' (warnings only), 'BLOCK' (blocking problems).
    */
-  findFreeSpot: async (w: number, h: number): Promise<{ x: number; y: number; verdict: 'OK' | 'WARN' | 'BLOCK' } | null> => {
+  findFreeSpot: async (
+    w: number,
+    h: number,
+  ): Promise<{ x: number; y: number; verdict: 'OK' | 'WARN' | 'BLOCK' } | null> => {
     const { projectDraftToV1 } = await import('../sync/projector');
     const { validateOverlapsAsync } = await import('../core/geo/facade');
 
@@ -2943,7 +4231,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     // Helper: check if placement is OK/WARN/BLOCK
     async function checkPlacement(x: number, y: number): Promise<'OK' | 'WARN' | 'BLOCK'> {
       const tempId = 'temp-test-piece';
-      const layerId = currentState.scene.layerOrder[0];
+      const layerId = currentState.ui.activeLayer ?? currentState.scene.layerOrder[0];
       if (!layerId) return 'BLOCK';
 
       // Create test draft (deep clone to avoid mutations)
@@ -2964,8 +4252,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         const problems = await validateOverlapsAsync(sceneV1);
 
         // Check problems for this piece
-        const hasBlock = problems.some(p => p.severity === 'BLOCK');
-        const hasWarn = problems.some(p => p.severity === 'WARN');
+        const hasBlock = problems.some((p) => p.severity === 'BLOCK');
+        const hasWarn = problems.some((p) => p.severity === 'WARN');
 
         if (hasBlock) return 'BLOCK';
         if (hasWarn) return 'WARN';
@@ -2997,12 +4285,30 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     return bestWarn;
   },
 
-  insertRect: async (opts) => {
+  insertRect: async (opts): Promise<ID | null> => {
     const { projectDraftToV1 } = await import('../sync/projector');
     const { validateOverlapsAsync } = await import('../core/geo/facade');
 
     // Get current state
     const currentState = useSceneStore.getState();
+
+    // Couche cible = explicit opts.layerId || couche active || fallback C1
+    const targetLayerId = opts.layerId ?? getActiveOrDefaultLayerId(currentState);
+    const targetLayerName = layerNameFromId(currentState, targetLayerId);
+
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return null;
+    }
+
     const snap = takeSnapshot(currentState);
 
     // Enforce min 5mm and round values
@@ -3037,59 +4343,68 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       targetY = freeSpot.y;
     }
 
-    const clamped = clampToScene(targetX, targetY, finalW, finalH, currentState.scene.size.w, currentState.scene.size.h);
+    const clamped = clampToScene(
+      targetX,
+      targetY,
+      finalW,
+      finalH,
+      currentState.scene.size.w,
+      currentState.scene.size.h,
+    );
 
     // Get active layer (first layer) or create one
-    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let layerId = targetLayerId!;
     let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
 
     // Create piece ID upfront
     const pieceId = genId('piece');
 
     // Add piece synchronously
-    set(produce((draft: SceneState) => {
-      // Create layer if needed
-      if (!layerId) {
-        layerId = genId('layer');
-        draft.scene.layers[layerId] = {
-          id: layerId,
-          name: 'Calque 1',
-          z: 0,
-          pieces: [],
+    set(
+      produce((draft: SceneState) => {
+        // Create layer if needed
+        if (!layerId) {
+          layerId = genId('layer');
+          draft.scene.layers[layerId] = {
+            id: layerId,
+            name: 'Calque 1',
+            z: 0,
+            pieces: [],
+          };
+          draft.scene.layerOrder.push(layerId);
+        }
+
+        // Create material if needed
+        if (!materialId) {
+          materialId = genId('mat');
+          draft.scene.materials[materialId] = {
+            id: materialId,
+            name: 'Matériau 1',
+            oriented: false,
+          };
+        }
+
+        // Create new piece
+        const newPiece: Piece = {
+          id: pieceId,
+          layerId,
+          materialId,
+          position: { x: clamped.x, y: clamped.y },
+          rotationDeg: 0,
+          scale: { x: 1, y: 1 },
+          kind: 'rect',
+          size: { w: finalW, h: finalH },
         };
-        draft.scene.layerOrder.push(layerId);
-      }
 
-      // Create material if needed
-      if (!materialId) {
-        materialId = genId('mat');
-        draft.scene.materials[materialId] = {
-          id: materialId,
-          name: 'Matériau 1',
-          oriented: false,
-        };
-      }
+        draft.scene.pieces[pieceId] = newPiece;
+        draft.scene.layers[layerId].pieces.push(pieceId);
 
-      // Create new piece
-      const newPiece: Piece = {
-        id: pieceId,
-        layerId,
-        materialId,
-        position: { x: clamped.x, y: clamped.y },
-        rotationDeg: 0,
-        scale: { x: 1, y: 1 },
-        kind: 'rect',
-        size: { w: finalW, h: finalH },
-      };
-
-      draft.scene.pieces[pieceId] = newPiece;
-      draft.scene.layers[layerId].pieces.push(pieceId);
-
-      // Sync to spatial index if flag enabled
-      if (window.__flags?.USE_GLOBAL_SPATIAL) {
-        syncPieceToIndex(pieceId, { x: clamped.x, y: clamped.y, w: finalW, h: finalH });
-      }
-    }));
+        // Sync to spatial index if flag enabled
+        if (window.__flags?.USE_GLOBAL_SPATIAL) {
+          syncPieceToIndex(pieceId, { x: clamped.x, y: clamped.y, w: finalW, h: finalH });
+        }
+      }),
+    );
 
     // Get updated state for validation
     const updatedState = useSceneStore.getState();
@@ -3098,14 +4413,52 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     // Validate
     try {
       const problems = await validateOverlapsAsync(sceneV1);
-      const hasBlockProblems = problems.some(p => p.severity === 'BLOCK');
+      const hasBlockProblems = problems.some((p) => p.severity === 'BLOCK');
 
       if (hasBlockProblems) {
         // Rollback: remove the piece
-        set(produce((draft: SceneState) => {
+        set(
+          produce((draft: SceneState) => {
+            const layer = draft.scene.layers[layerId];
+            if (layer) {
+              layer.pieces = layer.pieces.filter((id) => id !== pieceId);
+            }
+            delete draft.scene.pieces[pieceId];
+
+            // Remove from spatial index if flag enabled
+            if (window.__flags?.USE_GLOBAL_SPATIAL) {
+              removePieceFromIndex(pieceId);
+            }
+
+            // Show toast warning
+            draft.ui.toast = {
+              message: "Impossible d'insérer : chevauchement détecté",
+              until: Date.now() + 3000,
+            };
+          }),
+        );
+        return null;
+      } else {
+        // Success: select the new piece and push history
+        set(
+          produce((draft: SceneState) => {
+            draft.ui.selectedId = pieceId;
+            draft.ui.selectedIds = [pieceId];
+            draft.ui.primaryId = pieceId;
+            pushHistory(draft, snap);
+            autosave(takeSnapshot(draft));
+          }),
+        );
+        return pieceId;
+      }
+    } catch (err) {
+      console.error('Validation error:', err);
+      // On error, rollback and show toast
+      set(
+        produce((draft: SceneState) => {
           const layer = draft.scene.layers[layerId];
           if (layer) {
-            layer.pieces = layer.pieces.filter(id => id !== pieceId);
+            layer.pieces = layer.pieces.filter((id) => id !== pieceId);
           }
           delete draft.scene.pieces[pieceId];
 
@@ -3114,44 +4467,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             removePieceFromIndex(pieceId);
           }
 
-          // Show toast warning
           draft.ui.toast = {
-            message: 'Impossible d\'insérer : chevauchement détecté',
+            message: 'Erreur de validation',
             until: Date.now() + 3000,
           };
-        }));
-        return null;
-      } else {
-        // Success: select the new piece and push history
-        set(produce((draft: SceneState) => {
-          draft.ui.selectedId = pieceId;
-          draft.ui.selectedIds = [pieceId];
-          draft.ui.primaryId = pieceId;
-          pushHistory(draft, snap);
-          autosave(takeSnapshot(draft));
-        }));
-        return pieceId;
-      }
-    } catch (err) {
-      console.error('Validation error:', err);
-      // On error, rollback and show toast
-      set(produce((draft: SceneState) => {
-        const layer = draft.scene.layers[layerId];
-        if (layer) {
-          layer.pieces = layer.pieces.filter(id => id !== pieceId);
-        }
-        delete draft.scene.pieces[pieceId];
-
-        // Remove from spatial index if flag enabled
-        if (window.__flags?.USE_GLOBAL_SPATIAL) {
-          removePieceFromIndex(pieceId);
-        }
-
-        draft.ui.toast = {
-          message: 'Erreur de validation',
-          until: Date.now() + 3000,
-        };
-      }));
+        }),
+      );
       return null;
     }
   },
@@ -3166,6 +4487,23 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
     const currentState = useSceneStore.getState();
 
+    // Couche cible = explicit opts.layerId || couche active || fallback C1
+    const targetLayerId = opts.layerId ?? getActiveOrDefaultLayerId(currentState);
+    const targetLayerName = layerNameFromId(currentState, targetLayerId);
+
+    if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return '' as ID; // Return empty ID when blocked
+    }
+
     // Enforce min 5mm and round values
     const w = Math.max(5, Math.round(opts.w));
     const h = Math.max(5, Math.round(opts.h));
@@ -3179,65 +4517,67 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     const y = Math.min(10, currentState.scene.size.h - finalH);
 
     // Get active layer (first layer) or create one
-    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let layerId = targetLayerId!;
     let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
 
     // Create piece ID
     const pieceId = genId('piece');
 
     // Add piece to scene
-    set(produce((draft: SceneState) => {
-      // Create layer if needed
-      if (!layerId) {
-        layerId = genId('layer');
-        draft.scene.layers[layerId] = {
-          id: layerId,
-          name: 'Calque 1',
-          pieces: [],
-          zIndex: 0,
+    set(
+      produce((draft: SceneState) => {
+        // Create layer if needed
+        if (!layerId) {
+          layerId = genId('layer');
+          draft.scene.layers[layerId] = {
+            id: layerId,
+            name: 'Calque 1',
+            z: 0,
+            pieces: [],
+          };
+          draft.scene.layerOrder.push(layerId);
+        }
+
+        // Create material if needed
+        if (!materialId) {
+          materialId = genId('material');
+          draft.scene.materials[materialId] = {
+            id: materialId,
+            name: 'Matière 1',
+            oriented: false,
+            orientationDeg: 0,
+          };
+        }
+
+        // Add piece
+        draft.scene.pieces[pieceId] = {
+          id: pieceId,
+          kind: 'rect',
+          layerId,
+          materialId,
+          position: { x, y },
+          size: { w: finalW, h: finalH },
+          rotationDeg: 0,
+          scale: { x: 1, y: 1 },
+          joined: false, // Ghost pieces are not joined by default
         };
-        draft.scene.layerOrder.push(layerId);
-      }
 
-      // Create material if needed
-      if (!materialId) {
-        materialId = genId('material');
-        draft.scene.materials[materialId] = {
-          id: materialId,
-          name: 'Matière 1',
-          oriented: false,
-          orientationDeg: 0,
+        // Add to layer
+        draft.scene.layers[layerId].pieces.push(pieceId);
+
+        // Select the ghost piece
+        draft.ui.selectedId = pieceId;
+        draft.ui.selectedIds = [pieceId];
+        draft.ui.primaryId = pieceId;
+
+        // Mark as ghost
+        draft.ui.ghost = {
+          pieceId,
+          problems: [],
+          startedAt: Date.now(),
         };
-      }
-
-      // Add piece
-      draft.scene.pieces[pieceId] = {
-        id: pieceId,
-        kind: 'rect',
-        layerId,
-        materialId,
-        position: { x, y },
-        size: { w: finalW, h: finalH },
-        rotationDeg: 0,
-        scale: { x: 1, y: 1 },
-        joined: false, // Ghost pieces are not joined by default
-      };
-
-      // Add to layer
-      draft.scene.layers[layerId].pieces.push(pieceId);
-
-      // Select the ghost piece
-      draft.ui.selectedId = pieceId;
-      draft.ui.selectedIds = [pieceId];
-      draft.ui.primaryId = pieceId;
-
-      // Mark as ghost
-      draft.ui.ghost = {
-        pieceId,
-        problems: [],
-        startedAt: Date.now(),
-      };
-    }));
+      }),
+    );
 
     // Validate ghost immediately
     await useSceneStore.getState().validateGhost();
@@ -3260,14 +4600,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       const problems = await validateOverlapsAsync(sceneV1);
 
       // Filter problems for the ghost piece
-      const ghostProblems = problems.filter(p => p.pieceId === currentState.ui.ghost?.pieceId);
+      const ghostProblems = problems.filter((p) => p.pieceId === currentState.ui.ghost?.pieceId);
 
       // Update ghost problems
-      set(produce((draft: SceneState) => {
-        if (draft.ui.ghost) {
-          draft.ui.ghost.problems = ghostProblems;
-        }
-      }));
+      set(
+        produce((draft: SceneState) => {
+          if (draft.ui.ghost) {
+            draft.ui.ghost.problems = ghostProblems;
+          }
+        }),
+      );
     } catch (err) {
       console.error('Ghost validation error:', err);
     }
@@ -3278,62 +4620,184 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
    * Clears ghost state and pushes to history.
    */
   commitGhost: () => {
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.ghost) return;
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.ghost) return;
 
-      const hasBlock = draft.ui.ghost.problems.some(p => p.severity === 'BLOCK');
+        const hasBlock = draft.ui.ghost.problems.some((p) => p.severity === 'BLOCK');
 
-      if (hasBlock) {
-        // Cannot commit with BLOCK problems
-        draft.ui.toast = {
-          message: 'Impossible de valider : des problèmes bloquants subsistent',
-          until: Date.now() + 3000,
-        };
-        return;
-      }
+        if (hasBlock) {
+          // Cannot commit with BLOCK problems
+          draft.ui.toast = {
+            message: 'Impossible de valider : des problèmes bloquants subsistent',
+            until: Date.now() + 3000,
+          };
+          return;
+        }
 
-      // Clear ghost state (piece stays in scene)
-      draft.ui.ghost = undefined;
+        // Clear ghost state (piece stays in scene)
+        draft.ui.ghost = undefined;
 
-      // Push to history
-      pushHistory(draft);
-    }));
+        // Push to history
+        const snap = takeSnapshot(useSceneStore.getState());
+        pushHistory(draft, snap);
+      }),
+    );
   },
 
   /**
    * Cancel the ghost insert and remove the piece from the scene.
    */
   cancelGhost: () => {
-    set(produce((draft: SceneState) => {
-      if (!draft.ui.ghost) return;
+    set(
+      produce((draft: SceneState) => {
+        if (!draft.ui.ghost) return;
 
-      const pieceId = draft.ui.ghost.pieceId;
+        const pieceId = draft.ui.ghost.pieceId;
 
-      // Remove piece from scene
-      const piece = draft.scene.pieces[pieceId];
-      if (piece) {
-        const layerId = piece.layerId;
-        const layer = draft.scene.layers[layerId];
-        if (layer) {
-          layer.pieces = layer.pieces.filter(id => id !== pieceId);
+        // Remove piece from scene
+        const piece = draft.scene.pieces[pieceId];
+        if (piece) {
+          const layerId = piece.layerId;
+          const layer = draft.scene.layers[layerId];
+          if (layer) {
+            layer.pieces = layer.pieces.filter((id) => id !== pieceId);
+          }
+          delete draft.scene.pieces[pieceId];
+
+          // Remove from spatial index if flag enabled
+          if (window.__flags?.USE_GLOBAL_SPATIAL) {
+            removePieceFromIndex(pieceId);
+          }
         }
-        delete draft.scene.pieces[pieceId];
 
-        // Remove from spatial index if flag enabled
-        if (window.__flags?.USE_GLOBAL_SPATIAL) {
-          removePieceFromIndex(pieceId);
+        // Clear selection if ghost was selected
+        if (draft.ui.selectedId === pieceId) {
+          draft.ui.selectedId = undefined;
+          draft.ui.selectedIds = [];
+          draft.ui.primaryId = undefined;
         }
-      }
 
-      // Clear selection if ghost was selected
-      if (draft.ui.selectedId === pieceId) {
-        draft.ui.selectedId = undefined;
-        draft.ui.selectedIds = [];
-        draft.ui.primaryId = undefined;
-      }
-
-      // Clear ghost state
-      draft.ui.ghost = undefined;
-    }));
+        // Clear ghost state
+        draft.ui.ghost = undefined;
+      }),
+    );
   },
 }));
+
+// Type helper for Zustand selectors to avoid implicit 'any' in callbacks
+// Defined AFTER useSceneStore to avoid circular reference
+export type SceneStoreState = ReturnType<typeof useSceneStore.getState>;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Exported selectors for fixed layer IDs (avoid s => s.scene, reduce re-renders)
+// ─────────────────────────────────────────────────────────────────────────
+
+export const getFixedLayerIds = (s: SceneStoreState) => s.scene.fixedLayerIds!;
+export const getFixedLayerIdByName = (s: SceneStoreState, name: LayerName) =>
+  s.scene.fixedLayerIds ? s.scene.fixedLayerIds[name] : undefined;
+
+/**
+ * getPieceCountByFixedLayer
+ * Returns piece counts for each fixed layer (C1, C2, C3).
+ * Optimized selector to avoid re-renders when piece counts haven't changed.
+ */
+export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName, number> => {
+  const ids = s.scene.fixedLayerIds;
+  if (!ids) return { C1: 0, C2: 0, C3: 0 };
+
+  return {
+    C1: s.scene.layers[ids.C1]?.pieces?.length ?? 0,
+    C2: s.scene.layers[ids.C2]?.pieces?.length ?? 0,
+    C3: s.scene.layers[ids.C3]?.pieces?.length ?? 0,
+  };
+};
+
+/**
+ * Check if a piece is currently being interacted with (drag/resize/insert).
+ * Returns true during live interactions where we use fast AABB validation.
+ */
+function isInteracting(s: SceneStoreState, pieceId: ID): boolean {
+  // Check if piece is being dragged
+  if (s.ui.dragging?.id === pieceId) return true;
+
+  // Check if piece is being resized
+  if (s.ui.resizing?.pieceId === pieceId) return true;
+
+  // Check if piece is part of a group being resized
+  if (s.ui.groupResizing) {
+    const groupIds = s.ui.selectedIds ?? [];
+    if (groupIds.includes(pieceId)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * useIsGhost
+ * Returns ghost state for a specific piece (without triggering re-renders from full scene).
+ * Returns { isGhost: boolean, hasBlock: boolean, hasWarn: boolean }
+ *
+ * A piece is ghost if:
+ * 1. It's in transient ghost state (during drag/resize with validation problems), OR
+ * 2. It's on C2/C3 and not fully supported by the layer below (committed ghost state)
+ *
+ * Support validation modes:
+ * - During interaction (drag/resize): fast AABB mode for performance
+ * - After commit: exact PathOps mode for precision (updated by commit hooks)
+ */
+export const useIsGhost = (pieceId: ID | undefined) => {
+  return useSceneStore((s: SceneStoreState) => {
+    if (!pieceId) {
+      return { isGhost: false, hasBlock: false, hasWarn: false };
+    }
+
+    // Check transient ghost state (during drag/resize operations)
+    const ghost = s.ui.ghost;
+    const isTransientGhost = ghost?.pieceId === pieceId;
+
+    if (isTransientGhost && ghost) {
+      const hasBlock = ghost.problems.some((p) => p.severity === 'BLOCK');
+      const hasWarn = ghost.problems.some((p) => p.severity === 'WARN') && !hasBlock;
+      return { isGhost: true, hasBlock, hasWarn };
+    }
+
+    // Check committed ghost state (support-driven for C2/C3)
+    const p = s.scene.pieces[pieceId];
+    if (!p) return { isGhost: false, hasBlock: false, hasWarn: false };
+
+    const belowLayerId = getBelowLayerId(s, p.layerId);
+    if (!belowLayerId) {
+      // C1: never ghost (no layer below)
+      return { isGhost: false, hasBlock: false, hasWarn: false };
+    }
+
+    // C2/C3: check support with appropriate mode
+    // Use exact results if available and fresh (< 5s), otherwise fallback to fast mode
+    const exactResults = s.ui.exactSupportResults;
+    const lastCheckAt = s.ui.lastExactCheckAt ?? 0;
+    const resultsFresh = Date.now() - lastCheckAt < 5000; // 5s freshness window
+
+    let isSupported: boolean;
+    if (exactResults && pieceId in exactResults && resultsFresh) {
+      // Use stored exact results (PathOps precision)
+      isSupported = exactResults[pieceId];
+    } else {
+      // Fallback to fast mode (AABB) during interaction or if exact results stale
+      const interacting = isInteracting(s, pieceId);
+      const mode = interacting ? 'fast' : 'fast';
+      isSupported = isPieceFullySupported(s, pieceId, mode);
+    }
+
+    const isCommittedGhost = !isSupported;
+
+    return {
+      isGhost: isCommittedGhost,
+      hasBlock: false, // Committed ghosts don't block (manipulable)
+      hasWarn: isCommittedGhost, // WARN for unsupported pieces
+    };
+  });
+};
+
+// Export spatial query helper, rebuild function, and RBush instance for use in other modules
+export { shortlistSameLayerAABB, rebuildLayerIndex, layeredRBush };
