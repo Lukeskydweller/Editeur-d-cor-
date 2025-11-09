@@ -26,6 +26,7 @@ import {
 } from '@/constants/validation';
 import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/layers';
 import { isLayerUnlocked } from '@/state/layers.gating';
+import { getActiveOrDefaultLayerId, layerNameFromId } from '@/state/layers.active';
 import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
 import { devAssertNoLayerReassignment } from '@/state/invariants';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
@@ -1838,13 +1839,31 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
       }),
     ),
 
-  addRectAtCenter: (w, h) =>
+  addRectAtCenter: (w, h) => {
+    // Check if active layer is locked (progressive unlock gating)
+    const state = useSceneStore.getState();
+    const targetLayerId = getActiveOrDefaultLayerId(state);
+    const targetLayerName = layerNameFromId(state, targetLayerId);
+
+    if (targetLayerName && !isLayerUnlocked(state, targetLayerName)) {
+      const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
+      set(
+        produce((draft: SceneState) => {
+          draft.ui.toast = {
+            message: `${targetLayerName} verrouillée : ajoutez une pièce à ${prerequisiteLayer}`,
+            until: Date.now() + 3000,
+          };
+        }),
+      );
+      return;
+    }
+
     set(
       produce((draft: SceneState) => {
         const snap = takeSnapshot(draft);
 
-        // Utiliser le premier layer (pour l'instant)
-        let layerId = draft.scene.layerOrder[0];
+        // Use active layer or first layer
+        let layerId = draft.ui.activeLayer ?? draft.scene.layerOrder[0];
         if (!layerId) {
           // Créer un layer si absent
           layerId = genId('layer');
@@ -1895,7 +1914,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         autosave(takeSnapshot(draft));
         notifyAutoSpatial();
       }),
-    ),
+    );
+  },
 
   deleteSelected: () =>
     set(
@@ -3352,7 +3372,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     // Helper: check if placement is OK/WARN/BLOCK
     async function checkPlacement(x: number, y: number): Promise<'OK' | 'WARN' | 'BLOCK'> {
       const tempId = 'temp-test-piece';
-      const layerId = currentState.scene.layerOrder[0];
+      const layerId = currentState.ui.activeLayer ?? currentState.scene.layerOrder[0];
       if (!layerId) return 'BLOCK';
 
       // Create test draft (deep clone to avoid mutations)
@@ -3413,14 +3433,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     // Get current state
     const currentState = useSceneStore.getState();
 
-    // Check if target layer is locked (progressive unlock gating)
-    const targetLayerId = opts.layerId ?? currentState.scene.layerOrder[0];
-    const fixedIds = currentState.scene.fixedLayerIds;
-    let targetLayerName: LayerName | null = null;
-    if (fixedIds && targetLayerId) {
-      if (targetLayerId === fixedIds.C2) targetLayerName = 'C2';
-      else if (targetLayerId === fixedIds.C3) targetLayerName = 'C3';
-    }
+    // Couche cible = explicit opts.layerId || couche active || fallback C1
+    const targetLayerId = opts.layerId ?? getActiveOrDefaultLayerId(currentState);
+    const targetLayerName = layerNameFromId(currentState, targetLayerId);
 
     if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
       const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
@@ -3479,7 +3494,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     );
 
     // Get active layer (first layer) or create one
-    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let layerId = targetLayerId!;
     let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
 
     // Create piece ID upfront
@@ -3613,14 +3628,9 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
     const currentState = useSceneStore.getState();
 
-    // Check if target layer is locked (progressive unlock gating)
-    const targetLayerId = opts.layerId ?? currentState.scene.layerOrder[0];
-    const fixedIds = currentState.scene.fixedLayerIds;
-    let targetLayerName: LayerName | null = null;
-    if (fixedIds && targetLayerId) {
-      if (targetLayerId === fixedIds.C2) targetLayerName = 'C2';
-      else if (targetLayerId === fixedIds.C3) targetLayerName = 'C3';
-    }
+    // Couche cible = explicit opts.layerId || couche active || fallback C1
+    const targetLayerId = opts.layerId ?? getActiveOrDefaultLayerId(currentState);
+    const targetLayerName = layerNameFromId(currentState, targetLayerId);
 
     if (targetLayerName && !isLayerUnlocked(currentState, targetLayerName)) {
       const prerequisiteLayer = targetLayerName === 'C2' ? 'C1' : 'C2';
@@ -3648,7 +3658,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
     const y = Math.min(10, currentState.scene.size.h - finalH);
 
     // Get active layer (first layer) or create one
-    let layerId = opts.layerId ?? currentState.scene.layerOrder[0];
+    let layerId = targetLayerId!;
     let materialId = opts.materialId ?? Object.keys(currentState.scene.materials)[0];
 
     // Create piece ID
