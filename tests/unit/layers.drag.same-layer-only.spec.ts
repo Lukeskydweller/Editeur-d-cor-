@@ -2,26 +2,32 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { useSceneStore } from '../../src/state/useSceneStore';
 import type { ID } from '../../src/types/scene';
 
+/**
+ * Tests for same-layer drag validation.
+ *
+ * Key behaviors:
+ * - Cross-layer freedom: C2 over C1, C3 over C2 → no BLOCK
+ * - Intra-layer collision: C1/C1, C2/C2, C3/C3 → BLOCK
+ * - Support: lack of support shows as data-ghost="1" but never blocks drag
+ */
 describe('drag: same-layer validation only', () => {
   let C1: ID, C2: ID, C3: ID;
   let mat: ID;
 
   beforeEach(() => {
-    // Clear localStorage to ensure clean state
+    // Reset Zustand store between tests (recommended pattern)
+    // https://docs.pmnd.rs/zustand/guides/testing
     localStorage.clear();
 
     const s = useSceneStore.getState();
     s.reset?.();
     s.initSceneWithDefaults(600, 400);
 
-    // Get state AFTER initSceneWithDefaults (Zustand updates are synchronous)
-    const state = useSceneStore.getState();
+    // Get fresh state after initialization
+    let state = useSceneStore.getState();
     const fixed = state.scene.fixedLayerIds;
     if (!fixed) {
-      console.error('initSceneWithDefaults did not create fixedLayerIds');
-      console.error('scene.layerOrder:', state.scene.layerOrder);
-      console.error('scene.layers:', Object.keys(state.scene.layers));
-      throw new Error('No fixed layers');
+      throw new Error('No fixed layers after initSceneWithDefaults');
     }
 
     C1 = fixed.C1;
@@ -29,83 +35,89 @@ describe('drag: same-layer validation only', () => {
     C3 = fixed.C3;
 
     mat = Object.values(state.scene.materials)[0].id;
+
+    // Remove default pieces created by initSceneWithDefaults
+    // (initSceneWithDefaults creates a 120×80mm piece on C1 at position 40,40)
+    // We need to manually clear pieces and update layer.pieces arrays
+    useSceneStore.setState((prev) => ({
+      ...prev,
+      scene: {
+        ...prev.scene,
+        pieces: {},
+        layers: {
+          ...prev.scene.layers,
+          [C1]: { ...prev.scene.layers[C1], pieces: [] },
+          [C2]: { ...prev.scene.layers[C2], pieces: [] },
+          [C3]: { ...prev.scene.layers[C3], pieces: [] },
+        },
+      },
+    }));
+
+    // Verify clean state
+    state = useSceneStore.getState();
+    const pieceCount = Object.keys(state.scene.pieces).length;
+    if (pieceCount !== 0) {
+      throw new Error(`Expected 0 pieces after cleanup, found ${pieceCount}`);
+    }
   });
 
   describe('cross-layer freedom', () => {
     it('drag C2 over C1 → no BLOCK (different layers)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      console.log('C1 pieces BEFORE add:', store.scene.layers[C1]?.pieces);
-      console.log('C2 pieces BEFORE add:', store.scene.layers[C2]?.pieces);
-
-      // C1: place a piece at (50, 50) with size 60×60
+      // C1: set active layer and place piece at (50, 50) with size 60×60
+      store.setActiveLayer(C1);
       const c1Piece = store.addRectPiece(C1, mat, 60, 60, 50, 50, 0);
-      let freshState = useSceneStore.getState();
-      console.log('c1Piece ID:', c1Piece);
-      console.log('C1 pieces after add:', freshState.scene.layers[C1]?.pieces);
+      expect(c1Piece).not.toBe(''); // Verify piece was created
 
-      // C2: place a piece at different position (150, 50) with size 60×60
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place piece at (150, 50) with size 60×60
       store.setActiveLayer(C2);
       const c2Piece = store.addRectPiece(C2, mat, 60, 60, 150, 50, 0);
-      freshState = useSceneStore.getState();
-      console.log('c2Piece ID:', c2Piece);
-      console.log('C2 pieces after add:', freshState.scene.layers[C2]?.pieces);
+      expect(c2Piece).not.toBe(''); // Verify piece was created
 
-      // Verify initial positions and layerIds
-      freshState = useSceneStore.getState();
-      console.log(
-        'c1Piece layerId:',
-        freshState.scene.pieces[c1Piece]?.layerId,
-        'Expected C1:',
-        C1,
-      );
-      console.log(
-        'c2Piece layerId:',
-        freshState.scene.pieces[c2Piece]?.layerId,
-        'Expected C2:',
-        C2,
-      );
+      // Verify pieces are on different layers
+      store = useSceneStore.getState();
+      expect(store.scene.pieces[c1Piece]?.layerId).toBe(C1);
+      expect(store.scene.pieces[c2Piece]?.layerId).toBe(C2);
 
       // Select C2 and start drag
       store.selectPiece(c2Piece);
       store.beginDrag(c2Piece);
 
-      // Enable debug logging
-      (window as any).__DBG_DRAG__ = true;
-
       // Drag C2 to overlap C1 (dx = -100, dy = 0)
       store.updateDrag(-100, 0);
 
+      // Get fresh state after drag
       const state = useSceneStore.getState();
-
-      // Debug logging
-      if (state.ui.dragging?.candidate?.valid === false) {
-        console.log('FAILED: drag C2 over C1');
-        console.log('c2Piece layerId:', state.scene.pieces[c2Piece]?.layerId);
-        console.log('c1Piece layerId:', state.scene.pieces[c1Piece]?.layerId);
-        console.log('candidate:', JSON.stringify(state.ui.dragging?.candidate, null, 2));
-      }
 
       // Candidate should be valid (no cross-layer blocking)
       expect(state.ui.dragging?.candidate?.valid).toBe(true);
     });
 
     it('drag C1 over C2 → no BLOCK (different layers)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C2: place a piece first
-      store.setActiveLayer(C2);
-      const c2Piece = store.addRectPiece(C2, mat, 60, 60, 50, 50, 0);
-
-      // C1: place a piece at different position
+      // C1: set active layer and place piece first (to unlock C2)
       store.setActiveLayer(C1);
       const c1Piece = store.addRectPiece(C1, mat, 60, 60, 150, 50, 0);
 
-      // Select C1 and drag it over C2
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place piece
+      store.setActiveLayer(C2);
+      const c2Piece = store.addRectPiece(C2, mat, 60, 60, 50, 50, 0);
+
+      // Get fresh state and select C1, then drag it over C2
+      store = useSceneStore.getState();
       store.selectPiece(c1Piece);
       store.beginDrag(c1Piece);
       store.updateDrag(-100, 0);
 
+      // Get fresh state
       const state = useSceneStore.getState();
 
       // Should be valid (no cross-layer blocking)
@@ -113,21 +125,33 @@ describe('drag: same-layer validation only', () => {
     });
 
     it('drag C3 over C2 → no BLOCK (different layers)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C2: place a piece
+      // C1: set active layer and place piece first (to unlock C2)
+      store.setActiveLayer(C1);
+      const c1Dummy = store.addRectPiece(C1, mat, 30, 30, 200, 200, 0);
+
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place piece (to unlock C3)
       store.setActiveLayer(C2);
       const c2Piece = store.addRectPiece(C2, mat, 60, 60, 50, 50, 0);
 
-      // C3: place a piece at different position
+      // Get fresh state after C2 piece (unlocks C3)
+      store = useSceneStore.getState();
+
+      // C3: set active layer and place piece at different position
       store.setActiveLayer(C3);
       const c3Piece = store.addRectPiece(C3, mat, 60, 60, 150, 50, 0);
 
-      // Drag C3 over C2
+      // Get fresh state and drag C3 over C2
+      store = useSceneStore.getState();
       store.selectPiece(c3Piece);
       store.beginDrag(c3Piece);
       store.updateDrag(-100, 0);
 
+      // Get fresh state
       const state = useSceneStore.getState();
 
       // Should be valid (no cross-layer blocking)
@@ -137,18 +161,27 @@ describe('drag: same-layer validation only', () => {
 
   describe('intra-layer collision blocking', () => {
     it('drag C2 over C2 → BLOCK (same layer collision)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C2: place two pieces
+      // C1: add dummy piece to unlock C2
+      store.setActiveLayer(C1);
+      const c1Dummy = store.addRectPiece(C1, mat, 30, 30, 300, 300, 0);
+
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place two pieces
       store.setActiveLayer(C2);
       const c2PieceA = store.addRectPiece(C2, mat, 60, 60, 100, 100, 0);
       const c2PieceB = store.addRectPiece(C2, mat, 60, 60, 200, 100, 0);
 
-      // Drag piece B to overlap piece A (from 200 to 100, delta = -100)
+      // Get fresh state and drag piece B to overlap piece A
+      store = useSceneStore.getState();
       store.selectPiece(c2PieceB);
       store.beginDrag(c2PieceB);
       store.updateDrag(-100, 0);
 
+      // Get fresh state
       const state = useSceneStore.getState();
 
       // Should be invalid (same-layer collision)
@@ -156,9 +189,9 @@ describe('drag: same-layer validation only', () => {
     });
 
     it('drag C1 over C1 → BLOCK (same layer collision)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C1: place two pieces
+      // C1: set active layer and place two pieces
       store.setActiveLayer(C1);
       const c1PieceA = store.addRectPiece(C1, mat, 60, 60, 100, 100, 0);
       const c1PieceB = store.addRectPiece(C1, mat, 60, 60, 200, 100, 0);
@@ -168,6 +201,7 @@ describe('drag: same-layer validation only', () => {
       store.beginDrag(c1PieceB);
       store.updateDrag(-100, 0);
 
+      // Get fresh state
       const state = useSceneStore.getState();
 
       // Should be invalid (same-layer collision)
@@ -175,9 +209,9 @@ describe('drag: same-layer validation only', () => {
     });
 
     it('drag C3 over C3 → BLOCK (same layer collision)', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C3: place two pieces
+      // C3: set active layer and place two pieces
       store.setActiveLayer(C3);
       const c3PieceA = store.addRectPiece(C3, mat, 60, 60, 100, 100, 0);
       const c3PieceB = store.addRectPiece(C3, mat, 60, 60, 200, 100, 0);
@@ -187,6 +221,7 @@ describe('drag: same-layer validation only', () => {
       store.beginDrag(c3PieceB);
       store.updateDrag(-100, 0);
 
+      // Get fresh state
       const state = useSceneStore.getState();
 
       // Should be invalid (same-layer collision)
@@ -196,19 +231,23 @@ describe('drag: same-layer validation only', () => {
 
   describe('group drag: cross-layer freedom', () => {
     it('drag C2 group over C1 pieces → no BLOCK', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C1: place pieces
+      // C1: set active layer and place pieces
       store.setActiveLayer(C1);
       const c1A = store.addRectPiece(C1, mat, 40, 40, 50, 50, 0);
       const c1B = store.addRectPiece(C1, mat, 40, 40, 100, 50, 0);
 
-      // C2: place two pieces for group
+      // Get fresh state after C1 pieces (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place two pieces for group
       store.setActiveLayer(C2);
       const c2A = store.addRectPiece(C2, mat, 40, 40, 50, 150, 0);
       const c2B = store.addRectPiece(C2, mat, 40, 40, 100, 150, 0);
 
-      // Select both C2 pieces (group)
+      // Get fresh state and select both C2 pieces (group)
+      store = useSceneStore.getState();
       store.setSelection([c2A, c2B]);
       store.beginDrag(c2A);
 
@@ -222,14 +261,15 @@ describe('drag: same-layer validation only', () => {
     });
 
     it('drag C2 group with internal collision → no self-blocking', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C2: place two adjacent pieces
+      // C2: set active layer and place two adjacent pieces
       store.setActiveLayer(C2);
       const c2A = store.addRectPiece(C2, mat, 60, 60, 100, 100, 0);
       const c2B = store.addRectPiece(C2, mat, 60, 60, 160, 100, 0);
 
-      // Select both (group)
+      // Get fresh state and select both (group)
+      store = useSceneStore.getState();
       store.setSelection([c2A, c2B]);
       store.beginDrag(c2A);
 
@@ -245,17 +285,21 @@ describe('drag: same-layer validation only', () => {
 
   describe('support-driven ghosts: never block drag', () => {
     it('drag C2 to unsupported position → no BLOCK, only ghost after drop', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C1: place a piece
+      // C1: set active layer and place a piece
       store.setActiveLayer(C1);
       const c1Base = store.addRectPiece(C1, mat, 60, 60, 50, 50, 0);
 
-      // C2: place a piece on C1
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place a piece on C1
       store.setActiveLayer(C2);
       const c2Piece = store.addRectPiece(C2, mat, 40, 40, 60, 60, 0);
 
-      // Drag C2 to partially unsupported position (extends beyond C1)
+      // Get fresh state and drag C2 to partially unsupported position
+      store = useSceneStore.getState();
       store.selectPiece(c2Piece);
       store.beginDrag(c2Piece);
       store.updateDrag(30, 0); // Moves to 90, extends beyond C1 right edge at 110
@@ -276,17 +320,21 @@ describe('drag: same-layer validation only', () => {
     });
 
     it('drag C2 completely off C1 support → no BLOCK, only ghost', () => {
-      const store = useSceneStore.getState();
+      let store = useSceneStore.getState();
 
-      // C1: place a piece
+      // C1: set active layer and place a piece
       store.setActiveLayer(C1);
       const c1Base = store.addRectPiece(C1, mat, 60, 60, 50, 50, 0);
 
-      // C2: place a piece on C1
+      // Get fresh state after C1 piece (unlocks C2)
+      store = useSceneStore.getState();
+
+      // C2: set active layer and place a piece on C1
       store.setActiveLayer(C2);
       const c2Piece = store.addRectPiece(C2, mat, 40, 40, 60, 60, 0);
 
-      // Drag C2 completely off C1 (to area with no support)
+      // Get fresh state and drag C2 completely off C1
+      store = useSceneStore.getState();
       store.selectPiece(c2Piece);
       store.beginDrag(c2Piece);
       store.updateDrag(100, 100); // Moves to 160,160 - far from C1
