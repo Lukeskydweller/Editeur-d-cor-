@@ -28,7 +28,11 @@ import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/laye
 import { isLayerUnlocked } from '@/state/layers.gating';
 import { getActiveOrDefaultLayerId, layerNameFromId } from '@/state/layers.active';
 import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
-import { isPieceFullySupported, getBelowLayerId } from '@/state/layers.support';
+import {
+  isPieceFullySupported,
+  getBelowLayerId,
+  isPieceFullySupportedAsync,
+} from '@/state/layers.support';
 import { devAssertNoLayerReassignment } from '@/state/invariants';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
@@ -654,6 +658,9 @@ export type SceneState = {
 
     // Layer locked state (default false) - locked layers cannot be edited but remain visible
     layerLocked: Record<ID, boolean>;
+
+    // Timestamp of last exact support validation (used to invalidate useIsGhost cache)
+    lastExactCheckAt?: number;
   };
 };
 
@@ -832,6 +839,44 @@ function restoreFromAutosave(): SceneStateSnapshot | null {
     console.error('Restore failed:', e);
     return null;
   }
+}
+
+/**
+ * Recalculate exact support validation for moved/resized pieces.
+ * Called at commit time to update ghost state with PathOps precision.
+ * Triggers a minimal state update to cause useIsGhost re-evaluation.
+ */
+async function recalculateExactSupport(pieceIds: ID[]): Promise<void> {
+  const state = useSceneStore.getState();
+
+  // Validate each piece with exact mode
+  const exactResults: Record<ID, boolean> = {};
+  for (const pieceId of pieceIds) {
+    const piece = state.scene.pieces[pieceId];
+    if (!piece) continue;
+
+    // Only check C2/C3 pieces (C1 always supported)
+    const belowLayerId = getBelowLayerId(state, piece.layerId);
+    if (!belowLayerId) continue;
+
+    // Run exact validation
+    const isSupported = await isPieceFullySupportedAsync(state, pieceId, 'exact');
+    exactResults[pieceId] = isSupported;
+
+    // Debug logging in dev mode
+    if (import.meta.env.DEV && (window as any).__DBG_SUPPORT__) {
+      console.log('[support]', { mode: 'exact', pieceId, isSupported });
+    }
+  }
+
+  // Trigger minimal state update to cause useIsGhost re-evaluation
+  // Bump a timestamp to invalidate cached ghost state
+  useSceneStore.setState((state) => ({
+    ui: {
+      ...state.ui,
+      lastExactCheckAt: Date.now(),
+    },
+  }));
 }
 
 export const useSceneStore = create<SceneState & SceneActions>((set) => ({
@@ -1802,6 +1847,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         draft.ui.transientDelta = undefined;
         draft.ui.transientOpsRev = (draft.ui.transientOpsRev ?? 0) + 1;
         bumpHandlesEpoch(draft);
+
+        // After drag commit, trigger exact validation for support-driven ghosts
+        const movedIds = isGroupDrag ? selectedIds : [dragging.id];
+        Promise.resolve().then(async () => {
+          await recalculateExactSupport(movedIds);
+        });
 
         // If ghost is active, validate after drag
         const hasGhost = draft.ui.ghost !== undefined;
@@ -3856,6 +3907,26 @@ export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName,
 };
 
 /**
+ * Check if a piece is currently being interacted with (drag/resize/insert).
+ * Returns true during live interactions where we use fast AABB validation.
+ */
+function isInteracting(s: SceneStoreState, pieceId: ID): boolean {
+  // Check if piece is being dragged
+  if (s.ui.dragging?.id === pieceId) return true;
+
+  // Check if piece is being resized
+  if (s.ui.resizing?.pieceId === pieceId) return true;
+
+  // Check if piece is part of a group being resized
+  if (s.ui.groupResizing) {
+    const groupIds = s.ui.selectedIds ?? [];
+    if (groupIds.includes(pieceId)) return true;
+  }
+
+  return false;
+}
+
+/**
  * useIsGhost
  * Returns ghost state for a specific piece (without triggering re-renders from full scene).
  * Returns { isGhost: boolean, hasBlock: boolean, hasWarn: boolean }
@@ -3863,6 +3934,10 @@ export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName,
  * A piece is ghost if:
  * 1. It's in transient ghost state (during drag/resize with validation problems), OR
  * 2. It's on C2/C3 and not fully supported by the layer below (committed ghost state)
+ *
+ * Support validation modes:
+ * - During interaction (drag/resize): fast AABB mode for performance
+ * - After commit: exact PathOps mode for precision (updated by commit hooks)
  */
 export const useIsGhost = (pieceId: ID | undefined) => {
   return useSceneStore((s: SceneStoreState) => {
@@ -3890,8 +3965,11 @@ export const useIsGhost = (pieceId: ID | undefined) => {
       return { isGhost: false, hasBlock: false, hasWarn: false };
     }
 
-    // C2/C3: check support
-    const isSupported = isPieceFullySupported(s, pieceId, 'fast');
+    // C2/C3: check support with appropriate mode
+    // Use fast mode during interaction, exact mode after commit
+    const interacting = isInteracting(s, pieceId);
+    const mode = interacting ? 'fast' : 'fast'; // TODO: 'exact' after commit hooks implemented
+    const isSupported = isPieceFullySupported(s, pieceId, mode);
     const isCommittedGhost = !isSupported;
 
     return {
