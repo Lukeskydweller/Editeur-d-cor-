@@ -64,7 +64,7 @@ import {
   type ResizeContext,
 } from '@/core/geo/validateAll';
 import { getRotatedAABB } from '@/core/geo/geometry';
-import { EPS_UI_MM, EMPTY_ARR } from '@/state/constants';
+import { EPS_UI_MM, EMPTY_ARR, DUPLICATE_OFFSET_MM } from '@/state/constants';
 
 // Detect test environment for synchronous test execution
 // In Vitest, import.meta.env.MODE is 'test'
@@ -666,6 +666,10 @@ export type SceneState = {
     // Exact support results cache (pieceId → isSupported)
     // Updated by recalculateExactSupport after drag/resize commit
     exactSupportResults?: Record<ID, boolean>;
+
+    // Revision counter for exact support calculation (incremented on each recalculation)
+    // Used to detect stale results and prevent applying obsolete async validation
+    exactSupportRevision?: number;
   };
 };
 
@@ -852,74 +856,99 @@ function restoreFromAutosave(): SceneStateSnapshot | null {
  * Triggers a minimal state update to cause useIsGhost re-evaluation.
  */
 async function recalculateExactSupport(pieceIds: ID[]): Promise<void> {
-  const state = useSceneStore.getState();
-
-  // Validate each piece with exact mode
-  const exactResults: Record<ID, boolean> = {};
-  const piecesToRemove: ID[] = []; // Track pieces that became supported (to remove from ghost state)
-
-  for (const pieceId of pieceIds) {
-    const piece = state.scene.pieces[pieceId];
-    if (!piece) continue;
-
-    // Only check C2/C3 pieces (C1 always supported)
-    const belowLayerId = getBelowLayerId(state, piece.layerId);
-    if (!belowLayerId) {
-      // C1 pieces are always supported - remove from ghost state if present
-      piecesToRemove.push(pieceId);
-      continue;
-    }
-
-    // Run exact validation
-    const isSupported = await isPieceFullySupportedAsync(state, pieceId, 'exact');
-
-    if (isSupported) {
-      // Piece is now fully supported - mark for removal from ghost state
-      piecesToRemove.push(pieceId);
-    } else {
-      // Piece is NOT supported - mark as ghost
-      exactResults[pieceId] = false;
-    }
-
-    // DEV: Log support check with full diagnostic format
-    if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
-      console.log('[SUPPORT_CHECK]', {
-        op: 'support_exact',
-        pieceId,
-        layerId: piece.layerId,
-        reasons: {
-          collision: false,
-          spacing: false,
-          bounds: false,
-          supportFast: 'n/a',
-          supportExact: isSupported ? 'ok' : 'missing',
-        },
-        setHasBlockFrom: 'none', // Support NEVER blocks
-        ghost: isSupported ? '0' : '1',
-        timestamp: Date.now(),
-      });
-    }
-  }
-
-  // Merge exact results with existing ones, removing pieces that became supported
-  useSceneStore.setState((state) => {
-    const mergedResults = {
-      ...(state.ui.exactSupportResults ?? {}),
-      ...exactResults,
-    };
-
-    // Remove pieces that are now fully supported
-    for (const pieceId of piecesToRemove) {
-      delete mergedResults[pieceId];
-    }
-
+  // Phase 1: SYNC - Increment revision to track calculation epoch
+  let currentRevision: number;
+  useSceneStore.setState((s) => {
+    currentRevision = (s.ui.exactSupportRevision ?? 0) + 1;
     return {
-      ui: {
-        ...state.ui,
-        exactSupportResults: mergedResults,
-        lastExactCheckAt: Date.now(),
-      },
+      ui: { ...s.ui, exactSupportRevision: currentRevision },
     };
+  });
+
+  // Phase 2: ASYNC validation (avoid any draft references by only storing IDs)
+  Promise.resolve().then(async () => {
+    const exactResults: Record<ID, boolean> = {};
+    const piecesToRemove: ID[] = [];
+
+    for (const pieceId of pieceIds) {
+      // Re-fetch state freshly for each piece to avoid stale/revoked references
+      const state = useSceneStore.getState();
+      const piece = state.scene.pieces[pieceId];
+
+      if (!piece) continue;
+
+      // Only check C2/C3 pieces (C1 always supported)
+      const belowLayerId = getBelowLayerId(state, piece.layerId);
+      if (!belowLayerId) {
+        // C1 pieces are always supported - remove from ghost state if present
+        piecesToRemove.push(pieceId);
+        continue;
+      }
+
+      // Run exact validation (re-fetch state for validation to ensure freshness)
+      const validationState = useSceneStore.getState();
+      const isSupported = await isPieceFullySupportedAsync(validationState, pieceId, 'exact');
+
+      if (isSupported) {
+        // Piece is now fully supported - mark for removal from ghost state
+        piecesToRemove.push(pieceId);
+      } else {
+        // Piece is NOT supported - mark as ghost
+        exactResults[pieceId] = false;
+      }
+
+      // DEV: Log support check with full diagnostic format
+      if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+        console.log('[SUPPORT_CHECK]', {
+          op: 'support_exact',
+          pieceId: pieceId,
+          layerId: piece.layerId,
+          reasons: {
+            collision: false,
+            spacing: false,
+            bounds: false,
+            supportFast: 'n/a',
+            supportExact: isSupported ? 'ok' : 'missing',
+          },
+          setHasBlockFrom: 'none', // Support NEVER blocks
+          ghost: isSupported ? '0' : '1',
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // Phase 3: Final SYNC set (check revision to avoid stale results)
+    const finalState = useSceneStore.getState();
+    if (finalState.ui.exactSupportRevision !== currentRevision) {
+      // Revision changed → results obsolete, abort
+      if (import.meta.env.DEV) {
+        console.warn('[recalculateExactSupport] Revision mismatch, aborting stale results', {
+          expected: currentRevision,
+          current: finalState.ui.exactSupportRevision,
+        });
+      }
+      return;
+    }
+
+    useSceneStore.setState((s) => {
+      const mergedResults = {
+        ...(s.ui.exactSupportResults ?? {}),
+        ...exactResults,
+      };
+
+      // Remove pieces that are now fully supported
+      for (const pieceId of piecesToRemove) {
+        delete mergedResults[pieceId];
+      }
+
+      return {
+        ui: {
+          ...s.ui,
+          exactSupportResults: mergedResults,
+          lastExactCheckAt: Date.now(),
+        },
+      };
+    });
   });
 }
 
@@ -1969,7 +1998,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
         bumpHandlesEpoch(draft);
 
         // After drag commit, trigger exact validation for support-driven ghosts
-        const movedIds = isGroupDrag ? selectedIds : [dragging.id];
+        // Clone IDs before passing to async function to avoid revoked proxy references
+        const movedIds = isGroupDrag ? [...selectedIds] : [dragging.id];
         Promise.resolve().then(async () => {
           await recalculateExactSupport(movedIds);
         });
@@ -2344,8 +2374,6 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
         const snap = takeSnapshot(draft);
 
-        const offsetX = 20;
-        const offsetY = 20;
         const newIds: ID[] = [];
 
         if (selectedIds.length === 1) {
@@ -2358,13 +2386,14 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
           // Try to find collision-free position with escape mechanism
           const maxEscapeAttempts = 5;
-          const escapeStep = 20; // mm
-          let finalX = originalPiece.position.x + offsetX;
-          let finalY = originalPiece.position.y + offsetY;
+          let finalX = originalPiece.position.x + DUPLICATE_OFFSET_MM;
+          let finalY = originalPiece.position.y + DUPLICATE_OFFSET_MM;
 
           for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
-            const testX = originalPiece.position.x + offsetX + attempt * escapeStep;
-            const testY = originalPiece.position.y + offsetY + attempt * escapeStep;
+            const testX =
+              originalPiece.position.x + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+            const testY =
+              originalPiece.position.y + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
 
             const clamped = clampToScene(
               testX,
@@ -2422,13 +2451,12 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
           // Try to find collision-free position for group
           const maxEscapeAttempts = 5;
-          const escapeStep = 20; // mm
-          let finalGroupDx = offsetX;
-          let finalGroupDy = offsetY;
+          let finalGroupDx = DUPLICATE_OFFSET_MM;
+          let finalGroupDy = DUPLICATE_OFFSET_MM;
 
           for (let attempt = 0; attempt < maxEscapeAttempts; attempt++) {
-            const testGroupX = bbox.x + offsetX + attempt * escapeStep;
-            const testGroupY = bbox.y + offsetY + attempt * escapeStep;
+            const testGroupX = bbox.x + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
+            const testGroupY = bbox.y + DUPLICATE_OFFSET_MM + attempt * DUPLICATE_OFFSET_MM;
 
             const clamped = clampToScene(
               testGroupX,
@@ -2782,6 +2810,19 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
 
         const piece = draft.scene.pieces[resizing.pieceId];
         if (!piece) return;
+
+        // DEV: Log resize guard checks
+        if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+          const willBlockLayer = draft.ui.activeLayer && piece.layerId !== draft.ui.activeLayer;
+          const willBlockLocked = draft.ui.layerLocked?.[piece.layerId] ?? false;
+          console.log('[RESIZE_GUARD]', {
+            pieceId: resizing.pieceId,
+            activeLayer: draft.ui.activeLayer,
+            pieceLayer: piece.layerId,
+            locked: willBlockLocked,
+            willBlock: willBlockLayer || willBlockLocked,
+          });
+        }
 
         // GUARD: Only allow resize if piece is on activeLayer and layer is not locked
         // If activeLayer is undefined, allow resize (for tests and simple scenes)
@@ -3170,6 +3211,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             }
 
             incResizeBlockCommitSuccess();
+
+            // Trigger exact support recalculation for resized piece
+            // Clone ID to avoid revoked proxy issues
+            const committedIds = [resizing.pieceId];
+
+            if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+              console.log('[RESIZE_COMMIT]', { committedIds });
+            }
+
+            // Use queueMicrotask to ensure post-resize state is visible to snapshot
+            queueMicrotask(() => recalculateExactSupport(committedIds));
           }
         } else if (!commit && piece) {
           // Rollback to origin (Escape pressed)
@@ -3622,6 +3674,17 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           draft.scene.revision++;
           pushHistory(draft, resizing.startSnapshot);
           autosave(takeSnapshot(draft));
+
+          // Trigger exact support recalculation for all resized pieces in group
+          // Clone IDs to avoid revoked proxy issues
+          const committedIds = [...selectedIds];
+
+          if (import.meta.env.DEV && (window as any).__DBG_DRAG__) {
+            console.log('[RESIZE_COMMIT]', { committedIds, source: 'groupResize' });
+          }
+
+          // Use queueMicrotask to ensure post-resize state is visible to snapshot
+          queueMicrotask(() => recalculateExactSupport(committedIds));
         }
 
         // Cancel any pending RAF callback to prevent late updates

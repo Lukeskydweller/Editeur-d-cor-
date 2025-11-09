@@ -241,6 +241,13 @@ export default function App() {
     }
   }, [scene.layerOrder.length, initSceneWithDefaults]);
 
+  // E2E Test Driver: expose window.__TEST__ if VITE_E2E=1
+  useEffect(() => {
+    if (import.meta.env.VITE_E2E === '1') {
+      import('./testdriver').then((m) => m.installTestDriver(useSceneStore));
+    }
+  }, []);
+
   // E2E API: expose window.__e2e if ?e2e=1 flag is set
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

@@ -3,13 +3,14 @@ import { useSceneStore } from '../../src/state/useSceneStore';
 import { rectsOverlap } from '../../src/lib/geom';
 import { pieceBBox } from '../../src/lib/geom';
 import type { ID } from '../../src/types/scene';
+import { DUPLICATE_OFFSET_MM } from '../../src/state/constants';
 
 /**
  * Tests for duplicate escape mechanism.
  *
  * Key behaviors:
- * - When duplicating a piece that would collide at default offset (+20,+20),
- *   the system applies additional escape offsets (+10,+10 per attempt, max 5 attempts)
+ * - When duplicating a piece that would collide at default offset (DUPLICATE_OFFSET_MM),
+ *   the system applies additional escape offsets (DUPLICATE_OFFSET_MM per attempt, max 5 attempts)
  *   to find a collision-free position
  * - Only checks same-layer collisions
  * - Works for both single piece and group duplication
@@ -131,8 +132,8 @@ describe('duplicate: escape mechanism', () => {
       if (!duplicate) return;
 
       // Duplicate should NOT be at default offset (collision avoided)
-      const defaultX = originalPos.x + 20;
-      const defaultY = originalPos.y + 20;
+      const defaultX = originalPos.x + DUPLICATE_OFFSET_MM;
+      const defaultY = originalPos.y + DUPLICATE_OFFSET_MM;
       const isAtDefault = duplicate.position.x === defaultX && duplicate.position.y === defaultY;
       expect(isAtDefault).toBe(false);
 
@@ -150,8 +151,9 @@ describe('duplicate: escape mechanism', () => {
       const original = store.addRectPiece(C1, mat, 60, 60, 100, 100, 0);
 
       // Place blockers at first two escape positions
-      const blocker1 = store.addRectPiece(C1, mat, 60, 60, 120, 120, 0); // Default +20,+20
-      const blocker2 = store.addRectPiece(C1, mat, 60, 60, 130, 130, 0); // Escape attempt 1: +30,+30
+      // With DUPLICATE_OFFSET_MM=60: attempt 0 at (100,100), attempt 1 at (160,160), attempt 2 at (220,220)
+      const blocker1 = store.addRectPiece(C1, mat, 60, 60, 100, 100, 0); // Default offset
+      const blocker2 = store.addRectPiece(C1, mat, 60, 60, 160, 160, 0); // Escape attempt 1
 
       // Duplicate
       store.selectPiece(original);
@@ -243,13 +245,13 @@ describe('duplicate: escape mechanism', () => {
       const duplicates = pieces.filter((p) => p.id !== piece1 && p.id !== piece2);
       expect(duplicates.length).toBe(2);
 
-      // Duplicates should be at default offset (+20,+20)
+      // Duplicates should be at default offset (DUPLICATE_OFFSET_MM)
       for (const dup of duplicates) {
         const original = pieces.find(
           (p) =>
             (p.id === piece1 || p.id === piece2) &&
-            p.position.x + 20 === dup.position.x &&
-            p.position.y + 20 === dup.position.y,
+            p.position.x + DUPLICATE_OFFSET_MM === dup.position.x &&
+            p.position.y + DUPLICATE_OFFSET_MM === dup.position.y,
         );
         expect(original).toBeDefined();
       }

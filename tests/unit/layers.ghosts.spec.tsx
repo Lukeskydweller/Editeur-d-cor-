@@ -197,6 +197,10 @@ describe('Layers: Ghost manipulation (AABB)', () => {
 
     // Try to resize the ghost piece
     selectPiece(c2PieceId);
+
+    // Set activeLayer to C2 (piece's layer) to allow resize
+    useSceneStore.setState((s) => ({ ui: { ...s.ui, activeLayer: C2 } }));
+
     const piece = useSceneStore.getState().scene.pieces[c2PieceId];
     const originalWidth = piece.size.w;
 

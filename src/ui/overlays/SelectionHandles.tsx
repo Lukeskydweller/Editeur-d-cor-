@@ -50,6 +50,7 @@ function HandlesRect({
         <rect
           key={i}
           data-handle={isIsotropic ? 'group-corner' : undefined}
+          data-testid={`handle-${handle}`}
           x={px - r}
           y={py - r}
           width={2 * r}
