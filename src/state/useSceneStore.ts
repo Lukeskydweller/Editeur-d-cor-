@@ -28,6 +28,7 @@ import { FIXED_LAYER_NAMES, isLayerName, type LayerName } from '@/constants/laye
 import { isLayerUnlocked } from '@/state/layers.gating';
 import { getActiveOrDefaultLayerId, layerNameFromId } from '@/state/layers.active';
 import { migrateSceneToThreeFixedLayers } from '@/state/layers.migration';
+import { isPieceFullySupported, getBelowLayerId } from '@/state/layers.support';
 import { devAssertNoLayerReassignment } from '@/state/invariants';
 import { isSceneFileV1, normalizeSceneFileV1, type SceneFileV1 } from '@/lib/io/schema';
 import { ProblemCode, type Problem, type Rot } from '@/core/contracts/scene';
@@ -3858,6 +3859,10 @@ export const getPieceCountByFixedLayer = (s: SceneStoreState): Record<LayerName,
  * useIsGhost
  * Returns ghost state for a specific piece (without triggering re-renders from full scene).
  * Returns { isGhost: boolean, hasBlock: boolean, hasWarn: boolean }
+ *
+ * A piece is ghost if:
+ * 1. It's in transient ghost state (during drag/resize with validation problems), OR
+ * 2. It's on C2/C3 and not fully supported by the layer below (committed ghost state)
  */
 export const useIsGhost = (pieceId: ID | undefined) => {
   return useSceneStore((s: SceneStoreState) => {
@@ -3865,16 +3870,34 @@ export const useIsGhost = (pieceId: ID | undefined) => {
       return { isGhost: false, hasBlock: false, hasWarn: false };
     }
 
+    // Check transient ghost state (during drag/resize operations)
     const ghost = s.ui.ghost;
-    const isGhost = ghost?.pieceId === pieceId;
+    const isTransientGhost = ghost?.pieceId === pieceId;
 
-    if (!isGhost || !ghost) {
+    if (isTransientGhost && ghost) {
+      const hasBlock = ghost.problems.some((p) => p.severity === 'BLOCK');
+      const hasWarn = ghost.problems.some((p) => p.severity === 'WARN') && !hasBlock;
+      return { isGhost: true, hasBlock, hasWarn };
+    }
+
+    // Check committed ghost state (support-driven for C2/C3)
+    const p = s.scene.pieces[pieceId];
+    if (!p) return { isGhost: false, hasBlock: false, hasWarn: false };
+
+    const belowLayerId = getBelowLayerId(s, p.layerId);
+    if (!belowLayerId) {
+      // C1: never ghost (no layer below)
       return { isGhost: false, hasBlock: false, hasWarn: false };
     }
 
-    const hasBlock = ghost.problems.some((p) => p.severity === 'BLOCK');
-    const hasWarn = ghost.problems.some((p) => p.severity === 'WARN') && !hasBlock;
+    // C2/C3: check support
+    const isSupported = isPieceFullySupported(s, pieceId, 'fast');
+    const isCommittedGhost = !isSupported;
 
-    return { isGhost, hasBlock, hasWarn };
+    return {
+      isGhost: isCommittedGhost,
+      hasBlock: false, // Committed ghosts don't block (manipulable)
+      hasWarn: false,
+    };
   });
 };
