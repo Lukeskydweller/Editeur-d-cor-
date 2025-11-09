@@ -43,7 +43,7 @@ export function validateNoOverlap(scene: SceneDraft): {
  */
 export function validateNoOverlapForCandidate(
   scene: SceneDraft,
-  candidateIds: ID[]
+  candidateIds: ID[],
 ): {
   ok: boolean;
   conflicts: Array<[ID, ID]>;
@@ -60,6 +60,76 @@ export function validateNoOverlapForCandidate(
       // Skip si les deux sont dans le groupe candidat (pas d'auto-collision interne)
       if (cand.has(pieceA.id) && cand.has(pieceB.id)) {
         continue;
+      }
+
+      const bboxA = pieceBBox(pieceA);
+      const bboxB = pieceBBox(pieceB);
+      if (rectsOverlap(bboxA, bboxB)) {
+        conflicts.push([pieceA.id, pieceB.id]);
+      }
+    }
+  }
+
+  return {
+    ok: conflicts.length === 0,
+    conflicts,
+  };
+}
+
+/**
+ * Variante same-layer pour drag/resize: teste uniquement les collisions intra-couche.
+ * - ignore les paires internes (a,b) si a∈candidateIds && b∈candidateIds
+ * - teste candidats ↔ voisins externes MAIS uniquement même couche
+ *
+ * @param scene - La scène
+ * @param candidateIds - IDs des pièces en cours de déplacement/redimensionnement
+ * @returns Validation avec conflicts filtrés par couche
+ */
+export function validateNoOverlapSameLayer(
+  scene: SceneDraft,
+  candidateIds: ID[],
+): {
+  ok: boolean;
+  conflicts: Array<[ID, ID]>;
+} {
+  const pieces = Object.values(scene.pieces);
+  const conflicts: Array<[ID, ID]> = [];
+  const cand = new Set(candidateIds);
+
+  // Get layer IDs of all candidates (should all be same layer)
+  const candidateLayerIds = new Set<ID>();
+  for (const id of candidateIds) {
+    const piece = scene.pieces[id];
+    if (piece?.layerId) {
+      candidateLayerIds.add(piece.layerId);
+    }
+  }
+
+  for (let i = 0; i < pieces.length; i++) {
+    for (let j = i + 1; j < pieces.length; j++) {
+      const pieceA = pieces[i];
+      const pieceB = pieces[j];
+
+      // Skip si les deux sont dans le groupe candidat (pas d'auto-collision interne)
+      if (cand.has(pieceA.id) && cand.has(pieceB.id)) {
+        continue;
+      }
+
+      // KEY FIX: Skip si les pièces sont sur des couches différentes
+      // Seulement tester les collisions intra-couche
+      const isACand = cand.has(pieceA.id);
+      const isBCand = cand.has(pieceB.id);
+
+      if (isACand || isBCand) {
+        // Au moins une pièce est candidate
+        // Vérifier que l'autre est sur la même couche
+        const candLayerId = isACand ? pieceA.layerId : pieceB.layerId;
+        const otherLayerId = isACand ? pieceB.layerId : pieceA.layerId;
+
+        if (candLayerId !== otherLayerId) {
+          // Couches différentes → pas de collision à tester
+          continue;
+        }
       }
 
       const bboxA = pieceBBox(pieceA);
@@ -102,7 +172,8 @@ export function validateMaterialOrientation(scene: SceneDraft): {
   ok: boolean;
   warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }>;
 } {
-  const warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }> = [];
+  const warnings: Array<{ pieceId: ID; materialId: ID; expectedDeg: number; actualDeg: number }> =
+    [];
 
   for (const p of Object.values(scene.pieces)) {
     const m = scene.materials[p.materialId];
@@ -112,7 +183,12 @@ export function validateMaterialOrientation(scene: SceneDraft): {
       const expected = (m.orientationDeg ?? 0) % 180;
       const actual = (p.rotationDeg ?? 0) % 180;
       if (expected !== actual) {
-        warnings.push({ pieceId: p.id, materialId: m.id, expectedDeg: expected, actualDeg: actual });
+        warnings.push({
+          pieceId: p.id,
+          materialId: m.id,
+          expectedDeg: expected,
+          actualDeg: actual,
+        });
       }
     }
   }

@@ -4,6 +4,7 @@ import type { SceneDraft, ID, Layer, Piece, Milli, Deg, MaterialRef } from '@/ty
 import {
   validateNoOverlap,
   validateNoOverlapForCandidate as validateNoOverlapForCandidateDraft,
+  validateNoOverlapSameLayer,
   validateInsideScene,
 } from '@/lib/sceneRules';
 import {
@@ -1617,7 +1618,18 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           testScene.pieces[dragging.id] = { ...piece, position: piecePos };
         }
 
-        const validation = validateNoOverlap(testScene);
+        // KEY FIX: Use same-layer validation for drag (no cross-layer blocking)
+        const validation = validateNoOverlapSameLayer(testScene, selectedIds);
+
+        // Dev logging: log blockers with their layer IDs
+        if (import.meta.env.DEV && !validation.ok && (window as any).__DBG_DRAG__) {
+          const blockerInfo = validation.conflicts.map(([a, b]) => ({
+            conflict: [a, b],
+            layerA: testScene.pieces[a]?.layerId,
+            layerB: testScene.pieces[b]?.layerId,
+          }));
+          console.log('[drag] BLOCK detected:', { blockerInfo, selectedIds });
+        }
 
         dragging.candidate = {
           x: finalX,
@@ -1739,8 +1751,8 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
             p.position = { x: (commitPos.x + dx) as Milli, y: (commitPos.y + dy) as Milli };
           }
 
-          // Valider chevauchements: ignorer auto-collisions internes au groupe
-          const overlapResult = validateNoOverlapForCandidateDraft(sceneCandidate, selectedIds);
+          // KEY FIX: Use same-layer validation (no cross-layer blocking)
+          const overlapResult = validateNoOverlapSameLayer(sceneCandidate, selectedIds);
 
           // Autres validations sur la scène candidate
           const insideResult = validateInsideScene(sceneCandidate);
@@ -1761,6 +1773,16 @@ export const useSceneStore = create<SceneState & SceneActions>((set) => ({
           ];
 
           const hasBlock = allProblems.length > 0;
+
+          // Dev logging: log blockers with their layer IDs
+          if (import.meta.env.DEV && hasBlock && (window as any).__DBG_DRAG__) {
+            const blockerInfo = overlapResult.conflicts.map(([a, b]) => ({
+              conflict: [a, b],
+              layerA: sceneCandidate.pieces[a]?.layerId,
+              layerB: sceneCandidate.pieces[b]?.layerId,
+            }));
+            console.log('[endDrag] BLOCK detected:', { blockerInfo, selectedIds, allProblems });
+          }
 
           if (hasBlock) {
             // Rollback: restaurer positions commit
